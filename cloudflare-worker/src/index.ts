@@ -6,30 +6,72 @@ export interface Env {
   BOT_SECRET_KEY: string; 
 }
 
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
+
+// Stateless mock of the state for the worker (in a real app, use Cloudflare KV or D1)
+let memoryState = {
+  settings: {
+    volatilityTarget: 0.045,
+    pullbackTarget: 0.02,
+    netBuyinTarget: 50000,
+    secretLoaded: false,
+    secretName: 'Loaded via Cloudflare ENV',
+    contractAddress: "WLTxyz789ABCdefGHIjklMNOpqrSTUvwxYZ1234567"
+  },
+  internalAccs: [] 
+};
+
 export default {
   async fetch(request: Request, env: Env, ctx: any): Promise<Response> {
-    // 1. Verify it's a POST request (Helius Webhook)
-    if (request.method !== 'POST') {
-      return new Response('Method Not Allowed', { status: 405 });
+    const url = new URL(request.url);
+
+    // Handle CORS preflight requests
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
     }
 
-    try {
-      // 2. Parse the payload pushed by Helius
-      const payload: any[] = await request.json();
-
-      // 3. Instantly return a 200 OK so Helius knows we received it
-      // We will perform the heavy trading logic in the background!
-      const response = new Response('Webhook received', { status: 200 });
-
-      // 4. Use ctx.waitUntil to process the trade asynchronously without making Helius wait
-      ctx.waitUntil(processTradingLogic(payload, env));
-
-      return response;
-
-    } catch (e) {
-      console.error(e);
-      return new Response('Bad Request', { status: 400 });
+    // --- DASHBOARD API ENDPOINTS ---
+    if (url.pathname === '/api/state' && request.method === 'GET') {
+      // Mock checking if the secret is valid in ENV
+      memoryState.settings.secretLoaded = !!env.BOT_SECRET_KEY;
+      return new Response(JSON.stringify(memoryState), { 
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+      });
     }
+
+    if (url.pathname === '/api/settings' && request.method === 'POST') {
+      try {
+        const body: any = await request.json();
+        if (body.volatilityTarget) memoryState.settings.volatilityTarget = parseFloat(body.volatilityTarget) / 100;
+        if (body.pullbackTarget) memoryState.settings.pullbackTarget = parseFloat(body.pullbackTarget) / 100;
+        if (body.contractAddress) memoryState.settings.contractAddress = body.contractAddress;
+        
+        return new Response(JSON.stringify({ success: true }), { 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      } catch (e) {
+        return new Response('Invalid JSON', { status: 400, headers: corsHeaders });
+      }
+    }
+
+    // --- HELIUS WEBHOOK RECEIVER ---
+    if (url.pathname === '/webhook' && request.method === 'POST') {
+      try {
+        const payload: any[] = await request.json();
+        const response = new Response('Webhook received', { status: 200, headers: corsHeaders });
+        ctx.waitUntil(processTradingLogic(payload, env));
+        return response;
+      } catch (e) {
+        console.error(e);
+        return new Response('Bad Request', { status: 400, headers: corsHeaders });
+      }
+    }
+
+    return new Response('Not Found', { status: 404, headers: corsHeaders });
   }
 };
 
@@ -39,18 +81,24 @@ async function processTradingLogic(txs: any[], env: Env) {
     console.log(`Processing Tx: ${tx.signature}`);
     
     // Example: Check if the transaction represents a massive buy order
-    // Helius parses token transfers safely for you to inspect 
     const nativeInputAmount = tx?.events?.swap?.nativeInput?.amount;
     
-    if (nativeInputAmount > 1000000000) { // e.g. > 1000 USDC (6 decimals)
+    if (nativeInputAmount > 1000000000) { 
       console.log('Whale Buy Detected! Executing algorithm pullback protocol...');
       
-      const connection = new Connection(env.RPC_URL);
-      const secretKey = Uint8Array.from(JSON.parse(env.BOT_SECRET_KEY));
-      const botKeypair = Keypair.fromSecretKey(secretKey);
-
-      // Build & Send the transaction using your standard Logic here
-      // ...
+      const connection = new Connection(env.RPC_URL || "https://api.mainnet-beta.solana.com");
+      try {
+         const secretRaw = env.BOT_SECRET_KEY.trim();
+         const secretKey = secretRaw.startsWith('[') 
+             ? Uint8Array.from(JSON.parse(secretRaw))
+             : null; // Implement base58 decode if using base58 in worker
+         if (secretKey) {
+             const botKeypair = Keypair.fromSecretKey(secretKey);
+             // Logic...
+         }
+      } catch(e) {
+         console.error("Invalid Secret in Worker ENV");
+      }
     }
   }
 }

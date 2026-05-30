@@ -236,13 +236,15 @@ export default function App() {
   const [pullbackTarget, setPullbackTarget] = useState('2.0');
   const [secretName, setSecretName] = useState('');
   const [contractAddress, setContractAddress] = useState('WLTxyz789ABCdefGHIjklMNOpqrSTUvwxYZ1234567');
+  const [workerUrl, setWorkerUrl] = useState('');
   
   const ITEMS_PER_PAGE = 50;
 
   // --- BACKEND DATA POLLING ---
   const fetchState = async () => {
     try {
-      const res = await fetch('/api/state');
+      const endpoint = workerUrl ? `${workerUrl.replace(/\/$/, "")}/api/state` : '/api/state';
+      const res = await fetch(endpoint);
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);
       }
@@ -266,7 +268,7 @@ export default function App() {
     // Poll the backend every 3 seconds to simulate a live trading terminal
     const interval = setInterval(fetchState, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [workerUrl]);
 
   const handleRefresh = () => {
     fetchState();
@@ -274,7 +276,8 @@ export default function App() {
 
   const handleSaveConfig = async () => {
     try {
-      await fetch('/api/settings', {
+      const endpoint = workerUrl ? `${workerUrl.replace(/\/$/, "")}/api/settings` : '/api/settings';
+      await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -477,6 +480,18 @@ export default function App() {
               onChange={(e) => setContractAddress(e.target.value)} 
               className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm font-mono focus:border-blue-500 outline-none transition-colors" 
             />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Cloudflare Worker API URL (Optional)</label>
+            <input 
+              type="text" 
+              value={workerUrl} 
+              onChange={(e) => setWorkerUrl(e.target.value)} 
+              placeholder="e.g. https://solana-bot.<yourname>.workers.dev"
+              className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm font-mono focus:border-blue-500 outline-none transition-colors" 
+            />
+            <p className="text-[10px] text-slate-500 mt-1">If provided, this dashboard acts as a frontend to your deployed Worker.</p>
           </div>
           
           <div>
