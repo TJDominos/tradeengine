@@ -1,0 +1,283 @@
+import express from "express";
+import path from "path";
+import { createServer as createViteServer } from "vite";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import bs58 from "bs58";
+import dotenv from "dotenv";
+import crypto from "crypto";
+
+dotenv.config();
+
+// --- SOLANA CONNECTION & CONFIG ---
+let CURRENT_CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "WLTxyz789ABCdefGHIjklMNOpqrSTUvwxYZ1234567";
+const TOTAL_WLT_SUPPLY = 1000000000;
+
+const RPC_POOL = [
+  { label: "Chainstack", url: "https://solana-mainnet.core.chainstack.com/d1088d42134bb8a7518df14af67cf958" },
+  { label: "Helius", url: "https://mainnet.helius-rpc.com/?api-key=fda76be1-7d09-4880-80db-837831934193" },
+  { label: "Tatum", url: "https://solana-mainnet.gateway.tatum.io", headers: { "x-api-key": "t-6919e1f73b9bb09e10628f3d-215c92a1167e401388dc0302" } }
+];
+
+function getConnection() {
+  const node = RPC_POOL[Math.floor(Math.random() * RPC_POOL.length)];
+  const connection = new Connection(node.url, node.headers ? { httpHeaders: node.headers } : undefined);
+  return { connection, label: node.label };
+}
+
+// Attempt to load the Bot Wallet from Environment
+let primaryWallet: Keypair | null = null;
+let primaryWalletPubkeyStr = "Not Configured";
+let activeSecretName = "BOT_SECRET_KEY";
+
+function loadWalletFromEnv(secretName: string) {
+  const envSecret = process.env[secretName];
+  if (envSecret) {
+    try {
+      const rawSecret = envSecret.trim();
+      if (rawSecret.startsWith("[")) {
+        primaryWallet = Keypair.fromSecretKey(new Uint8Array(JSON.parse(rawSecret)));
+      } else {
+        primaryWallet = Keypair.fromSecretKey(bs58.decode(rawSecret));
+      }
+      primaryWalletPubkeyStr = primaryWallet.publicKey.toBase58();
+      console.log(`Successfully loaded primary wallet from env ${secretName}: ${primaryWalletPubkeyStr}`);
+      return true;
+    } catch (error) {
+      console.error(`Failed to parse secret from env var ${secretName}.`);
+    }
+  }
+  return false;
+}
+
+// Initial load check
+loadWalletFromEnv(activeSecretName);
+
+// Global in-memory state tracking
+const engineState: any = {
+  internalAccs: [],
+  outsiderAccs: [],
+  logs: [],
+  stats: {
+    price: 0.0452,
+    maPrice: 0.0450,
+    totalWlt: TOTAL_WLT_SUPPLY,
+    liqUsdc: 0,
+    fdv: 0,
+    totalOutsiders: 0
+  },
+  settings: {
+    volatilityTarget: 0.045,
+    pullbackTarget: 0.02,
+    netBuyinTarget: 50000,
+    secretLoaded: primaryWallet !== null,
+    secretName: activeSecretName, // Send the name to UI, not the key!
+    contractAddress: CURRENT_CONTRACT_ADDRESS,
+    rpcUrl: "Mainnet RPC Pool (3 Nodes)"
+  }
+};
+
+// Polling function to refresh data from the Solana Blockchain
+async function syncBlockchainData() {
+  const { connection, label: rpcLabel } = getConnection();
+  engineState.settings.rpcUrl = `Pool Active: ${rpcLabel}`;
+
+  try {
+    if (primaryWallet) {
+      // Generate 5 Derived Trading Sub-Accounts deterministically from the primary wallet seed
+      const seed = primaryWallet.secretKey.slice(0, 32);
+      const derivedKeypairs: Keypair[] = [];
+      for (let i = 0; i < 5; i++) {
+        const hash = crypto.createHash('sha256').update(seed).update(Buffer.from([i])).digest();
+        derivedKeypairs.push(Keypair.fromSeed(hash.slice(0, 32)));
+      }
+
+      // Fetch balances for the 5 derived accounts concurrently
+      const balances = await Promise.all(
+        derivedKeypairs.map(kp => connection.getBalance(kp.publicKey))
+      );
+
+      const loadedAccounts = derivedKeypairs.map((kp, index) => {
+        const address = kp.publicKey.toBase58();
+        const existingAcc = engineState.internalAccs.find((a: any) => a.address === address);
+        return {
+          id: `int-${index}`,
+          wallet: "Derived Sub-Account",
+          address: address,
+          mint: "Native SOL",
+          tag: `Trading Bot #${index + 1}`,
+          usdc: 0, // Mock: Would normally fetch ATA balance here
+          sol: balances[index] / 1e9,
+          wlt: 0, 
+          deposit: 0,
+          profit: 0,
+          usdcWithdraw: 0,
+          wltWithdraw: 0,
+          selected: existingAcc?.selected || false 
+        };
+      });
+
+      engineState.internalAccs = loadedAccounts;
+    }
+
+    // 2. Read the Token Contract Address and Extract External Accounts (Outsiders)
+    // We do this by getting recent signatures for the contract address
+    if (CURRENT_CONTRACT_ADDRESS && CURRENT_CONTRACT_ADDRESS !== "WLTxyz789ABCdefGHIjklMNOpqrSTUvwxYZ1234567") { // Exclude placeholder
+      try {
+        const contractPubkey = new PublicKey(CURRENT_CONTRACT_ADDRESS);
+        const signatures = await connection.getSignaturesForAddress(contractPubkey, { limit: 15 }); // Keep limit low to avoid RPC rate limits
+        
+        const outsiderMap = new Map();
+        
+        if (signatures.length > 0) {
+          const parsedTxs = await connection.getParsedTransactions(signatures.map(s => s.signature), { maxSupportedTransactionVersion: 0 });
+          
+          parsedTxs.forEach((tx) => {
+             if (tx && tx.transaction && tx.transaction.message && tx.transaction.message.accountKeys) {
+               // Find main signer (fee payer -> usually the outsider initiating the tx)
+               const signer = tx.transaction.message.accountKeys.find(k => k.signer)?.pubkey.toBase58();
+               if (signer && signer !== primaryWalletPubkeyStr) {
+                  if (!outsiderMap.has(signer)) {
+                    outsiderMap.set(signer, {
+                      id: `out-${signer.substring(0,8)}...`,
+                      tag: `Ext-Trader-${outsiderMap.size + 1}`,
+                      address: signer,
+                      wlt: Math.random() * 5000,   // Mocked actual holdings for UI demo
+                      usdcBuyin: Math.random() * 500,
+                      usdc: Math.random() * 100,
+                      deposit: 0,
+                      profit: (Math.random() - 0.5) * 50,
+                      usdcWithdraw: 0,
+                      wltWithdraw: 0
+                    });
+                  }
+               }
+             }
+          });
+        }
+        
+        engineState.outsiderAccs = Array.from(outsiderMap.values());
+        engineState.stats.totalOutsiders = outsiderMap.size;
+      } catch (e: any) {
+         console.error("Error fetching outsiders:", e.message);
+      }
+    }
+
+    // Generate random mocked price ticks for the UI simulation (since we are not querying an actual DEX pool here)
+    const marketShift = (Math.random() - 0.48) * 0.002;
+    engineState.stats.price += marketShift;
+    engineState.stats.price = Math.max(0.01, engineState.stats.price);
+    engineState.stats.fdv = engineState.stats.price * engineState.stats.totalWlt;
+    engineState.stats.maPrice = engineState.stats.maPrice + (engineState.stats.price - engineState.stats.maPrice) * 0.05;
+    
+  } catch (error) {
+    console.error("Sync error:", error);
+  }
+}
+
+// --- TRADING ALGORITHM LOOP ---
+setInterval(() => {
+  syncBlockchainData();
+}, 8000); // Poll every 8 seconds
+
+// --- EXPRESS SERVER SETUP ---
+async function startServer() {
+  // Fire initial sync
+  await syncBlockchainData();
+  const app = express();
+  const PORT = 3000;
+
+  app.use(express.json());
+
+  // API: Get initial engine state
+  app.get("/api/state", (req, res) => {
+    res.json(engineState);
+  });
+
+  // API: Force refresh (just returns current state, UI handles update)
+  app.post("/api/sync", (req, res) => {
+    res.json(engineState);
+  });
+
+  // API: Update settings
+  app.post("/api/settings", (req, res) => {
+    const { volatilityTarget, pullbackTarget, secret, netBuyinTarget, contractAddress } = req.body;
+    if (volatilityTarget) engineState.settings.volatilityTarget = parseFloat(volatilityTarget) / 100;
+    if (pullbackTarget) engineState.settings.pullbackTarget = parseFloat(pullbackTarget) / 100;
+    if (contractAddress) {
+        CURRENT_CONTRACT_ADDRESS = contractAddress;
+        engineState.settings.contractAddress = contractAddress;
+    }
+    
+    if (secret) {
+        const rawSecret = secret.trim();
+        let success = false;
+        engineState.settings.secretName = "Loaded via UI"; // Default mask
+
+        try {
+            // Check if it's a raw JSON array
+            if (rawSecret.startsWith("[")) {
+                primaryWallet = Keypair.fromSecretKey(new Uint8Array(JSON.parse(rawSecret)));
+                primaryWalletPubkeyStr = primaryWallet.publicKey.toBase58();
+                engineState.settings.secretName = "Raw JSON Key (Memory)";
+                success = true;
+            } 
+            // Check if it's likely a raw Base58 string (Solana Private Keys are typically 87-88 chars)
+            else if (rawSecret.length > 50 && !rawSecret.includes("_")) {
+                primaryWallet = Keypair.fromSecretKey(bs58.decode(rawSecret));
+                primaryWalletPubkeyStr = primaryWallet.publicKey.toBase58();
+                engineState.settings.secretName = "Raw Base58 Key (Memory)";
+                success = true;
+            } 
+            // Otherwise, treat it as an Environment Variable name
+            else {
+                activeSecretName = rawSecret;
+                engineState.settings.secretName = rawSecret; 
+                success = loadWalletFromEnv(rawSecret);
+            }
+        } catch(e) {
+            console.error("Failed to parse secret as Key or Env Var", e);
+        }
+        
+        engineState.settings.secretLoaded = success;
+        
+        if (success) {
+           syncBlockchainData(); // Re-sync with new derived accounts
+        }
+    } else if (contractAddress) {
+        syncBlockchainData(); // Re-sync if connection or contract changed
+    }
+    
+    res.json({ success: true, settings: engineState.settings });
+  });
+
+  // API: Toggle account
+  app.post("/api/toggleAccount", (req, res) => {
+    const { id } = req.body;
+    const acc = engineState.internalAccs.find((a: any) => a.id === id);
+    if (acc) {
+      acc.selected = !acc.selected;
+    }
+    res.json(engineState);
+  });
+
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`WLT Execution Engine backend running on http://localhost:${PORT}`);
+  });
+}
+
+startServer();

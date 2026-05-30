@@ -1,0 +1,10 @@
+name = "wlt-trading-worker"
+main = "src/index.ts"
+compatibility_date = "2024-04-05"
+node_compat = true
+
+# Secrets (configured via `wrangler secret put <NAME>`)
+# - BOT_SECRET_KEY
+
+[vars]
+RPC_URL = "https://api.mainnet-beta.solana.com"
