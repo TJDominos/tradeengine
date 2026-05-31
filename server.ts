@@ -314,12 +314,22 @@ async function startServer() {
 
       const proxyRes = await fetch(targetUrl, fetchOptions);
       const data = await proxyRes.text();
+      const contentType = proxyRes.headers.get("content-type");
 
       try {
         const parsed = JSON.parse(data);
         res.status(proxyRes.status).json(parsed);
       } catch (err) {
-        res.status(proxyRes.status).send(data);
+        if (contentType && contentType.includes("application/json")) {
+           // Should have parsed if it's json, but maybe invalid
+           res.status(proxyRes.status).send(data);
+        } else {
+           // We got HTML or text when we expected JSON.
+           res.status(proxyRes.status).json({
+             error: `Received non-JSON response from worker. Check your Worker URL.`,
+             details: data.slice(0, 100) + "..."
+           });
+        }
       }
     } catch (e: any) {
       console.error("Proxy error:", e);
