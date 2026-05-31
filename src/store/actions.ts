@@ -50,21 +50,24 @@ export const createActions = (set: any, get: any) => ({
   },
 
   fetchState: async () => {
-    const { workerUrl, contractAddress } = get();
+    const { workerUrl } = get();
     try {
       let formattedUrl = workerUrl.trim();
       if (formattedUrl && !formattedUrl.startsWith('http')) {
         formattedUrl = 'https://' + formattedUrl;
       }
 
-      const endpoint = formattedUrl ? `${formattedUrl.endsWith('/') ? formattedUrl.slice(0, -1) : formattedUrl}/api/state` : '/api/state';
+      const endpoint = formattedUrl 
+        ? `/api/proxy/api/state?workerUrl=${encodeURIComponent(formattedUrl)}` 
+        : '/api/state';
+        
       const res = await fetch(endpoint);
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);
       }
       const contentType = res.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
-        throw new Error("Received non-JSON response from /api/state");
+        throw new Error("Received non-JSON response from backend");
       }
       const data = await res.json();
       
@@ -92,7 +95,10 @@ export const createActions = (set: any, get: any) => ({
         formattedUrl = 'https://' + formattedUrl;
       }
       
-      const endpoint = formattedUrl ? `${formattedUrl.endsWith('/') ? formattedUrl.slice(0, -1) : formattedUrl}/api/settings` : '/api/settings';
+      const endpoint = formattedUrl 
+        ? `/api/proxy/api/settings?workerUrl=${encodeURIComponent(formattedUrl)}` 
+        : '/api/settings';
+        
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -122,7 +128,9 @@ export const createActions = (set: any, get: any) => ({
         formattedUrl = 'https://' + formattedUrl;
       }
       
-      const endpoint = formattedUrl ? `${formattedUrl.endsWith('/') ? formattedUrl.slice(0, -1) : formattedUrl}/api/trade` : '/api/trade';
+      const endpoint = formattedUrl 
+        ? `/api/proxy/api/trade?workerUrl=${encodeURIComponent(formattedUrl)}` 
+        : '/api/trade';
       
       const res = await fetch(endpoint, {
         method: "POST",

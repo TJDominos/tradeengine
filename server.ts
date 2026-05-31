@@ -278,6 +278,47 @@ async function startServer() {
     res.json(engineState);
   });
 
+  // Provide a proxy to avoid CORS when talking to external worker URL
+  app.use("/api/proxy", async (req, res) => {
+    try {
+      const workerUrl = req.query.workerUrl as string;
+      if (!workerUrl) {
+        return res.status(400).json({ error: "Missing workerUrl query param" });
+      }
+
+      const targetPath = workerUrl.endsWith('/') ? workerUrl.slice(0, -1) : workerUrl;
+      // remove the `?workerUrl=...` from req.url so we only append the path
+      const urlObj = new URL(req.url, `http://${req.headers.host}`);
+      urlObj.searchParams.delete('workerUrl');
+      const targetUrl = `${targetPath}${urlObj.pathname}${urlObj.search}`;
+
+      const fetchOptions: any = {
+        method: req.method,
+        headers: {
+          "Content-Type": req.header("Content-Type") || "application/json",
+          "Accept": "application/json"
+        }
+      };
+
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        fetchOptions.body = JSON.stringify(req.body);
+      }
+
+      const proxyRes = await fetch(targetUrl, fetchOptions);
+      const data = await proxyRes.text();
+
+      try {
+        const parsed = JSON.parse(data);
+        res.status(proxyRes.status).json(parsed);
+      } catch (err) {
+        res.status(proxyRes.status).send(data);
+      }
+    } catch (e: any) {
+      console.error("Proxy error:", e);
+      res.status(500).json({ error: "Could not proxy request: " + e.message });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

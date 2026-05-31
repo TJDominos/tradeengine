@@ -38,100 +38,153 @@ let memoryState: any = {
 
 export default {
   async fetch(request: Request, env: Env, ctx: any): Promise<Response> {
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
 
-    // Handle CORS preflight requests
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders });
-    }
-
-    // Load from KV if available, else use memory mock
-    let state = memoryState;
-    if (env.TRADING_KV) {
-      const storedState = await env.TRADING_KV.get('engineState', 'json');
-      if (storedState) {
-        state = { ...memoryState, ...storedState };
+      // Handle CORS preflight requests
+      if (request.method === 'OPTIONS') {
+        return new Response(null, { headers: corsHeaders });
       }
-    }
 
-    // --- DASHBOARD API ENDPOINTS ---
-    if (url.pathname === '/api/state' && request.method === 'GET') {
-      // Mock checking if the secret is valid in ENV
-      state.settings.secretLoaded = !!env.BOT_SECRET_KEY;
-      return new Response(JSON.stringify(state), { 
+      // Load from KV if available, else use memory mock
+      let state = memoryState;
+      if (env.TRADING_KV) {
+        const storedState = await env.TRADING_KV.get('engineState', 'json');
+        if (storedState) {
+          state = { ...memoryState, ...storedState };
+        }
+      }
+
+      // --- DASHBOARD API ENDPOINTS ---
+      if (url.pathname === '/api/state' && request.method === 'GET') {
+        // Mock checking if the secret is valid in ENV
+        state.settings.secretLoaded = !!env.BOT_SECRET_KEY;
+        
+        // Compute internal sub-accounts if secret is configured and not yet parsed
+        if (env.BOT_SECRET_KEY && state.internalAccs.length === 0) {
+          try {
+             const secretRaw = env.BOT_SECRET_KEY.trim();
+             let secretKey;
+             if (secretRaw.startsWith('[')) {
+               secretKey = new Uint8Array(JSON.parse(secretRaw));
+             } else {
+               // Fallback if needed, though without bs58 we assume JSON array
+             }
+             
+             if (secretKey) {
+               const primaryWallet = Keypair.fromSecretKey(secretKey);
+               const seed = primaryWallet.secretKey.slice(0, 32);
+               
+               for (let i = 0; i < 5; i++) {
+                  const data = new Uint8Array(seed.length + 1);
+                  data.set(seed, 0);
+                  data.set([i], seed.length);
+                  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+                  const hashArray = new Uint8Array(hashBuffer);
+                  const k = Keypair.fromSeed(hashArray.slice(0, 32));
+                  state.internalAccs.push({
+                      id: `int-${i}`,
+                      wallet: "Derived Sub-Account",
+                      address: k.publicKey.toBase58(),
+                      mint: "Native SOL",
+                      tag: `Trading Bot #${i + 1}`,
+                      usdc: 0, 
+                      sol: 0, 
+                      wlt: 0, 
+                      deposit: 0,
+                      profit: 0,
+                      usdcWithdraw: 0,
+                      wltWithdraw: 0,
+                      selected: false 
+                  });
+               }
+             }
+          } catch(e) {
+             console.error("Error generating sub-accounts", e);
+          }
+        }
+
+        return new Response(JSON.stringify(state), { 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        });
+      }
+
+      if (url.pathname === '/api/settings' && request.method === 'POST') {
+        try {
+          const body: any = await request.json();
+          if (body.volatilityTarget) state.settings.volatilityTarget = parseFloat(body.volatilityTarget) / 100;
+          if (body.pullbackTarget) state.settings.pullbackTarget = parseFloat(body.pullbackTarget) / 100;
+          if (body.contractAddress) state.settings.contractAddress = body.contractAddress;
+          
+          if (env.TRADING_KV) {
+             await env.TRADING_KV.put('engineState', JSON.stringify(state));
+          } else {
+             memoryState = state;
+          }
+
+          return new Response(JSON.stringify({ success: true }), { 
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        } catch (e) {
+          return new Response('Invalid JSON', { status: 400, headers: corsHeaders });
+        }
+      }
+
+      if (url.pathname === '/api/trade' && request.method === 'POST') {
+        try {
+          const body: any = await request.json();
+          console.log("Trade Request Received:", body);
+          
+          // Log the transaction
+          const newLog = {
+            id: Date.now().toString(),
+            time: new Date().toISOString().split('T')[1].slice(0, 8),
+            tag: body.symbol || "Unknown",
+            address: "Worker API Test",
+            action: body.action || "Trade",
+            amount: "N/A",
+            status: "Success",
+            txId: "local-" + Math.random().toString(36).substring(7)
+          };
+          
+          state.logs.unshift(newLog);
+          if (state.logs.length > 50) state.logs.pop(); // keep last 50
+          
+          if (env.TRADING_KV) {
+             await env.TRADING_KV.put('engineState', JSON.stringify(state));
+          } else {
+             memoryState = state;
+          }
+
+          return new Response(JSON.stringify({ success: true, message: `Trade executed & logged for ${body.symbol}` }), {
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        } catch (e) {
+          return new Response('Invalid JSON', { status: 400, headers: corsHeaders });
+        }
+      }
+
+      // --- HELIUS WEBHOOK RECEIVER ---
+      if (url.pathname === '/webhook' && request.method === 'POST') {
+        try {
+          const payload: any[] = await request.json();
+          const response = new Response('Webhook received', { status: 200, headers: corsHeaders });
+          ctx.waitUntil(processTradingLogic(payload, env));
+          return response;
+        } catch (e) {
+          console.error(e);
+          return new Response('Bad Request', { status: 400, headers: corsHeaders });
+        }
+      }
+
+      return new Response('Not Found', { status: 404, headers: corsHeaders });
+    } catch (err: any) {
+      console.error(err);
+      return new Response(JSON.stringify({ error: err.message }), { 
+        status: 500, 
         headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
       });
     }
-
-    if (url.pathname === '/api/settings' && request.method === 'POST') {
-      try {
-        const body: any = await request.json();
-        if (body.volatilityTarget) state.settings.volatilityTarget = parseFloat(body.volatilityTarget) / 100;
-        if (body.pullbackTarget) state.settings.pullbackTarget = parseFloat(body.pullbackTarget) / 100;
-        if (body.contractAddress) state.settings.contractAddress = body.contractAddress;
-        
-        if (env.TRADING_KV) {
-           await env.TRADING_KV.put('engineState', JSON.stringify(state));
-        } else {
-           memoryState = state;
-        }
-
-        return new Response(JSON.stringify({ success: true }), { 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
-        });
-      } catch (e) {
-        return new Response('Invalid JSON', { status: 400, headers: corsHeaders });
-      }
-    }
-
-    if (url.pathname === '/api/trade' && request.method === 'POST') {
-      try {
-        const body: any = await request.json();
-        console.log("Trade Request Received:", body);
-        
-        // Log the transaction
-        const newLog = {
-          id: Date.now().toString(),
-          time: new Date().toISOString().split('T')[1].slice(0, 8),
-          tag: body.symbol || "Unknown",
-          address: "Worker API Test",
-          action: body.action || "Trade",
-          amount: "N/A",
-          status: "Success",
-          txId: "local-" + Math.random().toString(36).substring(7)
-        };
-        
-        state.logs.unshift(newLog);
-        if (state.logs.length > 50) state.logs.pop(); // keep last 50
-        
-        if (env.TRADING_KV) {
-           await env.TRADING_KV.put('engineState', JSON.stringify(state));
-        } else {
-           memoryState = state;
-        }
-
-        return new Response(JSON.stringify({ success: true, message: `Trade executed & logged for ${body.symbol}` }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
-      } catch (e) {
-        return new Response('Invalid JSON', { status: 400, headers: corsHeaders });
-      }
-    }
-
-    // --- HELIUS WEBHOOK RECEIVER ---
-    if (url.pathname === '/webhook' && request.method === 'POST') {
-      try {
-        const payload: any[] = await request.json();
-        const response = new Response('Webhook received', { status: 200, headers: corsHeaders });
-        ctx.waitUntil(processTradingLogic(payload, env));
-        return response;
-      } catch (e) {
-        console.error(e);
-        return new Response('Bad Request', { status: 400, headers: corsHeaders });
-      }
-    }
-
-    return new Response('Not Found', { status: 404, headers: corsHeaders });
   }
 };
 
