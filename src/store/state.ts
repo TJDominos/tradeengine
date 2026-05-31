@@ -24,9 +24,11 @@ export const initialState: AppState = {
   
   volTarget: '4.5',
   pullbackTarget: '2.0',
+  secretName: '',
   contractAddress: '',
   workerUrl: '',
   
   savedContractAddresses: getSavedArr('savedContractAddresses'),
   savedWorkerUrls: getSavedArr('savedWorkerUrls'),
+  savedSecretNames: getSavedArr('savedSecretNames'),
 };

@@ -1,18 +1,21 @@
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+import bs58 from 'bs58';
 
 export interface Env {
   // Configured in Cloudflare Dashboard -> Settings -> Variables
   RPC_URL: string;
   BOT_SECRET_KEY: string; 
+  PVK3: string;
+  Frontend: string;
   TRADING_KV: any; // Cloudflare KV Namespace
 }
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "https://tradebot-pro-191976602057.us-west1.run.app",
+const corsHeaders = (origin: string | null) => ({
+  "Access-Control-Allow-Origin": origin || "*",
   "Access-Control-Allow-Methods": "GET,HEAD,POST,PUT,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type,Authorization",
   "Access-Control-Max-Age": "86400",
-};
+});
 
 function handleOptions(request: Request) {
   const headers = request.headers;
@@ -21,7 +24,7 @@ function handleOptions(request: Request) {
     headers.get("Access-Control-Request-Method") !== null &&
     headers.get("Access-Control-Request-Headers") !== null
   ) {
-    return new Response(null, { headers: corsHeaders });
+    return new Response(null, { headers: corsHeaders(headers.get("Origin")) });
   }
   return new Response(null, { headers: { Allow: "GET,HEAD,POST,PUT,DELETE,OPTIONS" } });
 }
@@ -55,13 +58,27 @@ export default {
     if (request.method === "OPTIONS") {
       return handleOptions(request);
     }
+    
+    const url = new URL(request.url);
+    if (url.pathname !== "/webhook") {
+      const authHeader = request.headers.get("Authorization");
+      if (authHeader !== `Bearer ${env.Frontend}`) {
+        return new Response(JSON.stringify({ error: "Unauthorized" }), {
+          status: 401,
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": request.headers.get("Origin") || "*",
+          },
+        });
+      }
+    }
 
     // Your existing request handling logic here
     const response = await handleRequest(request, env, ctx);
 
     // Add CORS headers to every response
     const newHeaders = new Headers(response.headers);
-    newHeaders.set("Access-Control-Allow-Origin", "https://tradebot-pro-191976602057.us-west1.run.app");
+    newHeaders.set("Access-Control-Allow-Origin", request.headers.get("Origin") || "*");
     newHeaders.append("Vary", "Origin");
 
     return new Response(response.body, {
@@ -87,18 +104,30 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
 
       // --- DASHBOARD API ENDPOINTS ---
       if (url.pathname === '/api/state' && request.method === 'GET') {
-        // Mock checking if the secret is valid in ENV
-        state.settings.secretLoaded = !!env.BOT_SECRET_KEY;
+        const envKey = state.settings.secretName;
+        // If the secretName matches an ENV key
+        let rawKey = envKey && (env as any)[envKey] ? (env as any)[envKey] : null;
+
+        if (!rawKey && envKey && (envKey.startsWith('[') || envKey.length > 30)) {
+           // If the user pasted the actual key or array
+           rawKey = envKey;
+        }
+        if (!rawKey) {
+           // fallback
+           rawKey = (env as any).PVK3 || (env as any).BOT_SECRET_KEY;
+        }
+        
+        state.settings.secretLoaded = !!rawKey;
         
         // Compute internal sub-accounts if secret is configured and not yet parsed
-        if (env.BOT_SECRET_KEY && state.internalAccs.length === 0) {
+        if (rawKey && state.internalAccs.length === 0) {
           try {
-             const secretRaw = env.BOT_SECRET_KEY.trim();
+             const secretRaw = rawKey.trim();
              let secretKey;
              if (secretRaw.startsWith('[')) {
                secretKey = new Uint8Array(JSON.parse(secretRaw));
              } else {
-               // Fallback if needed, though without bs58 we assume JSON array
+               secretKey = bs58.decode(secretRaw);
              }
              
              if (secretKey) {
@@ -145,7 +174,8 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           if (body.volatilityTarget) state.settings.volatilityTarget = parseFloat(body.volatilityTarget) / 100;
           if (body.pullbackTarget) state.settings.pullbackTarget = parseFloat(body.pullbackTarget) / 100;
           if (body.contractAddress) state.settings.contractAddress = body.contractAddress;
-          
+          if (body.secretName) state.settings.secretName = body.secretName;
+
           if (env.TRADING_KV) {
              await env.TRADING_KV.put('engineState', JSON.stringify(state));
           } else {
@@ -215,10 +245,27 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
         headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
       });
     }
-  }
 }
 
 async function processTradingLogic(txs: any[], env: Env) {
+  // Load from KV if available, else use memory mock
+  let state = memoryState;
+  if (env.TRADING_KV) {
+    const storedState = await env.TRADING_KV.get('engineState', 'json');
+    if (storedState) {
+      state = { ...memoryState, ...storedState };
+    }
+  }
+
+  const envKey = state.settings.secretName;
+  let rawKey = envKey && (env as any)[envKey] ? (env as any)[envKey] : null;
+  if (!rawKey && envKey && (envKey.startsWith('[') || envKey.length > 30)) {
+     rawKey = envKey;
+  }
+  if (!rawKey) {
+     rawKey = (env as any).PVK3 || (env as any).BOT_SECRET_KEY;
+  }
+
   // Loop through all transactions provided in this webhook batch
   for (const tx of txs) {
     console.log(`Processing Tx: ${tx.signature}`);
@@ -231,13 +278,15 @@ async function processTradingLogic(txs: any[], env: Env) {
       
       const connection = new Connection(env.RPC_URL || "https://api.mainnet-beta.solana.com");
       try {
-         const secretRaw = env.BOT_SECRET_KEY.trim();
-         const secretKey = secretRaw.startsWith('[') 
-             ? Uint8Array.from(JSON.parse(secretRaw))
-             : null; // Implement base58 decode if using base58 in worker
-         if (secretKey) {
-             const botKeypair = Keypair.fromSecretKey(secretKey);
-             // Logic...
+         if (rawKey) {
+             const secretRaw = rawKey.trim();
+             const secretKey = secretRaw.startsWith('[') 
+                 ? Uint8Array.from(JSON.parse(secretRaw))
+                 : bs58.decode(secretRaw);
+             if (secretKey) {
+                 const botKeypair = Keypair.fromSecretKey(secretKey);
+                 // Logic...
+             }
          }
       } catch(e) {
          console.error("Invalid Secret in Worker ENV");

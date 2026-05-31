@@ -13,6 +13,7 @@ export const createActions = (set: any, get: any) => ({
   
   setVolTarget: (val: string) => set({ volTarget: val }),
   setPullbackTarget: (val: string) => set({ pullbackTarget: val }),
+  setSecretName: (val: string) => set({ secretName: val }),
   setContractAddress: (val: string) => set({ contractAddress: val }),
   setWorkerUrl: (val: string) => set({ workerUrl: val }),
   
@@ -30,6 +31,29 @@ export const createActions = (set: any, get: any) => ({
       const newArr = [...savedWorkerUrls, workerUrl];
       set({ savedWorkerUrls: newArr });
       localStorage.setItem('savedWorkerUrls', JSON.stringify(newArr));
+    }
+  },
+  saveSecretName: () => {
+    const { secretName, savedSecretNames } = get();
+    if (secretName && !savedSecretNames.includes(secretName)) {
+      const newArr = [...savedSecretNames, secretName];
+      set({ savedSecretNames: newArr });
+      localStorage.setItem('savedSecretNames', JSON.stringify(newArr));
+    }
+  },
+  deleteSavedItem: (key: string, val: string) => {
+    if (key === 'savedContractAddresses') {
+       const newArr = get().savedContractAddresses.filter(v => v !== val);
+       set({ savedContractAddresses: newArr });
+       localStorage.setItem('savedContractAddresses', JSON.stringify(newArr));
+    } else if (key === 'savedWorkerUrls') {
+       const newArr = get().savedWorkerUrls.filter(v => v !== val);
+       set({ savedWorkerUrls: newArr });
+       localStorage.setItem('savedWorkerUrls', JSON.stringify(newArr));
+    } else if (key === 'savedSecretNames') {
+       const newArr = get().savedSecretNames.filter(v => v !== val);
+       set({ savedSecretNames: newArr });
+       localStorage.setItem('savedSecretNames', JSON.stringify(newArr));
     }
   },
 
@@ -87,7 +111,7 @@ export const createActions = (set: any, get: any) => ({
   },
 
   handleSaveConfig: async () => {
-    const { workerUrl, volTarget, pullbackTarget, contractAddress } = get();
+    const { workerUrl, volTarget, pullbackTarget, contractAddress, secretName } = get();
     const actions = get().actions;
     try {
       let formattedUrl = workerUrl.trim();
@@ -105,13 +129,15 @@ export const createActions = (set: any, get: any) => ({
         body: JSON.stringify({
           volatilityTarget: volTarget,
           pullbackTarget: pullbackTarget,
-          contractAddress: contractAddress
+          contractAddress: contractAddress,
+          secretName: secretName
         })
       });
       if (!res.ok) {
         throw new Error(`HTTP Error: ${res.status} ${res.statusText}`);
       }
       alert('Strategy Configuration Updated and Deployed');
+      set({ secretName: '' });
       actions.fetchState();
     } catch (e: any) {
       console.error(e);

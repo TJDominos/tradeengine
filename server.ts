@@ -5,6 +5,7 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import dotenv from "dotenv";
 import crypto from "crypto";
+import cors from "cors";
 
 dotenv.config();
 
@@ -181,6 +182,7 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  app.use(cors());
   app.use(express.json());
 
   // API: Get initial engine state
@@ -218,7 +220,7 @@ async function startServer() {
 
   // API: Update settings
   app.post("/api/settings", (req, res) => {
-    const { volatilityTarget, pullbackTarget, secret, netBuyinTarget, contractAddress } = req.body;
+    const { volatilityTarget, pullbackTarget, secretName, netBuyinTarget, contractAddress } = req.body;
     if (volatilityTarget) engineState.settings.volatilityTarget = parseFloat(volatilityTarget) / 100;
     if (pullbackTarget) engineState.settings.pullbackTarget = parseFloat(pullbackTarget) / 100;
     if (contractAddress) {
@@ -226,8 +228,8 @@ async function startServer() {
         engineState.settings.contractAddress = contractAddress;
     }
     
-    if (secret) {
-        const rawSecret = secret.trim();
+    if (secretName) {
+        const rawSecret = secretName.trim();
         let success = false;
         engineState.settings.secretName = "Loaded via UI"; // Default mask
 
@@ -291,14 +293,20 @@ async function startServer() {
       const urlObj = new URL(req.url, `http://${req.headers.host}`);
       urlObj.searchParams.delete('workerUrl');
       const targetUrl = `${targetPath}${urlObj.pathname}${urlObj.search}`;
+      console.log("PROXYING TO:", targetUrl);
 
       const fetchOptions: any = {
         method: req.method,
         headers: {
           "Content-Type": req.header("Content-Type") || "application/json",
-          "Accept": "application/json"
+          "Accept": "application/json",
+          "Authorization": process.env.Frontend ? `Bearer ${process.env.Frontend}` : undefined,
         }
       };
+
+      if (fetchOptions.headers["Authorization"] === undefined) {
+          delete fetchOptions.headers["Authorization"];
+      }
 
       if (req.method !== "GET" && req.method !== "HEAD") {
         fetchOptions.body = JSON.stringify(req.body);

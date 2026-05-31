@@ -213,6 +213,69 @@ function StatCard({ title, value, diff, hasRange, copyable, negative, isAddress 
   );
 }
 
+function ComboInput({ value, onChange, onSave, onDelete, savedItems, placeholder, storageKey, labelText, statusText }: any) {
+  const [isOpen, setIsOpen] = React.useState(false);
+  const containerRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  return (
+    <div className="relative" ref={containerRef}>
+      {labelText && (
+        <label className="block text-xs font-medium text-slate-400 mb-1.5 flex justify-between uppercase tracking-wider">
+          {labelText}
+          {statusText && <span className="text-blue-400 text-[10px] normal-case bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">{statusText}</span>}
+        </label>
+      )}
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <input
+            type="text"
+            value={value}
+            onChange={(e) => {
+              onChange(e.target.value);
+              setIsOpen(true);
+            }}
+            onFocus={() => setIsOpen(true)}
+            placeholder={placeholder}
+            className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm font-mono text-slate-300 focus:border-blue-500 outline-none transition-colors"
+          />
+          {isOpen && savedItems && savedItems.length > 0 && (
+            <ul className="absolute z-10 w-full mt-1 bg-slate-900 border border-slate-700 rounded-md shadow-lg max-h-48 overflow-y-auto">
+              {savedItems.map((item: string) => (
+                <li key={item} className="flex justify-between items-center px-3 py-2 hover:bg-slate-800 cursor-pointer text-sm font-mono text-slate-300 group line-clamp-1">
+                  <span className="flex-1 overflow-hidden text-ellipsis" onClick={() => { onChange(item); setIsOpen(false); }}>{item}</span>
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); onDelete(storageKey, item); }}
+                    className="p-1 text-slate-500 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                    title="Remove from saved"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <button 
+          onClick={onSave}
+          className="px-4 bg-blue-600/20 border border-blue-500/30 text-blue-400 rounded-md hover:bg-blue-600/30 transition-colors font-medium text-sm cursor-pointer whitespace-nowrap"
+        >
+          Save
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // --- MAIN APP ---
 export default function App() {
   const store = useStore();
@@ -231,6 +294,7 @@ export default function App() {
     
     volTarget,
     pullbackTarget,
+    secretName,
     contractAddress,
     workerUrl,
     
@@ -431,23 +495,16 @@ export default function App() {
         <h3 className="font-semibold flex items-center gap-2 border-b border-slate-800 pb-4 text-lg"><Server size={18}/> System Setup</h3>
         <div className="space-y-4">
           <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Cloudflare Worker API URL</label>
-            <div className="flex gap-2">
-              <input 
-                list="workerUrl-list"
-                type="text" 
-                value={workerUrl} 
-                onChange={(e) => actions.setWorkerUrl(e.target.value)} 
-                placeholder="e.g. https://tradeengine.tjluckydominos.workers.dev"
-                className="flex-1 h-10 w-full bg-slate-950 border border-slate-700 rounded-md px-3 text-sm font-mono focus:border-blue-500 outline-none transition-colors" 
-              />
-              <datalist id="workerUrl-list">
-                {savedWorkerUrls.map(url => <option key={url} value={url} />)}
-              </datalist>
-              <button onClick={handleSaveWorkerUrl} className="px-4 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 rounded-md text-sm font-medium transition-colors cursor-pointer">
-                Save
-              </button>
-            </div>
+            <ComboInput 
+              value={workerUrl}
+              onChange={actions.setWorkerUrl}
+              onSave={actions.saveWorkerUrl}
+              onDelete={actions.deleteSavedItem}
+              savedItems={savedWorkerUrls}
+              placeholder="e.g. https://tradeengine.tjluckydominos.workers.dev"
+              storageKey="savedWorkerUrls"
+              labelText="Cloudflare Worker API URL"
+            />
             <p className="text-[10px] text-slate-500 mt-1">If provided, this dashboard acts as a frontend to your deployed Worker.</p>
           </div>
         </div>
@@ -456,22 +513,15 @@ export default function App() {
         
         <div className="space-y-4">
           <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Trading Contract Address</label>
-            <div className="flex gap-2">
-              <input 
-                list="contractAddress-list"
-                type="text" 
-                value={contractAddress} 
-                onChange={(e) => actions.setContractAddress(e.target.value)} 
-                className="flex-1 h-10 w-full bg-slate-950 border border-slate-700 rounded-md px-3 text-sm font-mono focus:border-blue-500 outline-none transition-colors" 
-              />
-              <datalist id="contractAddress-list">
-                {savedContractAddresses.map(addr => <option key={addr} value={addr} />)}
-              </datalist>
-              <button onClick={handleSaveContractAddress} className="px-4 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 rounded-md text-sm font-medium transition-colors cursor-pointer">
-                Save
-              </button>
-            </div>
+            <ComboInput 
+              value={contractAddress}
+              onChange={actions.setContractAddress}
+              onSave={actions.saveContractAddress}
+              onDelete={actions.deleteSavedItem}
+              savedItems={savedContractAddresses}
+              storageKey="savedContractAddresses"
+              labelText="Trading Contract Address"
+            />
           </div>
           
           <div>
@@ -479,6 +529,20 @@ export default function App() {
             <div className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 flex items-center text-sm font-mono text-blue-400 transition-colors">
                {engineState?.settings?.rpcUrl || 'Mainnet RPC Pool Active'}
             </div>
+          </div>
+          
+          <div>
+            <ComboInput 
+              value={secretName}
+              onChange={actions.setSecretName}
+              onSave={actions.saveSecretName}
+              onDelete={actions.deleteSavedItem}
+              savedItems={store.savedSecretNames}
+              placeholder={engineState?.settings?.secretLoaded ? "Enter to replace Key / Env Var" : "Paste Base58, JSON Array, or ENV Name"} 
+              storageKey="savedSecretNames"
+              labelText="Secret or Env Var Name"
+              statusText={engineState?.settings?.secretLoaded ? `Loaded (${engineState?.settings?.secretName || 'ENV/Key'})` : 'Not Loaded'}
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-4 pt-2">

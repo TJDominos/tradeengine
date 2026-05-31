@@ -25,8 +25,10 @@ export interface AppState {
   logCurrentPage: number;
   volTarget: string;
   pullbackTarget: string;
+  secretName: string;
   contractAddress: string;
   workerUrl: string;
   savedContractAddresses: string[];
   savedWorkerUrls: string[];
+  savedSecretNames: string[];
 }
