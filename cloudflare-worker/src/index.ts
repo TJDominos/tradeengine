@@ -8,10 +8,23 @@ export interface Env {
 }
 
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, HEAD',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  "Access-Control-Allow-Origin": "https://tradebot-pro-191976602057.us-west1.run.app",
+  "Access-Control-Allow-Methods": "GET,HEAD,POST,PUT,DELETE,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type,Authorization",
+  "Access-Control-Max-Age": "86400",
 };
+
+function handleOptions(request: Request) {
+  const headers = request.headers;
+  if (
+    headers.get("Origin") !== null &&
+    headers.get("Access-Control-Request-Method") !== null &&
+    headers.get("Access-Control-Request-Headers") !== null
+  ) {
+    return new Response(null, { headers: corsHeaders });
+  }
+  return new Response(null, { headers: { Allow: "GET,HEAD,POST,PUT,DELETE,OPTIONS" } });
+}
 
 // Stateless mock of the state for the worker (in a real app, use Cloudflare KV or D1)
 let memoryState: any = {
@@ -38,13 +51,30 @@ let memoryState: any = {
 
 export default {
   async fetch(request: Request, env: Env, ctx: any): Promise<Response> {
+    // Handle CORS preflight
+    if (request.method === "OPTIONS") {
+      return handleOptions(request);
+    }
+
+    // Your existing request handling logic here
+    const response = await handleRequest(request, env, ctx);
+
+    // Add CORS headers to every response
+    const newHeaders = new Headers(response.headers);
+    newHeaders.set("Access-Control-Allow-Origin", "https://tradebot-pro-191976602057.us-west1.run.app");
+    newHeaders.append("Vary", "Origin");
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders,
+    });
+  }
+};
+
+async function handleRequest(request: Request, env: Env, ctx: any): Promise<Response> {
     try {
       const url = new URL(request.url);
-
-      // Handle CORS preflight requests
-      if (request.method === 'OPTIONS') {
-        return new Response(null, { headers: corsHeaders });
-      }
 
       // Load from KV if available, else use memory mock
       let state = memoryState;
@@ -186,7 +216,7 @@ export default {
       });
     }
   }
-};
+}
 
 async function processTradingLogic(txs: any[], env: Env) {
   // Loop through all transactions provided in this webhook batch
