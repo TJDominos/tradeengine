@@ -164,7 +164,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
         }
 
         return new Response(JSON.stringify(state), { 
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' } 
         });
       }
 
@@ -183,10 +183,10 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           }
 
           return new Response(JSON.stringify({ success: true }), { 
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+            headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' } 
           });
         } catch (e) {
-          return new Response('Invalid JSON', { status: 400, headers: corsHeaders });
+          return new Response('Invalid JSON', { status: 400, headers: corsHeaders(request.headers.get("Origin")) });
         }
       }
 
@@ -217,10 +217,10 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           }
 
           return new Response(JSON.stringify({ success: true, message: `Trade executed & logged for ${body.symbol}` }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+            headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' }
           });
         } catch (e) {
-          return new Response('Invalid JSON', { status: 400, headers: corsHeaders });
+          return new Response('Invalid JSON', { status: 400, headers: corsHeaders(request.headers.get("Origin")) });
         }
       }
 
@@ -228,21 +228,21 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
       if (url.pathname === '/webhook' && request.method === 'POST') {
         try {
           const payload: any[] = await request.json();
-          const response = new Response('Webhook received', { status: 200, headers: corsHeaders });
+          const response = new Response('Webhook received', { status: 200, headers: corsHeaders(request.headers.get("Origin")) });
           ctx.waitUntil(processTradingLogic(payload, env));
           return response;
         } catch (e) {
           console.error(e);
-          return new Response('Bad Request', { status: 400, headers: corsHeaders });
+          return new Response('Bad Request', { status: 400, headers: corsHeaders(request.headers.get("Origin")) });
         }
       }
 
-      return new Response('Not Found', { status: 404, headers: corsHeaders });
+      return new Response('Not Found', { status: 404, headers: corsHeaders(request.headers.get("Origin")) });
     } catch (err: any) {
       console.error(err);
       return new Response(JSON.stringify({ error: err.message }), { 
         status: 500, 
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+        headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' } 
       });
     }
 }
