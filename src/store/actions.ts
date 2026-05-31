@@ -1,0 +1,143 @@
+import { AppState } from '../types';
+
+export const createActions = (set: any, get: any) => ({
+  setActiveTab: (tab: string) => set({ activeTab: tab }),
+  setDateRange: (range: { from: string; to: string }) => set({ dateRange: range }),
+  
+  setAccountSearchTerm: (term: string) => set({ accountSearchTerm: term }),
+  setInternalPage: (page: number) => set({ internalPage: page }),
+  setOutsiderPage: (page: number) => set({ outsiderPage: page }),
+  
+  setLogSearchTerm: (term: string) => set({ logSearchTerm: term }),
+  setLogCurrentPage: (page: number) => set({ logCurrentPage: page }),
+  
+  setVolTarget: (val: string) => set({ volTarget: val }),
+  setPullbackTarget: (val: string) => set({ pullbackTarget: val }),
+  setContractAddress: (val: string) => set({ contractAddress: val }),
+  setWorkerUrl: (val: string) => set({ workerUrl: val }),
+  
+  saveContractAddress: () => {
+    const { contractAddress, savedContractAddresses } = get();
+    if (contractAddress && !savedContractAddresses.includes(contractAddress)) {
+      const newArr = [...savedContractAddresses, contractAddress];
+      set({ savedContractAddresses: newArr });
+      localStorage.setItem('savedContractAddresses', JSON.stringify(newArr));
+    }
+  },
+  saveWorkerUrl: () => {
+    const { workerUrl, savedWorkerUrls } = get();
+    if (workerUrl && !savedWorkerUrls.includes(workerUrl)) {
+      const newArr = [...savedWorkerUrls, workerUrl];
+      set({ savedWorkerUrls: newArr });
+      localStorage.setItem('savedWorkerUrls', JSON.stringify(newArr));
+    }
+  },
+
+  handleToggleAccount: async (id: string) => {
+    try {
+      const res = await fetch('/api/toggleAccount', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        set({ engineState: data });
+      }
+    } catch (e) {
+       console.error("Failed to toggle acc", e);
+    }
+  },
+
+  fetchState: async () => {
+    const { workerUrl, contractAddress } = get();
+    try {
+      let formattedUrl = workerUrl.trim();
+      if (formattedUrl && !formattedUrl.startsWith('http')) {
+        formattedUrl = 'https://' + formattedUrl;
+      }
+
+      const endpoint = formattedUrl ? `${formattedUrl.endsWith('/') ? formattedUrl.slice(0, -1) : formattedUrl}/api/state` : '/api/state';
+      const res = await fetch(endpoint);
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error("Received non-JSON response from /api/state");
+      }
+      const data = await res.json();
+      
+      const payload: Partial<AppState> = {
+        engineState: data,
+        lastUpdated: new Date().toLocaleTimeString()
+      };
+      
+      if (data.settings && data.settings.contractAddress) {
+        payload.contractAddress = data.settings.contractAddress;
+      }
+      
+      set(payload);
+    } catch (e) {
+      console.error("Failed to fetch engine state", e);
+    }
+  },
+
+  handleSaveConfig: async () => {
+    const { workerUrl, volTarget, pullbackTarget, contractAddress } = get();
+    const actions = get().actions;
+    try {
+      let formattedUrl = workerUrl.trim();
+      if (formattedUrl && !formattedUrl.startsWith('http')) {
+        formattedUrl = 'https://' + formattedUrl;
+      }
+      
+      const endpoint = formattedUrl ? `${formattedUrl.endsWith('/') ? formattedUrl.slice(0, -1) : formattedUrl}/api/settings` : '/api/settings';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          volatilityTarget: volTarget,
+          pullbackTarget: pullbackTarget,
+          contractAddress: contractAddress
+        })
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP Error: ${res.status} ${res.statusText}`);
+      }
+      alert('Strategy Configuration Updated and Deployed');
+      actions.fetchState();
+    } catch (e: any) {
+      console.error(e);
+      alert(`Error saving config: ${e.message}`);
+    }
+  },
+
+  handleTestTrade: async () => {
+    const { workerUrl } = get();
+    const actions = get().actions;
+    try {
+      let formattedUrl = workerUrl.trim();
+      if (formattedUrl && !formattedUrl.startsWith('http')) {
+        formattedUrl = 'https://' + formattedUrl;
+      }
+      
+      const endpoint = formattedUrl ? `${formattedUrl.endsWith('/') ? formattedUrl.slice(0, -1) : formattedUrl}/api/trade` : '/api/trade';
+      
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: "AAPL", action: "buy" }),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP Error: ${res.status} ${res.statusText}`);
+      }
+      const data = await res.json();
+      alert(`Test Trade Result: ${data.message || 'Success'}`);
+      actions.fetchState();
+    } catch (e: any) {
+      console.error(e);
+      alert(`Error running test trade: ${e.message}`);
+    }
+  }
+});

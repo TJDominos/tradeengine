@@ -49,7 +49,7 @@ async fn main() {
 
     // Start WSS Monitor loop for Contract Address
     let wss_url = env::var("WSS_URL").unwrap_or_else(|_| "wss://api.mainnet-beta.solana.com".to_string());
-    let contract_address = "WLTxyz789ABCdefGHIjklMNOpqrSTUvwxYZ1234567";
+    let contract_address = "";
     let monitor_state = state.clone();
     tokio::spawn(async move {
         monitor::monitor_contract_websocket(wss_url, contract_address, monitor_state).await;

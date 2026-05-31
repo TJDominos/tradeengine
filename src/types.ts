@@ -1,0 +1,32 @@
+export interface EngineState {
+  internalAccs: any[];
+  outsiderAccs: any[];
+  logs: any[];
+  stats: {
+    price: number;
+    maPrice: number;
+    totalWlt: number;
+    liqUsdc: number;
+    fdv: number;
+    totalOutsiders: number;
+  };
+  settings?: any;
+}
+
+export interface AppState {
+  activeTab: string;
+  engineState: EngineState | null;
+  lastUpdated: string;
+  dateRange: { from: string; to: string };
+  accountSearchTerm: string;
+  internalPage: number;
+  outsiderPage: number;
+  logSearchTerm: string;
+  logCurrentPage: number;
+  volTarget: string;
+  pullbackTarget: string;
+  contractAddress: string;
+  workerUrl: string;
+  savedContractAddresses: string[];
+  savedWorkerUrls: string[];
+}

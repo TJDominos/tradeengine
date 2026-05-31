@@ -9,7 +9,7 @@ import crypto from "crypto";
 dotenv.config();
 
 // --- SOLANA CONNECTION & CONFIG ---
-let CURRENT_CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "WLTxyz789ABCdefGHIjklMNOpqrSTUvwxYZ1234567";
+let CURRENT_CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "";
 const TOTAL_WLT_SUPPLY = 1000000000;
 
 const RPC_POOL = [
@@ -58,8 +58,8 @@ const engineState: any = {
   outsiderAccs: [],
   logs: [],
   stats: {
-    price: 0.0452,
-    maPrice: 0.0450,
+    price: 0,
+    maPrice: 0,
     totalWlt: TOTAL_WLT_SUPPLY,
     liqUsdc: 0,
     fdv: 0,
@@ -121,7 +121,7 @@ async function syncBlockchainData() {
 
     // 2. Read the Token Contract Address and Extract External Accounts (Outsiders)
     // We do this by getting recent signatures for the contract address
-    if (CURRENT_CONTRACT_ADDRESS && CURRENT_CONTRACT_ADDRESS !== "WLTxyz789ABCdefGHIjklMNOpqrSTUvwxYZ1234567") { // Exclude placeholder
+    if (CURRENT_CONTRACT_ADDRESS && CURRENT_CONTRACT_ADDRESS !== "") { // Exclude placeholder
       try {
         const contractPubkey = new PublicKey(CURRENT_CONTRACT_ADDRESS);
         const signatures = await connection.getSignaturesForAddress(contractPubkey, { limit: 15 }); // Keep limit low to avoid RPC rate limits
@@ -131,28 +131,30 @@ async function syncBlockchainData() {
         if (signatures.length > 0) {
           const parsedTxs = await connection.getParsedTransactions(signatures.map(s => s.signature), { maxSupportedTransactionVersion: 0 });
           
-          parsedTxs.forEach((tx) => {
+          for (const tx of parsedTxs) {
              if (tx && tx.transaction && tx.transaction.message && tx.transaction.message.accountKeys) {
                // Find main signer (fee payer -> usually the outsider initiating the tx)
                const signer = tx.transaction.message.accountKeys.find(k => k.signer)?.pubkey.toBase58();
                if (signer && signer !== primaryWalletPubkeyStr) {
                   if (!outsiderMap.has(signer)) {
-                    outsiderMap.set(signer, {
+                     // We could fetch real token balance here, but to avoid rate limits we initialize to 0.
+                     // The user can implement actual SPL token fetching if needed.
+                     outsiderMap.set(signer, {
                       id: `out-${signer.substring(0,8)}...`,
                       tag: `Ext-Trader-${outsiderMap.size + 1}`,
                       address: signer,
-                      wlt: Math.random() * 5000,   // Mocked actual holdings for UI demo
-                      usdcBuyin: Math.random() * 500,
-                      usdc: Math.random() * 100,
+                      wlt: 0, 
+                      usdcBuyin: 0,
+                      usdc: 0,
                       deposit: 0,
-                      profit: (Math.random() - 0.5) * 50,
+                      profit: 0,
                       usdcWithdraw: 0,
                       wltWithdraw: 0
                     });
                   }
                }
              }
-          });
+          }
         }
         
         engineState.outsiderAccs = Array.from(outsiderMap.values());
@@ -161,13 +163,6 @@ async function syncBlockchainData() {
          console.error("Error fetching outsiders:", e.message);
       }
     }
-
-    // Generate random mocked price ticks for the UI simulation (since we are not querying an actual DEX pool here)
-    const marketShift = (Math.random() - 0.48) * 0.002;
-    engineState.stats.price += marketShift;
-    engineState.stats.price = Math.max(0.01, engineState.stats.price);
-    engineState.stats.fdv = engineState.stats.price * engineState.stats.totalWlt;
-    engineState.stats.maPrice = engineState.stats.maPrice + (engineState.stats.price - engineState.stats.maPrice) * 0.05;
     
   } catch (error) {
     console.error("Sync error:", error);
@@ -182,7 +177,7 @@ setInterval(() => {
 // --- EXPRESS SERVER SETUP ---
 async function startServer() {
   // Fire initial sync
-  await syncBlockchainData();
+  syncBlockchainData().catch(console.error);
   const app = express();
   const PORT = 3000;
 
@@ -196,6 +191,29 @@ async function startServer() {
   // API: Force refresh (just returns current state, UI handles update)
   app.post("/api/sync", (req, res) => {
     res.json(engineState);
+  });
+
+  // API: Mock trade test from frontend
+  app.post("/api/trade", (req, res) => {
+    const { symbol, action } = req.body;
+    console.log(`Mock local test trade: ${action} ${symbol}`);
+    
+    // Log the transaction
+    const newLog = {
+      id: Date.now().toString(),
+      time: new Date().toISOString().split('T')[1].slice(0, 8),
+      tag: symbol || "Unknown",
+      address: "Local Node Server Test",
+      action: action || "Trade",
+      amount: "N/A",
+      status: "Success",
+      txId: "local-" + Math.random().toString(36).substring(7)
+    };
+    
+    engineState.logs.unshift(newLog);
+    if (engineState.logs.length > 50) engineState.logs.pop(); // keep last 50
+    
+    res.json({ success: true, message: `Mock local trade executed for ${symbol}` });
   });
 
   // API: Update settings

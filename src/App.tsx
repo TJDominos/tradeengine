@@ -1,12 +1,13 @@
 // WLT Execution Engine - Main Dashboard Component
-import React, { useState, useEffect } from 'react';
+import React, { useEffect } from 'react';
 import { 
   Activity, Wallet, RefreshCw, TrendingUp, TrendingDown, 
   Settings, Users, Clock, Calendar, CheckSquare, 
   Square, Trash2, Plus, Code, Lock, Search, FileText, ChevronLeft, ChevronRight, Server
 } from 'lucide-react';
+import { useStore } from './store';
 
-const CONTRACT_ADDRESS = "WLTxyz789ABCdefGHIjklMNOpqrSTUvwxYZ1234567";
+const CONTRACT_ADDRESS = "";
 const TOTAL_WLT_SUPPLY = 1000000000; // 1 Billion
 
 const workerAlgorithmTemplate = `// --- SERVERLESS TRADING ENGINE (Cloudflare Worker) ---
@@ -214,87 +215,48 @@ function StatCard({ title, value, diff, hasRange, copyable, negative, isAddress 
 
 // --- MAIN APP ---
 export default function App() {
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [engineState, setEngineState] = useState(null);
-  const [lastUpdated, setLastUpdated] = useState(new Date().toLocaleTimeString());
-  
-  // Shared States
-  const [dateRange, setDateRange] = useState({ from: '', to: '' });
-  const hasDateRange = dateRange.from !== '' && dateRange.to !== '';
+  const store = useStore();
+  const {
+    activeTab,
+    engineState,
+    lastUpdated,
+    dateRange,
+    
+    accountSearchTerm,
+    internalPage,
+    outsiderPage,
+    
+    logSearchTerm,
+    logCurrentPage,
+    
+    volTarget,
+    pullbackTarget,
+    contractAddress,
+    workerUrl,
+    
+    savedContractAddresses,
+    savedWorkerUrls,
+    actions
+  } = store;
 
-  // Accounts Tab States
-  const [accountSearchTerm, setAccountSearchTerm] = useState('');
-  const [internalPage, setInternalPage] = useState(1);
-  const [outsiderPage, setOutsiderPage] = useState(1);
-  
-  // Log Tab States
-  const [logSearchTerm, setLogSearchTerm] = useState('');
-  const [logCurrentPage, setLogCurrentPage] = useState(1);
-  
-  // Settings Tab Forms
-  const [volTarget, setVolTarget] = useState('4.5');
-  const [pullbackTarget, setPullbackTarget] = useState('2.0');
-  const [secretName, setSecretName] = useState('');
-  const [contractAddress, setContractAddress] = useState('WLTxyz789ABCdefGHIjklMNOpqrSTUvwxYZ1234567');
-  const [workerUrl, setWorkerUrl] = useState('');
-  
+  const hasDateRange = dateRange.from !== '' && dateRange.to !== '';
   const ITEMS_PER_PAGE = 50;
 
-  // --- BACKEND DATA POLLING ---
-  const fetchState = async () => {
-    try {
-      const endpoint = workerUrl ? `${workerUrl.replace(/\/$/, "")}/api/state` : '/api/state';
-      const res = await fetch(endpoint);
-      if (!res.ok) {
-        throw new Error(`HTTP error! status: ${res.status}`);
-      }
-      const contentType = res.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        throw new Error("Received non-JSON response from /api/state");
-      }
-      const data = await res.json();
-      setEngineState(data);
-      if (data.settings) {
-         setContractAddress(data.settings.contractAddress || contractAddress);
-      }
-      setLastUpdated(new Date().toLocaleTimeString());
-    } catch (e) {
-      console.error("Failed to fetch engine state", e);
-    }
-  };
-
   useEffect(() => {
-    fetchState();
+    actions.fetchState();
     // Poll the backend every 3 seconds to simulate a live trading terminal
-    const interval = setInterval(fetchState, 3000);
+    const interval = setInterval(() => {
+      actions.fetchState();
+    }, 3000);
     return () => clearInterval(interval);
-  }, [workerUrl]);
+  }, [workerUrl, actions]);
 
   const handleRefresh = () => {
-    fetchState();
+    actions.fetchState();
   };
 
-  const handleSaveConfig = async () => {
-    try {
-      const endpoint = workerUrl ? `${workerUrl.replace(/\/$/, "")}/api/settings` : '/api/settings';
-      await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          volatilityTarget: volTarget,
-          pullbackTarget: pullbackTarget,
-          secret: secretName,
-          contractAddress: contractAddress
-        })
-      });
-      alert('Strategy Configuration Updated and Deployed');
-      setSecretName(''); // Clear out after deploy
-      fetchState();     // Refresh standard dashboard state
-    } catch (e) {
-      console.error(e);
-      alert('Error saving config');
-    }
-  };
+  const handleSaveContractAddress = () => { actions.saveContractAddress(); };
+  const handleSaveWorkerUrl = () => { actions.saveWorkerUrl(); };
 
   if (!engineState) {
     return (
@@ -313,26 +275,28 @@ export default function App() {
 
     return (
       <div className="space-y-6">
-        <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange} />
+        <DateRangePicker dateRange={dateRange} setDateRange={actions.setDateRange} hasDateRange={hasDateRange} />
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          <StatCard title="Contract Address" value={CONTRACT_ADDRESS} copyable isAddress />
-          <StatCard title="Total WLT Amount (Internal)" value={`${formatNum(totalInternalWLT)} (${internalFdvPct}%)`} diff="+0.02%" hasRange={hasDateRange} />
-          <StatCard title="Profit (USDC)" value={formatUSD(totalProfit)} diff={formatUSD(450.20)} hasRange={hasDateRange} />
+          <StatCard title="Contract Address" value={contractAddress || CONTRACT_ADDRESS || 'Not Configured'} copyable isAddress />
+          <StatCard title="Total WLT Amount (Internal)" value={`${formatNum(totalInternalWLT)} (${internalFdvPct}%)`} hasRange={hasDateRange} />
+          <StatCard title="Profit (USDC)" value={formatUSD(totalProfit)} hasRange={hasDateRange} />
           <StatCard 
             title="FDV" 
             value={formatUSD(engineState.stats.fdv)} 
-            diff="+$12.5k" 
             hasRange={hasDateRange} 
           />
           <StatCard 
             title="Price: WLT (Live)" 
             value={formatNum(engineState.stats.price)} 
-            diff="+0.0001" 
             hasRange={hasDateRange} 
           />
-          <StatCard title="Liquidity (USDC)" value={formatUSD(engineState.stats.liqUsdc)} diff="-$1.2k" hasRange={hasDateRange} negative />
-          <StatCard title="Total Outsiders (>$1)" value={engineState.stats.totalOutsiders} diff="+4" hasRange={hasDateRange} />
+          <StatCard title="Liquidity (USDC)" value={formatUSD(engineState.stats.liqUsdc)} hasRange={hasDateRange} />
+          <StatCard title="Total Outsiders (>$1)" value={engineState.stats.totalOutsiders} hasRange={hasDateRange} />
+        </div>
+        {/* ADD TRANSACTION LOGS HERE under Summary */}
+        <div className="mt-8">
+           {renderLogs()}
         </div>
       </div>
     );
@@ -378,7 +342,7 @@ export default function App() {
     return (
       <div className="space-y-6">
         {/* Date Filter & Injected Global Search on Same Row */}
-        <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
+        <DateRangePicker dateRange={dateRange} setDateRange={actions.setDateRange} hasDateRange={hasDateRange}>
           <div className="flex flex-col gap-1.5 w-full md:w-[400px]">
              <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Global Address Search</label>
              <div className="relative">
@@ -388,9 +352,9 @@ export default function App() {
                  placeholder="Search by wallet address or tag across all accounts..." 
                  value={accountSearchTerm}
                  onChange={(e) => {
-                   setAccountSearchTerm(e.target.value);
-                   setInternalPage(1);
-                   setOutsiderPage(1);
+                   actions.setAccountSearchTerm(e.target.value);
+                   actions.setInternalPage(1);
+                   actions.setOutsiderPage(1);
                  }}
                  className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md pl-9 pr-3 text-sm focus:border-blue-500 outline-none transition-colors" 
                />
@@ -431,13 +395,7 @@ export default function App() {
                         type="checkbox" 
                         checked={acc.selected} 
                         onChange={async () => {
-                          const res = await fetch('/api/toggleAccount', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ id: acc.id })
-                          });
-                          const data = await res.json();
-                          setEngineState(data);
+                          actions.handleToggleAccount(acc.id);
                         }}
                         className="cursor-pointer appearance-none w-4 h-4 rounded border border-slate-600 checked:bg-blue-500 checked:border-blue-500 flex items-center justify-center relative after:content-[''] after:absolute after:w-[3px] after:h-[7px] after:border-r-2 after:border-b-2 after:border-white after:rotate-45 after:-mt-0.5 checked:after:block after:hidden"
                       />
@@ -459,7 +417,7 @@ export default function App() {
               </tbody>
             </table>
           </div>
-          <Pagination currentPage={internalPage} totalItems={filteredInternal.length} itemsPerPage={ITEMS_PER_PAGE} onPageChange={setInternalPage} />
+          <Pagination currentPage={internalPage} totalItems={filteredInternal.length} itemsPerPage={ITEMS_PER_PAGE} onPageChange={actions.setInternalPage} />
         </div>
       </div>
     );
@@ -469,52 +427,57 @@ export default function App() {
   const renderSetup = () => (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-5 shadow-sm h-fit">
-        <h3 className="font-semibold flex items-center gap-2 border-b border-slate-800 pb-4 text-lg"><Settings size={18}/> Trading Parameters</h3>
+        
+        <h3 className="font-semibold flex items-center gap-2 border-b border-slate-800 pb-4 text-lg"><Server size={18}/> System Setup</h3>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Cloudflare Worker API URL</label>
+            <div className="flex gap-2">
+              <input 
+                list="workerUrl-list"
+                type="text" 
+                value={workerUrl} 
+                onChange={(e) => actions.setWorkerUrl(e.target.value)} 
+                placeholder="e.g. https://tradeengine.tjluckydominos.workers.dev"
+                className="flex-1 h-10 w-full bg-slate-950 border border-slate-700 rounded-md px-3 text-sm font-mono focus:border-blue-500 outline-none transition-colors" 
+              />
+              <datalist id="workerUrl-list">
+                {savedWorkerUrls.map(url => <option key={url} value={url} />)}
+              </datalist>
+              <button onClick={handleSaveWorkerUrl} className="px-4 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 rounded-md text-sm font-medium transition-colors cursor-pointer">
+                Save
+              </button>
+            </div>
+            <p className="text-[10px] text-slate-500 mt-1">If provided, this dashboard acts as a frontend to your deployed Worker.</p>
+          </div>
+        </div>
+
+        <h3 className="font-semibold flex items-center gap-2 border-b border-slate-800 pt-4 pb-4 text-lg"><Settings size={18}/> Trading Parameters</h3>
         
         <div className="space-y-4">
           <div>
             <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Trading Contract Address</label>
-            <input 
-              type="text" 
-              value={contractAddress} 
-              onChange={(e) => setContractAddress(e.target.value)} 
-              className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm font-mono focus:border-blue-500 outline-none transition-colors" 
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Cloudflare Worker API URL (Optional)</label>
-            <input 
-              type="text" 
-              value={workerUrl} 
-              onChange={(e) => setWorkerUrl(e.target.value)} 
-              placeholder="e.g. https://solana-bot.<yourname>.workers.dev"
-              className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm font-mono focus:border-blue-500 outline-none transition-colors" 
-            />
-            <p className="text-[10px] text-slate-500 mt-1">If provided, this dashboard acts as a frontend to your deployed Worker.</p>
+            <div className="flex gap-2">
+              <input 
+                list="contractAddress-list"
+                type="text" 
+                value={contractAddress} 
+                onChange={(e) => actions.setContractAddress(e.target.value)} 
+                className="flex-1 h-10 w-full bg-slate-950 border border-slate-700 rounded-md px-3 text-sm font-mono focus:border-blue-500 outline-none transition-colors" 
+              />
+              <datalist id="contractAddress-list">
+                {savedContractAddresses.map(addr => <option key={addr} value={addr} />)}
+              </datalist>
+              <button onClick={handleSaveContractAddress} className="px-4 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 rounded-md text-sm font-medium transition-colors cursor-pointer">
+                Save
+              </button>
+            </div>
           </div>
           
           <div>
             <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Solana RPC Network</label>
             <div className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 flex items-center text-sm font-mono text-blue-400 transition-colors">
                {engineState?.settings?.rpcUrl || 'Mainnet RPC Pool Active'}
-            </div>
-          </div>
-          
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5 flex justify-between uppercase tracking-wider">
-              Secret or Env Var Name
-              <span className="text-blue-400 text-[10px] normal-case bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">{engineState?.settings?.secretLoaded ? `Loaded (${engineState.settings.secretName})` : 'Not Loaded'}</span>
-            </label>
-            <div className="relative">
-              <input 
-                 type="password" 
-                 value={secretName}
-                 onChange={(e) => setSecretName(e.target.value)}
-                 placeholder={engineState?.settings?.secretLoaded ? "Enter to replace Key / Env Var" : "Paste Base58, JSON Array, or ENV Name"} 
-                 className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm font-mono focus:border-blue-500 outline-none transition-colors" 
-              />
-              <Lock size={14} className="absolute right-3 top-3 text-slate-500" />
             </div>
           </div>
 
@@ -538,7 +501,7 @@ export default function App() {
               <input 
                  type="text" 
                  value={volTarget} 
-                 onChange={(e) => setVolTarget(e.target.value)}
+                 onChange={(e) => actions.setVolTarget(e.target.value)}
                  className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm focus:border-blue-500 outline-none transition-colors" 
               />
             </div>
@@ -547,16 +510,22 @@ export default function App() {
               <input 
                  type="text" 
                  value={pullbackTarget} 
-                 onChange={(e) => setPullbackTarget(e.target.value)}
+                 onChange={(e) => actions.setPullbackTarget(e.target.value)}
                  className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm focus:border-blue-500 outline-none transition-colors" 
               />
             </div>
           </div>
         </div>
 
-        <button onClick={handleSaveConfig} className="w-full mt-4 h-11 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-md transition-colors shadow-sm cursor-pointer">
-          Deploy Engine Configuration
-        </button>
+        <div className="flex flex-col gap-3 mt-4">
+          <button onClick={actions.handleSaveConfig} className="w-full h-11 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-md transition-colors shadow-sm cursor-pointer">
+            Deploy Engine Configuration
+          </button>
+          
+          <button onClick={actions.handleTestTrade} className="w-full h-11 bg-emerald-600 border border-emerald-500 hover:bg-emerald-500 text-white font-semibold rounded-md transition-colors shadow-sm cursor-pointer">
+            Test Trade (Worker API)
+          </button>
+        </div>
       </div>
 
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col shadow-sm min-h-[500px]">
@@ -596,8 +565,8 @@ export default function App() {
                  placeholder="Search logs..." 
                  value={logSearchTerm}
                  onChange={(e) => {
-                   setLogSearchTerm(e.target.value);
-                   setLogCurrentPage(1);
+                   actions.setLogSearchTerm(e.target.value);
+                   actions.setLogCurrentPage(1);
                  }}
                  className="bg-slate-950 border border-slate-700 rounded-md pl-8 pr-3 py-1.5 text-sm focus:border-blue-500 outline-none w-64" 
                />
@@ -642,7 +611,7 @@ export default function App() {
             </tbody>
           </table>
         </div>
-        <Pagination currentPage={logCurrentPage} totalItems={filteredLogs.length} itemsPerPage={ITEMS_PER_PAGE} onPageChange={setLogCurrentPage} />
+        <Pagination currentPage={logCurrentPage} totalItems={filteredLogs.length} itemsPerPage={ITEMS_PER_PAGE} onPageChange={actions.setLogCurrentPage} />
       </div>
     );
   };
@@ -663,17 +632,21 @@ export default function App() {
           </p>
         </div>
         
-        <button onClick={handleRefresh} className="flex items-center gap-2 px-4 h-10 bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors text-sm font-medium shadow-sm cursor-pointer">
-          <RefreshCw size={16} /> Force Sync
-        </button>
+        <div className="flex items-center gap-3">
+          <button onClick={() => alert("Trading Engine Started")} className="flex items-center gap-2 px-4 h-10 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md transition-colors text-sm font-medium shadow-sm cursor-pointer">
+            <Activity size={16} /> Start Trading
+          </button>
+          <button onClick={handleRefresh} className="flex items-center gap-2 px-4 h-10 bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors text-sm font-medium shadow-sm cursor-pointer">
+            <RefreshCw size={16} /> Force Sync
+          </button>
+        </div>
       </div>
 
       {/* Tabs Styled as Shadcn UI Segmented Control */}
       <div className="inline-flex h-10 items-center justify-center rounded-md bg-slate-900 p-1 text-slate-400 border border-slate-800 mb-6 shadow-sm self-start">
-        <TabButton active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} icon={<Activity size={16}/>} label="Dashboard" />
-        <TabButton active={activeTab === 'accounts'} onClick={() => setActiveTab('accounts')} icon={<Users size={16}/>} label="Accounts" />
-        <TabButton active={activeTab === 'setup'} onClick={() => setActiveTab('setup')} icon={<Settings size={16}/>} label="Trading Setup" />
-        <TabButton active={activeTab === 'logs'} onClick={() => setActiveTab('logs')} icon={<FileText size={16}/>} label="Transaction Logs" />
+        <TabButton active={activeTab === 'dashboard'} onClick={() => actions.setActiveTab('dashboard')} icon={<Activity size={16}/>} label="Dashboard" />
+        <TabButton active={activeTab === 'accounts'} onClick={() => actions.setActiveTab('accounts')} icon={<Users size={16}/>} label="Accounts" />
+        <TabButton active={activeTab === 'setup'} onClick={() => actions.setActiveTab('setup')} icon={<Settings size={16}/>} label="Trading Setup" />
       </div>
 
       {/* Main Content Area */}
@@ -681,7 +654,6 @@ export default function App() {
         {activeTab === 'dashboard' && renderDashboard()}
         {activeTab === 'accounts' && renderAccounts()}
         {activeTab === 'setup' && renderSetup()}
-        {activeTab === 'logs' && renderLogs()}
       </div>
 
     </div>
