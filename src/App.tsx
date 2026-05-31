@@ -373,7 +373,7 @@ export default function App() {
           {engineState.details || "The server proxy failed to fetch from the specified worker. Ensure the Cloudflare Worker is running."}
         </span>
         <div className="mt-8 flex gap-4">
-           <button onClick={() => actions.setWorkerUrl('')} className="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-md transition border border-slate-700">Clear Worker URL</button>
+           <button onClick={() => { actions.setWorkerUrl(''); setTimeout(() => actions.fetchState(), 0); }} className="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-md transition border border-slate-700">Clear Worker URL</button>
            <button onClick={() => actions.fetchState()} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-md transition shadow-[0_0_15px_-3px_rgba(37,99,235,0.4)]">Retry Connection</button>
         </div>
       </div>

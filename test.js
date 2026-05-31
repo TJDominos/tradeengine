@@ -1,3 +1,3 @@
-const r = await fetch("http://localhost:3000/api/proxy/api/state?workerUrl=https://google.com");
-if (r.ok) console.log(r.status, "ok");
-else console.log(r.status, await r.text());
+const r = await fetch("https://tradeengine.tjluckydominos.workers.dev/api/state");
+const t = await r.text();
+console.log(r.status, t.slice(0, 100));

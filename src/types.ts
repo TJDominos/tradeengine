@@ -1,4 +1,6 @@
 export interface EngineState {
+  error?: string;
+  details?: string;
   internalAccs: any[];
   outsiderAccs: any[];
   logs: any[];

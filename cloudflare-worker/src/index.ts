@@ -1,6 +1,12 @@
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
 
+export interface D1Database {
+  prepare(query: string): any;
+  batch(stmts: any[]): any;
+  exec(query: string): any;
+}
+
 export interface Env {
   // Configured in Cloudflare Dashboard -> Settings -> Variables
   RPC_URL: string;
