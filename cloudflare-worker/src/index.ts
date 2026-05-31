@@ -7,7 +7,80 @@ export interface Env {
   BOT_SECRET_KEY: string; 
   PVK3: string;
   Frontend: string;
-  TRADING_KV: any; // Cloudflare KV Namespace
+  DB: D1Database; 
+}
+
+// Helper to build engineState from D1
+async function getEngineStateFromD1(db: D1Database) {
+  // 1. Fetch settings
+  const { results: settingsRows } = await db.prepare("SELECT key, value FROM settings").all();
+  const settings = {
+    volatilityTarget: 0,
+    pullbackTarget: 0,
+    volumeTarget: 0,
+    netBuyinTarget: 0,
+    timeRangeTarget: '24h',
+    maxTransactions: 100,
+    maxSlippage: 0.0100,
+    tradingAlgorithm: '// Enter your trading algorithm here\nfunction executeTrade(state) {\n  // return action\n}',
+    secretLoaded: false,
+    secretName: 'Loaded via Cloudflare ENV',
+    contractAddress: ""
+  };
+  
+  settingsRows?.forEach((row: any) => {
+    if (row.key === 'volatilityTarget' || row.key === 'pullbackTarget' || row.key === 'netBuyinTarget' || row.key === 'volumeTarget' || row.key === 'maxTransactions' || row.key === 'maxSlippage') {
+      (settings as any)[row.key] = parseFloat(row.value);
+    } else {
+      (settings as any)[row.key] = row.value; // handles timeRangeTarget, contractAddress, secretName, tradingAlgorithm
+    }
+  });
+
+  // 2. Fetch accounts
+  const { results: accRows } = await db.prepare("SELECT * FROM accounts ORDER BY type, id LIMIT 100").all();
+  const internalAccs = accRows?.filter((a: any) => a.type === 'internal').map((a: any) => ({
+    id: a.id,
+    wallet: "Derived Sub-Account",
+    address: a.wallet_address,
+    tag: a.tag,
+    usdc: a.usdc_balance,
+    sol: a.sol_balance,
+    profit: a.profit_pnl,
+    selected: false,
+    mint: "Native SOL", wlt: 0, deposit: 0, usdcWithdraw: 0, wltWithdraw: 0
+  })) || [];
+
+  const outsiderAccs = accRows?.filter((a: any) => a.type === 'outsider').map((a: any) => ({
+    id: a.id,
+    address: a.wallet_address,
+    tag: a.tag,
+    usdc: a.usdc_balance,
+    sol: a.sol_balance,
+    profit: a.profit_pnl
+  })) || [];
+
+  // 3. Fetch trade logs
+  const { results: logRows } = await db.prepare("SELECT * FROM trade_logs ORDER BY created_at DESC LIMIT 50").all();
+  const logs = logRows?.map((l: any) => ({
+    id: l.id,
+    time: l.created_at,
+    tag: l.symbol,
+    address: l.wallet_address,
+    action: l.action,
+    amount: l.amount.toString(),
+    status: l.status,
+    txId: l.tx_signature || "pending"
+  })) || [];
+
+  return {
+    settings,
+    internalAccs,
+    outsiderAccs,
+    logs,
+    stats: {
+      price: 0, maPrice: 0, totalWlt: 1000000000, liqUsdc: 0, fdv: 0, totalOutsiders: outsiderAccs.length
+    }
+  };
 }
 
 const corsHeaders = (origin: string | null) => ({
@@ -29,28 +102,7 @@ function handleOptions(request: Request) {
   return new Response(null, { headers: { Allow: "GET,HEAD,POST,PUT,DELETE,OPTIONS" } });
 }
 
-// Stateless mock of the state for the worker (in a real app, use Cloudflare KV or D1)
-let memoryState: any = {
-  settings: {
-    volatilityTarget: 0.045,
-    pullbackTarget: 0.02,
-    netBuyinTarget: 50000,
-    secretLoaded: false,
-    secretName: 'Loaded via Cloudflare ENV',
-    contractAddress: ""
-  },
-  internalAccs: [],
-  outsiderAccs: [],
-  logs: [],
-  stats: {
-    price: 0,
-    maPrice: 0,
-    totalWlt: 1000000000,
-    liqUsdc: 0,
-    fdv: 0,
-    totalOutsiders: 0
-  }
-};
+// Configuration is loaded from D1 or ENV
 
 export default {
   async fetch(request: Request, env: Env, ctx: any): Promise<Response> {
@@ -93,42 +145,33 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
     try {
       const url = new URL(request.url);
 
-      // Load from KV if available, else use memory mock
-      let state = memoryState;
-      if (env.TRADING_KV) {
-        const storedState = await env.TRADING_KV.get('engineState', 'json');
-        if (storedState) {
-          state = { ...memoryState, ...storedState };
-        }
+      if (!env.DB) {
+         return new Response(JSON.stringify({ error: "D1 Database binding 'DB' is missing" }), {
+           status: 500, headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' }
+         });
       }
 
       // --- DASHBOARD API ENDPOINTS ---
       if (url.pathname === '/api/state' && request.method === 'GET') {
+        const state = await getEngineStateFromD1(env.DB);
+        
         const envKey = state.settings.secretName;
-        // If the secretName matches an ENV key
         let rawKey = envKey && (env as any)[envKey] ? (env as any)[envKey] : null;
 
         if (!rawKey && envKey && (envKey.startsWith('[') || envKey.length > 30)) {
-           // If the user pasted the actual key or array
            rawKey = envKey;
         }
         if (!rawKey) {
-           // fallback
            rawKey = (env as any).PVK3 || (env as any).BOT_SECRET_KEY;
         }
         
         state.settings.secretLoaded = !!rawKey;
         
-        // Compute internal sub-accounts if secret is configured and not yet parsed
+        // Compute internal sub-accounts if secret is configured and missing from DB
         if (rawKey && state.internalAccs.length === 0) {
           try {
              const secretRaw = rawKey.trim();
-             let secretKey;
-             if (secretRaw.startsWith('[')) {
-               secretKey = new Uint8Array(JSON.parse(secretRaw));
-             } else {
-               secretKey = bs58.decode(secretRaw);
-             }
+             let secretKey = secretRaw.startsWith('[') ? new Uint8Array(JSON.parse(secretRaw)) : bs58.decode(secretRaw);
              
              if (secretKey) {
                const primaryWallet = Keypair.fromSecretKey(secretKey);
@@ -141,22 +184,13 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
                   const hashBuffer = await crypto.subtle.digest('SHA-256', data);
                   const hashArray = new Uint8Array(hashBuffer);
                   const k = Keypair.fromSeed(hashArray.slice(0, 32));
-                  state.internalAccs.push({
-                      id: `int-${i}`,
-                      wallet: "Derived Sub-Account",
-                      address: k.publicKey.toBase58(),
-                      mint: "Native SOL",
-                      tag: `Trading Bot #${i + 1}`,
-                      usdc: 0, 
-                      sol: 0, 
-                      wlt: 0, 
-                      deposit: 0,
-                      profit: 0,
-                      usdcWithdraw: 0,
-                      wltWithdraw: 0,
-                      selected: false 
-                  });
+                  await env.DB.prepare("INSERT OR IGNORE INTO accounts (id, type, wallet_address, tag) VALUES (?, ?, ?, ?)")
+                    .bind(`int-${i}`, 'internal', k.publicKey.toBase58(), `Trading Bot #${i + 1}`)
+                    .run();
                }
+               // Refresh state after inserting
+               const refreshed = await getEngineStateFromD1(env.DB);
+               state.internalAccs = refreshed.internalAccs;
              }
           } catch(e) {
              console.error("Error generating sub-accounts", e);
@@ -171,15 +205,41 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
       if (url.pathname === '/api/settings' && request.method === 'POST') {
         try {
           const body: any = await request.json();
-          if (body.volatilityTarget) state.settings.volatilityTarget = parseFloat(body.volatilityTarget) / 100;
-          if (body.pullbackTarget) state.settings.pullbackTarget = parseFloat(body.pullbackTarget) / 100;
-          if (body.contractAddress) state.settings.contractAddress = body.contractAddress;
-          if (body.secretName) state.settings.secretName = body.secretName;
-
-          if (env.TRADING_KV) {
-             await env.TRADING_KV.put('engineState', JSON.stringify(state));
-          } else {
-             memoryState = state;
+          const stmts = [];
+          
+          if (body.volatilityTarget) {
+             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('volatilityTarget', ?)").bind(parseFloat(body.volatilityTarget) / 100));
+          }
+          if (body.pullbackTarget) {
+             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('pullbackTarget', ?)").bind(parseFloat(body.pullbackTarget) / 100));
+          }
+          if (body.contractAddress !== undefined) {
+             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('contractAddress', ?)").bind(body.contractAddress));
+          }
+          if (body.secretName !== undefined) {
+             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('secretName', ?)").bind(body.secretName));
+          }
+          if (body.volumeTarget !== undefined) {
+             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('volumeTarget', ?)").bind(body.volumeTarget));
+          }
+          if (body.netBuyinTarget !== undefined) {
+             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('netBuyinTarget', ?)").bind(body.netBuyinTarget));
+          }
+          if (body.timeRangeTarget !== undefined) {
+             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('timeRangeTarget', ?)").bind(body.timeRangeTarget));
+          }
+          if (body.maxTransactions !== undefined) {
+             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maxTransactions', ?)").bind(body.maxTransactions));
+          }
+          if (body.maxSlippage !== undefined) {
+             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maxSlippage', ?)").bind(body.maxSlippage));
+          }
+          if (body.tradingAlgorithm !== undefined) {
+             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('tradingAlgorithm', ?)").bind(body.tradingAlgorithm));
+          }
+          
+          if (stmts.length > 0) {
+             await env.DB.batch(stmts);
           }
 
           return new Response(JSON.stringify({ success: true }), { 
@@ -195,26 +255,10 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           const body: any = await request.json();
           console.log("Trade Request Received:", body);
           
-          // Log the transaction
-          const newLog = {
-            id: Date.now().toString(),
-            time: new Date().toISOString().split('T')[1].slice(0, 8),
-            tag: body.symbol || "Unknown",
-            address: "Worker API Test",
-            action: body.action || "Trade",
-            amount: "N/A",
-            status: "Success",
-            txId: "local-" + Math.random().toString(36).substring(7)
-          };
-          
-          state.logs.unshift(newLog);
-          if (state.logs.length > 50) state.logs.pop(); // keep last 50
-          
-          if (env.TRADING_KV) {
-             await env.TRADING_KV.put('engineState', JSON.stringify(state));
-          } else {
-             memoryState = state;
-          }
+          // Log the transaction to DB
+          await env.DB.prepare("INSERT INTO trade_logs (id, wallet_address, symbol, action, price, amount, tx_signature, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(Date.now().toString(), "Worker API Test", body.symbol || "Unknown", body.action || "Trade", null, 0, "local-" + Math.random().toString(36).substring(7), "Success")
+            .run();
 
           return new Response(JSON.stringify({ success: true, message: `Trade executed & logged for ${body.symbol}` }), {
             headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' }
@@ -229,6 +273,12 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
         try {
           const payload: any[] = await request.json();
           const response = new Response('Webhook received', { status: 200, headers: corsHeaders(request.headers.get("Origin")) });
+          
+          // Log Webhook to D1 immediately
+          await env.DB.prepare("INSERT INTO signals (id, source, event_type, payload) VALUES (?, ?, ?, ?)")
+            .bind(Date.now().toString() + Math.random().toString(36).slice(2), "helius", "SWAP", JSON.stringify(payload))
+            .run();
+            
           ctx.waitUntil(processTradingLogic(payload, env));
           return response;
         } catch (e) {
@@ -248,15 +298,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
 }
 
 async function processTradingLogic(txs: any[], env: Env) {
-  // Load from KV if available, else use memory mock
-  let state = memoryState;
-  if (env.TRADING_KV) {
-    const storedState = await env.TRADING_KV.get('engineState', 'json');
-    if (storedState) {
-      state = { ...memoryState, ...storedState };
-    }
-  }
-
+  const state = await getEngineStateFromD1(env.DB);
   const envKey = state.settings.secretName;
   let rawKey = envKey && (env as any)[envKey] ? (env as any)[envKey] : null;
   if (!rawKey && envKey && (envKey.startsWith('[') || envKey.length > 30)) {
@@ -269,23 +311,18 @@ async function processTradingLogic(txs: any[], env: Env) {
   // Loop through all transactions provided in this webhook batch
   for (const tx of txs) {
     console.log(`Processing Tx: ${tx.signature}`);
-    
-    // Example: Check if the transaction represents a massive buy order
     const nativeInputAmount = tx?.events?.swap?.nativeInput?.amount;
     
     if (nativeInputAmount > 1000000000) { 
       console.log('Whale Buy Detected! Executing algorithm pullback protocol...');
-      
       const connection = new Connection(env.RPC_URL || "https://api.mainnet-beta.solana.com");
       try {
          if (rawKey) {
              const secretRaw = rawKey.trim();
-             const secretKey = secretRaw.startsWith('[') 
-                 ? Uint8Array.from(JSON.parse(secretRaw))
-                 : bs58.decode(secretRaw);
+             const secretKey = secretRaw.startsWith('[') ? Uint8Array.from(JSON.parse(secretRaw)) : bs58.decode(secretRaw);
              if (secretKey) {
                  const botKeypair = Keypair.fromSecretKey(secretKey);
-                 // Logic...
+                 // Algorithm executing trades using our D1 state configuration...
              }
          }
       } catch(e) {

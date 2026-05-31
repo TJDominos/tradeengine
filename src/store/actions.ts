@@ -1,5 +1,13 @@
 import { AppState } from '../types';
 
+const formatWithCommas = (val: string) => {
+  const clean = val.replace(/[^0-9.-]/g, '');
+  if (!clean) return '';
+  const parts = clean.split('.');
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return parts.join('.');
+};
+
 export const createActions = (set: any, get: any) => ({
   setActiveTab: (tab: string) => set({ activeTab: tab }),
   setDateRange: (range: { from: string; to: string }) => set({ dateRange: range }),
@@ -13,6 +21,12 @@ export const createActions = (set: any, get: any) => ({
   
   setVolTarget: (val: string) => set({ volTarget: val }),
   setPullbackTarget: (val: string) => set({ pullbackTarget: val }),
+  setVolumeTarget: (val: string) => set({ volumeTarget: formatWithCommas(val) }),
+  setNetBuyinTarget: (val: string) => set({ netBuyinTarget: formatWithCommas(val) }),
+  setTimeRangeTarget: (val: string) => set({ timeRangeTarget: val }),
+  setMaxTransactions: (val: string) => set({ maxTransactions: val }),
+  setMaxSlippage: (val: string) => set({ maxSlippage: val }),
+  setTradingAlgorithm: (val: string) => set({ tradingAlgorithm: val }),
   setSecretName: (val: string) => set({ secretName: val }),
   setContractAddress: (val: string) => set({ contractAddress: val }),
   setWorkerUrl: (val: string) => set({ workerUrl: val }),
@@ -100,18 +114,50 @@ export const createActions = (set: any, get: any) => ({
         lastUpdated: new Date().toLocaleTimeString()
       };
       
-      if (data.settings && data.settings.contractAddress) {
-        payload.contractAddress = data.settings.contractAddress;
+      if (data.settings) {
+        if (data.settings.contractAddress) {
+          payload.contractAddress = data.settings.contractAddress;
+        }
+        if (data.settings.volatilityTarget !== undefined) {
+          payload.volTarget = ((parseFloat(data.settings.volatilityTarget) || 0.045) * 100).toFixed(1);
+        }
+        if (data.settings.pullbackTarget !== undefined) {
+          payload.pullbackTarget = ((parseFloat(data.settings.pullbackTarget) || 0.02) * 100).toFixed(1);
+        }
+        if (data.settings.volumeTarget !== undefined) {
+          payload.volumeTarget = formatWithCommas(data.settings.volumeTarget.toString());
+        }
+        if (data.settings.netBuyinTarget !== undefined) {
+          payload.netBuyinTarget = formatWithCommas(data.settings.netBuyinTarget.toString());
+        }
+        if (data.settings.timeRangeTarget !== undefined) {
+          payload.timeRangeTarget = data.settings.timeRangeTarget.toString();
+        }
+        if (data.settings.maxTransactions !== undefined) {
+          payload.maxTransactions = data.settings.maxTransactions.toString();
+        }
+        if (data.settings.maxSlippage !== undefined) {
+          payload.maxSlippage = data.settings.maxSlippage.toString();
+        }
+        if (data.settings.tradingAlgorithm !== undefined) {
+          payload.tradingAlgorithm = data.settings.tradingAlgorithm;
+        }
       }
       
       set(payload);
-    } catch (e) {
+    } catch (e: any) {
       console.error("Failed to fetch engine state", e);
+      set({
+        engineState: {
+          error: "Execution Engine Unreachable",
+          details: `Check your network connection or the status of the execution node. \nError: ${e.message}`
+        }
+      });
     }
   },
 
   handleSaveConfig: async () => {
-    const { workerUrl, volTarget, pullbackTarget, contractAddress, secretName } = get();
+    const { workerUrl, volTarget, pullbackTarget, volumeTarget, netBuyinTarget, timeRangeTarget, maxTransactions, maxSlippage, tradingAlgorithm, contractAddress, secretName } = get();
     const actions = get().actions;
     try {
       let formattedUrl = workerUrl.trim();
@@ -129,6 +175,12 @@ export const createActions = (set: any, get: any) => ({
         body: JSON.stringify({
           volatilityTarget: volTarget,
           pullbackTarget: pullbackTarget,
+          volumeTarget: volumeTarget.replace(/,/g, ''),
+          netBuyinTarget: netBuyinTarget.replace(/,/g, ''),
+          timeRangeTarget: timeRangeTarget,
+          maxTransactions: maxTransactions,
+          maxSlippage: maxSlippage,
+          tradingAlgorithm: tradingAlgorithm,
           contractAddress: contractAddress,
           secretName: secretName
         })

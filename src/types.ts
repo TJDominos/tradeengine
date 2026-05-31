@@ -10,6 +10,7 @@ export interface EngineState {
     fdv: number;
     totalOutsiders: number;
   };
+  setups?: any[];
   settings?: any;
 }
 
@@ -25,6 +26,12 @@ export interface AppState {
   logCurrentPage: number;
   volTarget: string;
   pullbackTarget: string;
+  volumeTarget: string;
+  netBuyinTarget: string;
+  timeRangeTarget: string;
+  maxTransactions: string;
+  maxSlippage: string;
+  tradingAlgorithm: string;
   secretName: string;
   contractAddress: string;
   workerUrl: string;

@@ -9,8 +9,10 @@ node_compat = true
 [vars]
 RPC_URL = "https://api.mainnet-beta.solana.com"
 
-# Bind a KV Namespace to persist account tags, addresses, and transaction logs
-# Create one via: npx wrangler kv:namespace create "TRADING_KV"
-# [[kv_namespaces]]
-# binding = "TRADING_KV"
-# id = "<YOUR_NAMESPACE_ID>"
+# Bind a D1 Database for relational production data
+[[d1_databases]]
+binding = "DB"
+database_name = "trading_engine_db"
+database_id = "local-dev-id" # For local development
+migrations_dir = "./migrations"
+

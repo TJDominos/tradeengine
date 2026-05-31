@@ -3,7 +3,7 @@ import React, { useEffect } from 'react';
 import { 
   Activity, Wallet, RefreshCw, TrendingUp, TrendingDown, 
   Settings, Users, Clock, Calendar, CheckSquare, 
-  Square, Trash2, Plus, Code, Lock, Search, FileText, ChevronLeft, ChevronRight, Server
+  Square, Trash2, Plus, Code, Lock, Search, FileText, ChevronLeft, ChevronRight, Server, Archive
 } from 'lucide-react';
 import { useStore } from './store';
 
@@ -276,6 +276,37 @@ function ComboInput({ value, onChange, onSave, onDelete, savedItems, placeholder
   );
 }
 
+function SettingInput({ label, sublabel, value, onChange, options }: any) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">
+        {label}
+        {sublabel && <span className="normal-case text-[10px] text-slate-500 ml-1.5 bg-slate-800 px-1.5 py-0.5 rounded">{sublabel}</span>}
+      </label>
+      <div className="flex gap-2">
+        {options ? (
+          <select
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            className="flex-1 h-10 w-full bg-slate-950 border border-slate-700 rounded-md px-3 text-sm focus:border-blue-500 outline-none transition-colors appearance-none"
+          >
+            {options.map((opt: any) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        ) : (
+          <input 
+            type="text" 
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            className="flex-1 h-10 w-full bg-slate-950 border border-slate-700 rounded-md px-3 text-sm focus:border-blue-500 outline-none transition-colors" 
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 // --- MAIN APP ---
 export default function App() {
   const store = useStore();
@@ -315,6 +346,8 @@ export default function App() {
     return () => clearInterval(interval);
   }, [workerUrl, actions]);
 
+  const [isSimulationModalOpen, setIsSimulationModalOpen] = React.useState(false);
+
   const handleRefresh = () => {
     actions.fetchState();
   };
@@ -327,6 +360,22 @@ export default function App() {
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-400 gap-4">
         <Server className="animate-pulse" size={32} />
         <p className="font-mono uppercase tracking-wider text-sm">Initializing WLT Core Engine...</p>
+      </div>
+    );
+  }
+
+  if (engineState.error) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-rose-400 gap-4 p-8 text-center">
+        <Server size={48} className="text-rose-500 mb-2 opacity-80" />
+        <span className="font-bold text-xl">{engineState.error}</span>
+        <span className="text-sm opacity-80 max-w-lg font-mono bg-rose-950/30 p-4 rounded-md border border-rose-900/50 mt-2">
+          {engineState.details || "The server proxy failed to fetch from the specified worker. Ensure the Cloudflare Worker is running."}
+        </span>
+        <div className="mt-8 flex gap-4">
+           <button onClick={() => actions.setWorkerUrl('')} className="bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-md transition border border-slate-700">Clear Worker URL</button>
+           <button onClick={() => actions.fetchState()} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-md transition shadow-[0_0_15px_-3px_rgba(37,99,235,0.4)]">Retry Connection</button>
+        </div>
       </div>
     );
   }
@@ -487,6 +536,112 @@ export default function App() {
     );
   };
 
+  // --- TAB 4: HISTORICAL SETUPS ---
+  const renderSetups = () => {
+    const setups = engineState?.setups || [];
+    const logs = engineState?.logs || [];
+    
+    return (
+      <div className="space-y-6 flex flex-col gap-4">
+        {setups.length === 0 ? (
+           <div className="bg-slate-900 border border-slate-800 rounded-xl p-10 text-center text-slate-500 shadow-sm flex flex-col items-center">
+             <Archive size={40} className="mb-4 opacity-50" />
+             <p className="text-lg font-medium text-slate-400">No Historical Setups Found</p>
+             <p className="text-sm max-w-[400px] mx-auto mt-2">Deploy a new engine configuration from the Trading Setup tab to start tracking historical changes and their associated transactions.</p>
+           </div>
+        ) : (
+          setups.map((setup: any, idx: number) => {
+            const setupLogs = logs.filter((l: any) => l.setupId === setup.id);
+            return (
+              <div key={setup.id} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-sm">
+                <div className="bg-slate-800/50 p-4 border-b border-slate-800 flex justify-between items-center">
+                  <div>
+                    <h3 className="font-semibold text-slate-200 text-lg flex items-center gap-2">
+                      <Archive size={16} className="text-emerald-500" />
+                      Configuration Setup {idx === 0 ? "(Active)" : `(${setups.length - idx})`}
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-1">Deployed {new Date(setup.timestamp).toLocaleString()}</p>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-sm font-medium text-slate-300 block">{setupLogs.length} Transactions</span>
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-5 bg-slate-900/50 border-b border-slate-800 text-sm">
+                   <div>
+                     <span className="text-slate-500 text-xs block mb-1">Time Range Condition</span>
+                     <span className="font-medium text-slate-300">{setup.timeRangeTarget}</span>
+                   </div>
+                   <div>
+                     <span className="text-slate-500 text-xs block mb-1">Volume Target</span>
+                     <span className="font-medium text-slate-300">{setup.volumeTarget} USDC</span>
+                   </div>
+                   <div>
+                     <span className="text-slate-500 text-xs block mb-1">Net Buyin</span>
+                     <span className="font-medium text-slate-300">{setup.netBuyinTarget} USDC</span>
+                   </div>
+                   <div>
+                     <span className="text-slate-500 text-xs block mb-1">Volatility</span>
+                     <span className="font-medium text-slate-300">{(setup.volatilityTarget * 100).toFixed(1)}%</span>
+                   </div>
+                </div>
+
+                {/* Optional Metadata block for extensibility */}
+                {setup.metadata && Object.keys(setup.metadata).length > 0 && (
+                   <div className="p-4 bg-slate-900/30 border-b border-slate-800">
+                     <span className="text-xs text-slate-500 font-semibold uppercase block mb-2">Extended Inputs</span>
+                     <div className="flex flex-wrap gap-2 text-xs text-slate-400">
+                        {Object.entries(setup.metadata).map(([k, v]) => (
+                           <span key={k} className="bg-slate-800 px-2 py-1 rounded">
+                             <strong className="text-slate-300">{k}:</strong> {String(v)}
+                           </span>
+                        ))}
+                     </div>
+                   </div>
+                )}
+                
+                <div className="p-0">
+                  {setupLogs.length > 0 ? (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-sm">
+                        <thead>
+                          <tr className="border-b border-slate-800 bg-slate-900 h-10 text-xs font-semibold text-slate-400 uppercase">
+                           <th className="px-4 font-medium" style={{width: '20%'}}>Time</th>
+                           <th className="px-4 font-medium" style={{width: '20%'}}>Action</th>
+                           <th className="px-4 font-medium" style={{width: '60%'}}>Tx Details</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800">
+                           {setupLogs.map((log: any) => (
+                              <tr key={log.id} className="hover:bg-slate-800/50 transition-colors">
+                                 <td className="px-4 py-2 font-mono text-slate-400 text-xs">{log.time}</td>
+                                 <td className="px-4 py-2">
+                                     <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${log.action === 'BUY' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border-rose-500/20'}`}>
+                                       {log.action}
+                                     </span>
+                                 </td>
+                                 <td className="px-4 py-2 text-slate-300 text-xs">
+                                   {log.tag} • {log.address}
+                                 </td>
+                              </tr>
+                           ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="p-6 text-center text-slate-500 text-sm">
+                      No transactions have been processed by this setup yet.
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+    );
+  };
+
   // --- TAB 3: TRADING SETUP ---
   const renderSetup = () => (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
@@ -545,49 +700,69 @@ export default function App() {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-4 pt-2">
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Dev Target (USDC)</label>
-              <input type="text" defaultValue="500,000" className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm focus:border-blue-500 outline-none transition-colors" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">
-                Net Buyin Target
-                <span className="normal-case text-[10px] text-slate-500 ml-1.5 bg-slate-800 px-1.5 py-0.5 rounded">(Negative = Sell)</span>
-              </label>
-              <input type="text" defaultValue="50,000" className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm focus:border-blue-500 outline-none transition-colors" />
-            </div>
+          <div className="pt-2">
+            <SettingInput
+              label="Time Range Target"
+              sublabel="(Target Pre-Condition)"
+              value={store.timeRangeTarget}
+              onChange={actions.setTimeRangeTarget}
+              options={[
+                { label: '1 Hour', value: '1h' },
+                { label: '6 Hours', value: '6h' },
+                { label: '12 Hours', value: '12h' },
+                { label: '24 Hours', value: '24h' },
+                { label: '3 Days', value: '3d' },
+                { label: '1 Week', value: '1w' },
+              ]}
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Volatility Target (%)</label>
-              <input 
-                 type="text" 
-                 value={volTarget} 
-                 onChange={(e) => actions.setVolTarget(e.target.value)}
-                 className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm focus:border-blue-500 outline-none transition-colors" 
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Outsider Pull Back (%)</label>
-              <input 
-                 type="text" 
-                 value={pullbackTarget} 
-                 onChange={(e) => actions.setPullbackTarget(e.target.value)}
-                 className="w-full h-10 bg-slate-950 border border-slate-700 rounded-md px-3 text-sm focus:border-blue-500 outline-none transition-colors" 
-              />
-            </div>
+            <SettingInput
+              label="Max Transactions"
+              sublabel="(Time Range Limit)"
+              value={store.maxTransactions}
+              onChange={actions.setMaxTransactions}
+            />
+            <SettingInput
+              label="Max Slippage"
+              sublabel="(Min 0.0001 / 1 bps)"
+              value={store.maxSlippage}
+              onChange={actions.setMaxSlippage}
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <SettingInput
+              label="Volume Target (USDC)"
+              value={store.volumeTarget}
+              onChange={actions.setVolumeTarget}
+            />
+            <SettingInput
+              label="Net Buyin Target"
+              sublabel="(Negative = Sell)"
+              value={store.netBuyinTarget}
+              onChange={actions.setNetBuyinTarget}
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <SettingInput
+              label="Volatility Target (%)"
+              value={volTarget}
+              onChange={actions.setVolTarget}
+            />
+            <SettingInput
+              label="Outsider Pull Back (%)"
+              value={pullbackTarget}
+              onChange={actions.setPullbackTarget}
+            />
           </div>
         </div>
-
+        
         <div className="flex flex-col gap-3 mt-4">
-          <button onClick={actions.handleSaveConfig} className="w-full h-11 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-md transition-colors shadow-sm cursor-pointer">
-            Deploy Engine Configuration
-          </button>
-          
-          <button onClick={actions.handleTestTrade} className="w-full h-11 bg-emerald-600 border border-emerald-500 hover:bg-emerald-500 text-white font-semibold rounded-md transition-colors shadow-sm cursor-pointer">
-            Test Trade (Worker API)
+          <button onClick={actions.handleSaveConfig} className="w-full h-11 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-md transition-colors shadow-sm cursor-pointer border border-blue-500">
+            Save Configuration
           </button>
         </div>
       </div>
@@ -596,8 +771,18 @@ export default function App() {
         <h3 className="font-semibold flex items-center gap-2 border-b border-slate-800 pb-4 text-lg"><Code size={18}/> Trading Algorithm (Cloudflare + Helius)</h3>
         <textarea 
           className="w-full flex-1 mt-4 bg-slate-950 border border-slate-700 rounded-md p-4 text-[13px] font-mono leading-relaxed text-emerald-400 focus:border-blue-500 outline-none resize-none transition-colors"
-          defaultValue={workerAlgorithmTemplate}
+          value={store.tradingAlgorithm}
+          onChange={(e) => actions.setTradingAlgorithm(e.target.value)}
+          placeholder="// Write your trading algorithm logic here"
         ></textarea>
+        <div className="flex gap-3 mt-4 pt-4 border-t border-slate-800">
+          <button onClick={actions.handleSaveConfig} className="flex-1 h-10 bg-emerald-600 hover:bg-emerald-700 font-medium text-white rounded-md transition-colors shadow-sm cursor-pointer">
+            Update
+          </button>
+          <button onClick={() => setIsSimulationModalOpen(true)} className="flex-1 h-10 bg-slate-800 hover:bg-slate-700 text-white font-medium rounded-md transition-colors shadow-sm cursor-pointer border border-slate-700">
+            Simulation Summary
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -616,7 +801,7 @@ export default function App() {
       <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col shadow-sm">
         <div className="p-4 border-b border-slate-800 bg-slate-900/80 flex justify-between items-center">
           <h3 className="font-semibold flex items-center gap-2 text-lg">
-             <FileText size={18}/> Live Network Activity Log
+             <FileText size={18}/> Live Transaction Log
              <span className="flex items-center gap-1.5 text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full ml-4 font-mono">
                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> LIVE
              </span>
@@ -711,6 +896,7 @@ export default function App() {
         <TabButton active={activeTab === 'dashboard'} onClick={() => actions.setActiveTab('dashboard')} icon={<Activity size={16}/>} label="Dashboard" />
         <TabButton active={activeTab === 'accounts'} onClick={() => actions.setActiveTab('accounts')} icon={<Users size={16}/>} label="Accounts" />
         <TabButton active={activeTab === 'setup'} onClick={() => actions.setActiveTab('setup')} icon={<Settings size={16}/>} label="Trading Setup" />
+        <TabButton active={activeTab === 'setups'} onClick={() => actions.setActiveTab('setups')} icon={<Archive size={16}/>} label="Historical Setups" />
       </div>
 
       {/* Main Content Area */}
@@ -718,7 +904,85 @@ export default function App() {
         {activeTab === 'dashboard' && renderDashboard()}
         {activeTab === 'accounts' && renderAccounts()}
         {activeTab === 'setup' && renderSetup()}
+        {activeTab === 'setups' && renderSetups()}
       </div>
+
+      {isSimulationModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-3xl flex flex-col overflow-hidden max-h-[85vh]">
+            <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/80">
+              <h3 className="font-semibold text-lg flex items-center gap-2">
+                <Code size={18} className="text-emerald-500" />
+                Simulation Summary
+              </h3>
+              <button 
+                onClick={() => setIsSimulationModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1 font-mono text-sm space-y-6">
+               <div className="bg-slate-950 border border-slate-800 rounded p-4 text-emerald-400/90 text-xs shadow-inner">
+                 <p>{">"} INITIALIZING BACKTEST ENVIRONMENT...</p>
+                 <p className="mt-1">{">"} LOADING HISTORICAL TICKS (Target: {store.timeRangeTarget})...</p>
+                 <p className="mt-1">{">"} APPLYING ALGORITHM LOGIC...</p>
+                 <p className="mt-1">{">"} ENGINE REPLAY COMPLETE.</p>
+               </div>
+               
+               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                 <div className="bg-slate-800/50 p-4 rounded border border-slate-700/50">
+                    <p className="text-slate-500 text-[10px] uppercase font-sans font-bold">Total Simulated Tx</p>
+                    <p className="text-xl font-medium mt-1">42</p>
+                 </div>
+                 <div className="bg-slate-800/50 p-4 rounded border border-slate-700/50">
+                    <p className="text-slate-500 text-[10px] uppercase font-sans font-bold">Win Rate</p>
+                    <p className="text-xl font-medium mt-1">68.5%</p>
+                 </div>
+                 <div className="bg-slate-800/50 p-4 rounded border border-slate-700/50">
+                    <p className="text-slate-500 text-[10px] uppercase font-sans font-bold">Estimated Profit</p>
+                    <p className="text-xl font-medium mt-1 text-emerald-400">+$1,240.50</p>
+                 </div>
+                 <div className="bg-slate-800/50 p-4 rounded border border-slate-700/50">
+                    <p className="text-slate-500 text-[10px] uppercase font-sans font-bold">Max Drawdown</p>
+                    <p className="text-xl font-medium mt-1 text-rose-400">-4.2%</p>
+                 </div>
+               </div>
+
+               <div>
+                 <h4 className="text-slate-300 font-sans font-semibold mb-3 text-sm">Sample Action Sequence</h4>
+                 <div className="space-y-2 text-xs">
+                    <div className="flex justify-between items-center bg-slate-950 p-2 rounded border border-slate-800">
+                      <span className="text-slate-500">T-12h 00m</span>
+                      <span className="text-blue-400">SIGNAL_TRIGGER</span>
+                      <span className="text-slate-300 hidden sm:inline">Volume Spiked {">"} {store.volumeTarget || '50,000'}</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-950 p-2 rounded border border-slate-800">
+                      <span className="text-slate-500">T-11h 59m</span>
+                      <span className="text-emerald-400">EXECUTE BUY</span>
+                      <span className="text-slate-300 hidden sm:inline">0.5 SOL @ 142.30</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-950 p-2 rounded border border-slate-800">
+                      <span className="text-slate-500">T-10h 30m</span>
+                      <span className="text-rose-400">EXECUTE SELL</span>
+                      <span className="text-slate-300 hidden sm:inline">0.5 SOL @ 148.10 (Take Profit)</span>
+                    </div>
+                 </div>
+               </div>
+            </div>
+            
+            <div className="p-4 border-t border-slate-800 bg-slate-900 flex justify-end">
+              <button 
+                onClick={() => setIsSimulationModalOpen(false)}
+                className="px-6 h-10 bg-slate-800 hover:bg-slate-700 font-medium text-white rounded-md transition-colors border border-slate-700"
+              >
+                Close Summary
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

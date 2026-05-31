@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import dotenv from "dotenv";
+import fs from "fs";
 import crypto from "crypto";
 import cors from "cors";
 
@@ -66,10 +67,16 @@ const engineState: any = {
     fdv: 0,
     totalOutsiders: 0
   },
+  setups: [],
   settings: {
-    volatilityTarget: 0.045,
-    pullbackTarget: 0.02,
-    netBuyinTarget: 50000,
+    volatilityTarget: 0,
+    pullbackTarget: 0,
+    volumeTarget: 0,
+    netBuyinTarget: 0,
+    timeRangeTarget: '24h',
+    maxTransactions: 100,
+    maxSlippage: 0.0100,
+    tradingAlgorithm: '// Enter your trading algorithm here\nfunction executeTrade(state) {\n  // return action\n}',
     secretLoaded: primaryWallet !== null,
     secretName: activeSecretName, // Send the name to UI, not the key!
     contractAddress: CURRENT_CONTRACT_ADDRESS,
@@ -200,6 +207,8 @@ async function startServer() {
     const { symbol, action } = req.body;
     console.log(`Mock local test trade: ${action} ${symbol}`);
     
+    const currentSetupId = engineState.setups.length > 0 ? engineState.setups[0].id : "default";
+
     // Log the transaction
     const newLog = {
       id: Date.now().toString(),
@@ -209,7 +218,9 @@ async function startServer() {
       action: action || "Trade",
       amount: "N/A",
       status: "Success",
-      txId: "local-" + Math.random().toString(36).substring(7)
+      txId: "local-" + Math.random().toString(36).substring(7),
+      setupId: currentSetupId,
+      metadata: {}
     };
     
     engineState.logs.unshift(newLog);
@@ -220,14 +231,38 @@ async function startServer() {
 
   // API: Update settings
   app.post("/api/settings", (req, res) => {
-    const { volatilityTarget, pullbackTarget, secretName, netBuyinTarget, contractAddress } = req.body;
+    const { volatilityTarget, pullbackTarget, secretName, netBuyinTarget, volumeTarget, timeRangeTarget, maxTransactions, maxSlippage, tradingAlgorithm, contractAddress } = req.body;
     if (volatilityTarget) engineState.settings.volatilityTarget = parseFloat(volatilityTarget) / 100;
     if (pullbackTarget) engineState.settings.pullbackTarget = parseFloat(pullbackTarget) / 100;
+    if (volumeTarget) engineState.settings.volumeTarget = parseFloat(volumeTarget);
+    if (netBuyinTarget) engineState.settings.netBuyinTarget = parseFloat(netBuyinTarget);
+    if (timeRangeTarget) engineState.settings.timeRangeTarget = timeRangeTarget;
+    if (maxTransactions) engineState.settings.maxTransactions = parseInt(maxTransactions);
+    if (maxSlippage) engineState.settings.maxSlippage = parseFloat(maxSlippage);
+    if (tradingAlgorithm !== undefined) engineState.settings.tradingAlgorithm = tradingAlgorithm;
     if (contractAddress) {
         CURRENT_CONTRACT_ADDRESS = contractAddress;
         engineState.settings.contractAddress = contractAddress;
     }
     
+    // Save to historical setups
+    const setupId = "setup-" + Date.now().toString();
+    const newSetup = {
+      id: setupId,
+      timestamp: new Date().toISOString(),
+      volatilityTarget: engineState.settings.volatilityTarget,
+      pullbackTarget: engineState.settings.pullbackTarget,
+      volumeTarget: engineState.settings.volumeTarget,
+      netBuyinTarget: engineState.settings.netBuyinTarget,
+      timeRangeTarget: engineState.settings.timeRangeTarget,
+      maxTransactions: engineState.settings.maxTransactions,
+      maxSlippage: engineState.settings.maxSlippage,
+      tradingAlgorithm: engineState.settings.tradingAlgorithm,
+      contractAddress: engineState.settings.contractAddress,
+      metadata: req.body.metadata || {} // allow for optional expandable inputs
+    };
+    engineState.setups.unshift(newSetup);
+
     if (secretName) {
         const rawSecret = secretName.trim();
         let success = false;
@@ -337,8 +372,10 @@ async function startServer() {
     }
   });
 
+  const isProduction = process.env.NODE_ENV === "production" || fs.existsSync(path.join(process.cwd(), 'dist', 'index.html'));
+
   // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
