@@ -324,9 +324,11 @@ async function startServer() {
       }
 
       const targetPath = workerUrl.endsWith('/') ? workerUrl.slice(0, -1) : workerUrl;
-      // remove the `?workerUrl=...` from req.url so we only append the path
+      // remove the `?workerUrl=...` and other proxy config from req.url so we only append the path
       const urlObj = new URL(req.url, `http://${req.headers.host}`);
       urlObj.searchParams.delete('workerUrl');
+      urlObj.searchParams.delete('cfClientId');
+      urlObj.searchParams.delete('cfClientSecret');
       const targetUrl = `${targetPath}${urlObj.pathname}${urlObj.search}`;
       console.log("PROXYING TO:", targetUrl);
 
@@ -343,6 +345,9 @@ async function startServer() {
       if (cfClientId) fetchOptions.headers["CF-Access-Client-Id"] = cfClientId as string;
       const cfClientSecret = process.env.CF_ACCESS_CLIENT_SECRET || req.query.cfClientSecret;
       if (cfClientSecret) fetchOptions.headers["CF-Access-Client-Secret"] = cfClientSecret as string;
+      
+      console.log("CF Access Client ID provided:", !!cfClientId);
+      console.log("CF Access Client Secret provided:", !!cfClientSecret);
 
       if (fetchOptions.headers["Authorization"] === undefined) {
           delete fetchOptions.headers["Authorization"];
@@ -367,7 +372,13 @@ async function startServer() {
            // We got HTML or text when we expected JSON.
            res.status(proxyRes.status).json({
              error: `Received non-JSON response from worker. Check your Worker URL.`,
-             details: data.slice(0, 100) + "..."
+             details: data.slice(0, 100) + "...",
+             debug: {
+                hasClientId: !!cfClientId,
+                hasClientSecret: !!cfClientSecret,
+                sentHeaders: fetchOptions.headers,
+                targetUrl
+             }
            });
         }
       }
