@@ -339,6 +339,11 @@ async function startServer() {
         }
       };
 
+      const cfClientId = process.env.CF_ACCESS_CLIENT_ID;
+      if (cfClientId) fetchOptions.headers["CF-Access-Client-Id"] = cfClientId;
+      const cfClientSecret = process.env.CF_ACCESS_CLIENT_SECRET;
+      if (cfClientSecret) fetchOptions.headers["CF-Access-Client-Secret"] = cfClientSecret;
+
       if (fetchOptions.headers["Authorization"] === undefined) {
           delete fetchOptions.headers["Authorization"];
       }

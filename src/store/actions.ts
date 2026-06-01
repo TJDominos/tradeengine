@@ -95,10 +95,10 @@ export const createActions = (set: any, get: any) => ({
         formattedUrl = 'https://' + formattedUrl;
       }
 
-      const endpoint = formattedUrl 
+      let endpoint = formattedUrl 
         ? `/api/proxy/api/state?workerUrl=${encodeURIComponent(formattedUrl)}` 
         : '/api/state';
-        
+
       const res = await fetch(endpoint);
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);
@@ -165,13 +165,15 @@ export const createActions = (set: any, get: any) => ({
         formattedUrl = 'https://' + formattedUrl;
       }
       
-      const endpoint = formattedUrl 
+      let endpoint = formattedUrl 
         ? `/api/proxy/api/settings?workerUrl=${encodeURIComponent(formattedUrl)}` 
         : '/api/settings';
         
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
       const res = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           volatilityTarget: volTarget,
           pullbackTarget: pullbackTarget,
@@ -206,13 +208,15 @@ export const createActions = (set: any, get: any) => ({
         formattedUrl = 'https://' + formattedUrl;
       }
       
-      const endpoint = formattedUrl 
+      let endpoint = formattedUrl 
         ? `/api/proxy/api/trade?workerUrl=${encodeURIComponent(formattedUrl)}` 
         : '/api/trade';
-      
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
       const res = await fetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ symbol: "AAPL", action: "buy" }),
       });
       if (!res.ok) {
