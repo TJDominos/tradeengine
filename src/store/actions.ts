@@ -30,6 +30,8 @@ export const createActions = (set: any, get: any) => ({
   setSecretName: (val: string) => set({ secretName: val }),
   setContractAddress: (val: string) => set({ contractAddress: val }),
   setWorkerUrl: (val: string) => set({ workerUrl: val }),
+  setCfAccessClientId: (val: string) => set({ cfAccessClientId: val }),
+  setCfAccessClientSecret: (val: string) => set({ cfAccessClientSecret: val }),
   
   saveContractAddress: () => {
     const { contractAddress, savedContractAddresses } = get();
@@ -88,7 +90,7 @@ export const createActions = (set: any, get: any) => ({
   },
 
   fetchState: async () => {
-    const { workerUrl } = get();
+    const { workerUrl, cfAccessClientId, cfAccessClientSecret } = get();
     try {
       let formattedUrl = workerUrl.trim();
       if (formattedUrl && !formattedUrl.startsWith('http')) {
@@ -98,6 +100,9 @@ export const createActions = (set: any, get: any) => ({
       let endpoint = formattedUrl 
         ? `/api/proxy/api/state?workerUrl=${encodeURIComponent(formattedUrl)}` 
         : '/api/state';
+
+      if (cfAccessClientId) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientId=${encodeURIComponent(cfAccessClientId)}`;
+      if (cfAccessClientSecret) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientSecret=${encodeURIComponent(cfAccessClientSecret)}`;
 
       const res = await fetch(endpoint);
       if (!res.ok) {
@@ -157,7 +162,7 @@ export const createActions = (set: any, get: any) => ({
   },
 
   handleSaveConfig: async () => {
-    const { workerUrl, volTarget, pullbackTarget, volumeTarget, netBuyinTarget, timeRangeTarget, maxTransactions, maxSlippage, tradingAlgorithm, contractAddress, secretName } = get();
+    const { workerUrl, cfAccessClientId, cfAccessClientSecret, volTarget, pullbackTarget, volumeTarget, netBuyinTarget, timeRangeTarget, maxTransactions, maxSlippage, tradingAlgorithm, contractAddress, secretName } = get();
     const actions = get().actions;
     try {
       let formattedUrl = workerUrl.trim();
@@ -168,6 +173,9 @@ export const createActions = (set: any, get: any) => ({
       let endpoint = formattedUrl 
         ? `/api/proxy/api/settings?workerUrl=${encodeURIComponent(formattedUrl)}` 
         : '/api/settings';
+
+      if (cfAccessClientId) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientId=${encodeURIComponent(cfAccessClientId)}`;
+      if (cfAccessClientSecret) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientSecret=${encodeURIComponent(cfAccessClientSecret)}`;
         
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 
@@ -200,7 +208,7 @@ export const createActions = (set: any, get: any) => ({
   },
 
   handleTestTrade: async () => {
-    const { workerUrl } = get();
+    const { workerUrl, cfAccessClientId, cfAccessClientSecret } = get();
     const actions = get().actions;
     try {
       let formattedUrl = workerUrl.trim();
@@ -211,6 +219,9 @@ export const createActions = (set: any, get: any) => ({
       let endpoint = formattedUrl 
         ? `/api/proxy/api/trade?workerUrl=${encodeURIComponent(formattedUrl)}` 
         : '/api/trade';
+
+      if (cfAccessClientId) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientId=${encodeURIComponent(cfAccessClientId)}`;
+      if (cfAccessClientSecret) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientSecret=${encodeURIComponent(cfAccessClientSecret)}`;
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 

@@ -33,6 +33,8 @@ export const initialState: AppState = {
   secretName: '',
   contractAddress: '',
   workerUrl: '',
+  cfAccessClientId: '',
+  cfAccessClientSecret: '',
   
   savedContractAddresses: getSavedArr('savedContractAddresses'),
   savedWorkerUrls: getSavedArr('savedWorkerUrls'),

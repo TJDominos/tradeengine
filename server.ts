@@ -339,10 +339,10 @@ async function startServer() {
         }
       };
 
-      const cfClientId = process.env.CF_ACCESS_CLIENT_ID;
-      if (cfClientId) fetchOptions.headers["CF-Access-Client-Id"] = cfClientId;
-      const cfClientSecret = process.env.CF_ACCESS_CLIENT_SECRET;
-      if (cfClientSecret) fetchOptions.headers["CF-Access-Client-Secret"] = cfClientSecret;
+      const cfClientId = process.env.CF_ACCESS_CLIENT_ID || req.query.cfClientId;
+      if (cfClientId) fetchOptions.headers["CF-Access-Client-Id"] = cfClientId as string;
+      const cfClientSecret = process.env.CF_ACCESS_CLIENT_SECRET || req.query.cfClientSecret;
+      if (cfClientSecret) fetchOptions.headers["CF-Access-Client-Secret"] = cfClientSecret as string;
 
       if (fetchOptions.headers["Authorization"] === undefined) {
           delete fetchOptions.headers["Authorization"];

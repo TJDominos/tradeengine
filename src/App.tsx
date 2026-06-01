@@ -328,6 +328,8 @@ export default function App() {
     secretName,
     contractAddress,
     workerUrl,
+    cfAccessClientId,
+    cfAccessClientSecret,
     
     savedContractAddresses,
     savedWorkerUrls,
@@ -344,7 +346,7 @@ export default function App() {
       actions.fetchState();
     }, 3000);
     return () => clearInterval(interval);
-  }, [workerUrl, actions]);
+  }, [workerUrl, cfAccessClientId, cfAccessClientSecret, actions]);
 
   const [isSimulationModalOpen, setIsSimulationModalOpen] = React.useState(false);
 
@@ -661,6 +663,28 @@ export default function App() {
               labelText="Cloudflare Worker API URL"
             />
             <p className="text-[10px] text-slate-500 mt-1">If provided, this dashboard acts as a frontend to your deployed Worker.</p>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-400 mb-1">CF Access Client ID</label>
+              <input 
+                type="text" 
+                className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500 focus:bg-slate-900 transition-colors"
+                value={cfAccessClientId || ''}
+                onChange={(e) => actions.setCfAccessClientId(e.target.value)}
+                placeholder="Optional"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-400 mb-1">CF Access Client Secret</label>
+              <input 
+                type="password" 
+                className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500 focus:bg-slate-900 transition-colors"
+                value={cfAccessClientSecret || ''}
+                onChange={(e) => actions.setCfAccessClientSecret(e.target.value)}
+                placeholder="Optional"
+              />
+            </div>
           </div>
         </div>
 

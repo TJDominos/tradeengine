@@ -89,24 +89,12 @@ async function getEngineStateFromD1(db: D1Database) {
   };
 }
 
-const corsHeaders = (origin: string | null) => ({
-  "Access-Control-Allow-Origin": origin || "*",
-  "Access-Control-Allow-Methods": "GET,HEAD,POST,PUT,DELETE,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type,Authorization",
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, CF-Access-Client-Id, CF-Access-Client-Secret",
   "Access-Control-Max-Age": "86400",
-});
-
-function handleOptions(request: Request) {
-  const headers = request.headers;
-  if (
-    headers.get("Origin") !== null &&
-    headers.get("Access-Control-Request-Method") !== null &&
-    headers.get("Access-Control-Request-Headers") !== null
-  ) {
-    return new Response(null, { headers: corsHeaders(headers.get("Origin")) });
-  }
-  return new Response(null, { headers: { Allow: "GET,HEAD,POST,PUT,DELETE,OPTIONS" } });
-}
+};
 
 // Configuration is loaded from D1 or ENV
 
@@ -114,9 +102,10 @@ export default {
   async fetch(request: Request, env: Env, ctx: any): Promise<Response> {
     // Handle CORS preflight
     if (request.method === "OPTIONS") {
-      return handleOptions(request);
+      return new Response(null, { status: 200, headers: corsHeaders });
     }
     
+    // Existing authentication logic (Frontend bearer token)
     const url = new URL(request.url);
     if (url.pathname !== "/webhook") {
       const authHeader = request.headers.get("Authorization");
@@ -125,7 +114,7 @@ export default {
           status: 401,
           headers: {
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": request.headers.get("Origin") || "*",
+            ...corsHeaders,
           },
         });
       }
@@ -136,8 +125,9 @@ export default {
 
     // Add CORS headers to every response
     const newHeaders = new Headers(response.headers);
-    newHeaders.set("Access-Control-Allow-Origin", request.headers.get("Origin") || "*");
-    newHeaders.append("Vary", "Origin");
+    for (const [key, value] of Object.entries(corsHeaders)) {
+        newHeaders.set(key, value);
+    }
 
     return new Response(response.body, {
       status: response.status,
@@ -153,7 +143,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
 
       if (!env.DB) {
          return new Response(JSON.stringify({ error: "D1 Database binding 'DB' is missing" }), {
-           status: 500, headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' }
+           status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
          });
       }
 
@@ -204,7 +194,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
         }
 
         return new Response(JSON.stringify(state), { 
-          headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' } 
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
         });
       }
 
@@ -249,10 +239,10 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           }
 
           return new Response(JSON.stringify({ success: true }), { 
-            headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' } 
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
           });
         } catch (e) {
-          return new Response('Invalid JSON', { status: 400, headers: corsHeaders(request.headers.get("Origin")) });
+          return new Response('Invalid JSON', { status: 400, headers: corsHeaders });
         }
       }
 
@@ -267,10 +257,10 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
             .run();
 
           return new Response(JSON.stringify({ success: true, message: `Trade executed & logged for ${body.symbol}` }), {
-            headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' }
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         } catch (e) {
-          return new Response('Invalid JSON', { status: 400, headers: corsHeaders(request.headers.get("Origin")) });
+          return new Response('Invalid JSON', { status: 400, headers: corsHeaders });
         }
       }
 
@@ -278,7 +268,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
       if (url.pathname === '/webhook' && request.method === 'POST') {
         try {
           const payload: any[] = await request.json();
-          const response = new Response('Webhook received', { status: 200, headers: corsHeaders(request.headers.get("Origin")) });
+          const response = new Response('Webhook received', { status: 200, headers: corsHeaders });
           
           // Log Webhook to D1 immediately
           await env.DB.prepare("INSERT INTO signals (id, source, event_type, payload) VALUES (?, ?, ?, ?)")
@@ -289,16 +279,16 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           return response;
         } catch (e) {
           console.error(e);
-          return new Response('Bad Request', { status: 400, headers: corsHeaders(request.headers.get("Origin")) });
+          return new Response('Bad Request', { status: 400, headers: corsHeaders });
         }
       }
 
-      return new Response('Not Found', { status: 404, headers: corsHeaders(request.headers.get("Origin")) });
+      return new Response('Not Found', { status: 404, headers: corsHeaders });
     } catch (err: any) {
       console.error(err);
       return new Response(JSON.stringify({ error: err.message }), { 
         status: 500, 
-        headers: { ...corsHeaders(request.headers.get("Origin")), 'Content-Type': 'application/json' } 
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
       });
     }
 }

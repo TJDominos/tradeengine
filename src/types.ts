@@ -37,6 +37,8 @@ export interface AppState {
   secretName: string;
   contractAddress: string;
   workerUrl: string;
+  cfAccessClientId: string;
+  cfAccessClientSecret: string;
   savedContractAddresses: string[];
   savedWorkerUrls: string[];
   savedSecretNames: string[];
