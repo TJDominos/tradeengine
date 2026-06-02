@@ -1,25 +1,34 @@
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
 
+type D1Result<T = Record<string, unknown>> = {
+  results?: T[];
+  success?: boolean;
+  meta?: Record<string, unknown>;
+};
+
+interface D1PreparedStatement {
+  bind(...values: unknown[]): D1PreparedStatement;
+  all<T = Record<string, unknown>>(): Promise<D1Result<T>>;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  run(): Promise<D1Result>;
+}
+
 export interface D1Database {
-  prepare(query: string): any;
-  batch(stmts: any[]): any;
-  exec(query: string): any;
+  prepare(query: string): D1PreparedStatement;
+  batch(stmts: D1PreparedStatement[]): Promise<D1Result[]>;
+  exec(query: string): Promise<D1Result>;
 }
 
 export interface Env {
-  // Configured in Cloudflare Dashboard -> Settings -> Variables
+  // Var bindings (declared in wrangler.toml [vars])
   RPC_URL: string;
-  BOT_SECRET_KEY: string; 
-  PVK3: string;
-  Frontend: string;
-  DB: D1Database; 
-  MY_KV: any;
-  MY_DB: D1Database;
-  MY_BUCKET: any;
-  MY_QUEUE: any;
-  MY_VAR: string;
-  MY_SECRET: string;
+  // D1 database binding (declared in wrangler.toml [[d1_databases]])
+  DB: D1Database;
+  // Secrets (set via `wrangler secret put <NAME>`)
+  BOT_SECRET_KEY?: string;
+  PVK3?: string;
+  FRONTEND?: string;
 }
 
 // Helper to build engineState from D1
@@ -115,7 +124,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname !== "/webhook") {
       const authHeader = request.headers.get("Authorization");
-      if (authHeader !== `Bearer ${env.Frontend}`) {
+      if (authHeader !== `Bearer ${env.FRONTEND}`) {
         return new Response(JSON.stringify({ error: "Unauthorized" }), {
           status: 401,
           headers: {
