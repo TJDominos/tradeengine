@@ -14,6 +14,12 @@ export interface Env {
   PVK3: string;
   Frontend: string;
   DB: D1Database; 
+  MY_KV: any;
+  MY_DB: D1Database;
+  MY_BUCKET: any;
+  MY_QUEUE: any;
+  MY_VAR: string;
+  MY_SECRET: string;
 }
 
 // Helper to build engineState from D1

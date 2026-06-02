@@ -98,7 +98,7 @@ export const createActions = (set: any, get: any) => ({
       }
 
       let endpoint = formattedUrl 
-        ? `/api/proxy/api/state?workerUrl=${encodeURIComponent(formattedUrl)}` 
+        ? `/api/relay/api/state?workerUrl=${encodeURIComponent(formattedUrl)}` 
         : '/api/state';
 
       if (cfAccessClientId) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientId=${encodeURIComponent(cfAccessClientId)}`;
@@ -106,7 +106,12 @@ export const createActions = (set: any, get: any) => ({
 
       const res = await fetch(endpoint);
       if (!res.ok) {
-        throw new Error(`HTTP error! status: ${res.status}`);
+        let errDetails = '';
+        try {
+          const errBody = await res.json();
+          errDetails = errBody.error ? ` - ${errBody.error}` : '';
+        } catch (_) {}
+        throw new Error(`HTTP error! status: ${res.status}${errDetails}`);
       }
       const contentType = res.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
@@ -171,7 +176,7 @@ export const createActions = (set: any, get: any) => ({
       }
       
       let endpoint = formattedUrl 
-        ? `/api/proxy/api/settings?workerUrl=${encodeURIComponent(formattedUrl)}` 
+        ? `/api/relay/api/settings?workerUrl=${encodeURIComponent(formattedUrl)}` 
         : '/api/settings';
 
       if (cfAccessClientId) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientId=${encodeURIComponent(cfAccessClientId)}`;
@@ -196,7 +201,12 @@ export const createActions = (set: any, get: any) => ({
         })
       });
       if (!res.ok) {
-        throw new Error(`HTTP Error: ${res.status} ${res.statusText}`);
+        let errDetails = '';
+        try {
+          const errBody = await res.json();
+          errDetails = errBody.error ? ` - ${errBody.error}` : '';
+        } catch (_) {}
+        throw new Error(`HTTP Error: ${res.status} ${res.statusText}${errDetails}`);
       }
       alert('Strategy Configuration Updated and Deployed');
       set({ secretName: '' });
@@ -217,7 +227,7 @@ export const createActions = (set: any, get: any) => ({
       }
       
       let endpoint = formattedUrl 
-        ? `/api/proxy/api/trade?workerUrl=${encodeURIComponent(formattedUrl)}` 
+        ? `/api/relay/api/trade?workerUrl=${encodeURIComponent(formattedUrl)}` 
         : '/api/trade';
 
       if (cfAccessClientId) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientId=${encodeURIComponent(cfAccessClientId)}`;
@@ -231,7 +241,12 @@ export const createActions = (set: any, get: any) => ({
         body: JSON.stringify({ symbol: "AAPL", action: "buy" }),
       });
       if (!res.ok) {
-        throw new Error(`HTTP Error: ${res.status} ${res.statusText}`);
+        let errDetails = '';
+        try {
+          const errBody = await res.json();
+          errDetails = errBody.error ? ` - ${errBody.error}` : '';
+        } catch (_) {}
+        throw new Error(`HTTP Error: ${res.status} ${res.statusText}${errDetails}`);
       }
       const data = await res.json();
       alert(`Test Trade Result: ${data.message || 'Success'}`);
