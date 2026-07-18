@@ -24,7 +24,19 @@ jobs:
       - name: Install Dependencies
         run: npm install
         working-directory: cloudflare-worker
-        
+
+      # Apply any pending D1 migrations before deploying the new Worker code.
+      # This ensures the schema is up-to-date before the Worker starts handling requests.
+      # If you have not yet created the D1 database, run once locally:
+      #   cd cloudflare-worker && npx wrangler d1 create tradingbot
+      # Then commit the updated database_id in wrangler.toml.
+      - name: Apply D1 Migrations
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          workingDirectory: 'cloudflare-worker'
+          command: d1 migrations apply tradingbot --remote
+
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:

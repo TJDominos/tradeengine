@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local scratch / test scripts
+test.js
+test2.js
+
+# Environment variable dump – never commit
+env_dump.txt

@@ -4,9 +4,27 @@ import { createServer as createViteServer } from "vite";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import dotenv from "dotenv";
-import fs from "fs";
 import crypto from "crypto";
 import cors from "cors";
+
+// ============================================================
+// LOCAL DEVELOPMENT SERVER
+// ============================================================
+// This server is intended for LOCAL DEVELOPMENT ONLY.
+// In production, the Cloudflare Worker (cloudflare-worker/) is
+// the authoritative backend. All production API requests should
+// go directly to the Cloudflare Worker + D1 backend.
+//
+// This server provides:
+//   - Vite dev middleware (hot reload)
+//   - /api/relay  – CORS proxy so the frontend can reach the Worker
+//   - /api/state  – in-memory engine state (blockchain sync)
+//   - /api/settings – update in-memory settings
+//   - /api/toggleAccount – toggle account selection
+//
+// What this server does NOT provide:
+//   - Real trade execution (returns 501 Not Implemented)
+// ============================================================
 
 dotenv.config();
 
@@ -14,10 +32,14 @@ dotenv.config();
 let CURRENT_CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || "";
 const TOTAL_WLT_SUPPLY = 1000000000;
 
+// RPC endpoints loaded from environment variables.
+// Set CHAINSTACK_RPC_URL, HELIUS_RPC_URL, TATUM_RPC_URL, and TATUM_API_KEY in your .env
+// (see .env.example). Falls back to the public mainnet endpoint when not configured.
 const RPC_POOL = [
-  { label: "Chainstack", url: "https://solana-mainnet.core.chainstack.com/d1088d42134bb8a7518df14af67cf958" },
-  { label: "Helius", url: "https://mainnet.helius-rpc.com/?api-key=fda76be1-7d09-4880-80db-837831934193" },
-  { label: "Tatum", url: "https://solana-mainnet.gateway.tatum.io", headers: { "x-api-key": "t-6919e1f73b9bb09e10628f3d-215c92a1167e401388dc0302" } }
+  ...(process.env.CHAINSTACK_RPC_URL ? [{ label: "Chainstack", url: process.env.CHAINSTACK_RPC_URL }] : []),
+  ...(process.env.HELIUS_RPC_URL ? [{ label: "Helius", url: process.env.HELIUS_RPC_URL }] : []),
+  ...(process.env.TATUM_RPC_URL ? [{ label: "Tatum", url: process.env.TATUM_RPC_URL, headers: process.env.TATUM_API_KEY ? { "x-api-key": process.env.TATUM_API_KEY } : undefined }] : []),
+  { label: "Mainnet Public", url: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com" },
 ];
 
 function getConnection() {
@@ -202,31 +224,15 @@ async function startServer() {
     res.json(engineState);
   });
 
-  // API: Mock trade test from frontend
+  // API: Trade endpoint
+  // Production trade execution is handled by the Cloudflare Worker (cloudflare-worker/).
+  // This local dev server does not execute real trades.
   app.post("/api/trade", (req, res) => {
-    const { symbol, action } = req.body;
-    console.log(`Mock local test trade: ${action} ${symbol}`);
-    
-    const currentSetupId = engineState.setups.length > 0 ? engineState.setups[0].id : "default";
-
-    // Log the transaction
-    const newLog = {
-      id: Date.now().toString(),
-      time: new Date().toISOString().split('T')[1].slice(0, 8),
-      tag: symbol || "Unknown",
-      address: "Local Node Server Test",
-      action: action || "Trade",
-      amount: "N/A",
-      status: "Success",
-      txId: "local-" + Math.random().toString(36).substring(7),
-      setupId: currentSetupId,
-      metadata: {}
-    };
-    
-    engineState.logs.unshift(newLog);
-    if (engineState.logs.length > 50) engineState.logs.pop(); // keep last 50
-    
-    res.json({ success: true, message: `Mock local trade executed for ${symbol}` });
+    return res.status(501).json({
+      success: false,
+      error: "Trade execution is not implemented on the local development server. Configure the Worker URL in the dashboard to route trade requests to the Cloudflare Worker.",
+      code: "NOT_IMPLEMENTED"
+    });
   });
 
   // API: Update settings
@@ -337,7 +343,7 @@ async function startServer() {
         headers: {
           "Content-Type": req.header("Content-Type") || "application/json",
           "Accept": "application/json",
-          "Authorization": process.env.Frontend ? `Bearer ${process.env.Frontend}` : undefined,
+          "Authorization": process.env.FRONTEND_TOKEN ? `Bearer ${process.env.FRONTEND_TOKEN}` : undefined,
         }
       };
 
