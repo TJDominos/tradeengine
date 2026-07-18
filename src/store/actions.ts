@@ -15,6 +15,8 @@ const buildBackendUrl = (workerUrl: string, path: string): string | null => {
   return base.replace(/\/$/, '') + path;
 };
 
+const TEST_TRADE_SYMBOL = "SOL/USDC";
+
 export const createActions = (set: any, get: any) => ({
   setActiveTab: (tab: string) => set({ activeTab: tab }),
   setDateRange: (range: { from: string; to: string }) => set({ dateRange: range }),
@@ -237,7 +239,7 @@ export const createActions = (set: any, get: any) => ({
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: "SOL/USDC", action: "buy" }),
+        body: JSON.stringify({ symbol: TEST_TRADE_SYMBOL, action: "buy" }),
       });
       if (!res.ok) {
         let errDetails = '';
