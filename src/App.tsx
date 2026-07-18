@@ -254,7 +254,7 @@ export default function App() {
           </div>
           <div className="space-y-4">
             <input className={inputClass} placeholder="Admin username" value={bootstrap.username} onChange={(e) => setBootstrap((current) => ({ ...current, username: e.target.value }))} />
-            <input className={inputClass} type="password" placeholder="Strong password (12+ chars)" value={bootstrap.password} onChange={(e) => setBootstrap((current) => ({ ...current, password: e.target.value }))} />
+            <input className={inputClass} type="password" placeholder="Strong password (12+ chars, use mixed character types)" value={bootstrap.password} onChange={(e) => setBootstrap((current) => ({ ...current, password: e.target.value }))} />
             <button className={`${buttonClass} w-full bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-60`} onClick={handleBootstrap} disabled={submitting === 'bootstrap'}>
               {submitting === 'bootstrap' ? 'Creating admin…' : 'Create admin account'}
             </button>
@@ -410,7 +410,7 @@ export default function App() {
                 <KeyRound className="text-emerald-400" />
                 <h2 className="text-xl font-semibold">Import managed private key</h2>
               </div>
-              <p className="mb-4 text-sm text-slate-400">Authentication is required before this section is usable. Imported private keys are encrypted server-side and only their derived public addresses are shown.</p>
+              <p className="mb-4 text-sm text-slate-400">Authentication is required before this section is usable. Imported private keys are encrypted server-side and only their derived public addresses are shown. Keep PRIVATE_KEY_ENCRYPTION_KEY stable per deployment and rotate it through a planned secret-migration process.</p>
               <div className="space-y-4">
                 <input className={inputClass} placeholder="Label" value={privateKeyForm.label} onChange={(e) => setPrivateKeyForm((current) => ({ ...current, label: e.target.value }))} />
                 <textarea className={`${inputClass} min-h-28 font-mono text-xs`} placeholder="Paste a Solana base58 private key or 64-byte JSON array" value={privateKeyForm.privateKey} onChange={(e) => setPrivateKeyForm((current) => ({ ...current, privateKey: e.target.value }))} />
