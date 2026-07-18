@@ -1,25 +1,36 @@
-import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+import { Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 
 export interface D1Database {
-  prepare(query: string): any;
-  batch(stmts: any[]): any;
-  exec(query: string): any;
+  prepare(query: string): D1PreparedStatement;
+  batch(stmts: D1PreparedStatement[]): Promise<D1Result[]>;
+  exec(query: string): Promise<D1ExecResult>;
+}
+
+export interface D1PreparedStatement {
+  bind(...values: any[]): D1PreparedStatement;
+  all<T = unknown>(): Promise<D1Result<T>>;
+  run(): Promise<D1Result>;
+  first<T = unknown>(colName?: string): Promise<T | null>;
+}
+
+export interface D1Result<T = unknown> {
+  results: T[];
+  success: boolean;
+  meta: any;
+}
+
+export interface D1ExecResult {
+  count: number;
+  duration: number;
 }
 
 export interface Env {
   // Configured in Cloudflare Dashboard -> Settings -> Variables
   RPC_URL: string;
-  BOT_SECRET_KEY: string; 
-  PVK3: string;
-  Frontend: string;
-  TRADINGBOT_DB: D1Database; 
-  MY_KV: any;
-  MY_TRADINGBOT_DB: D1Database;
-  MY_BUCKET: any;
-  MY_QUEUE: any;
-  MY_VAR: string;
-  MY_SECRET: string;
+  BOT_SECRET_KEY: string;
+  FRONTEND_TOKEN: string;
+  TRADINGBOT_DB: D1Database;
 }
 
 // Helper to build engineState from D1
@@ -36,7 +47,7 @@ async function getEngineStateFromD1(db: D1Database) {
     maxSlippage: 0.0100,
     tradingAlgorithm: '// Enter your trading algorithm here\nfunction executeTrade(state) {\n  // return action\n}',
     secretLoaded: false,
-    secretName: 'Loaded via Cloudflare ENV',
+    secretName: 'Loaded via BOT_SECRET_KEY env',
     contractAddress: ""
   };
   
@@ -111,11 +122,11 @@ export default {
       return new Response(null, { status: 200, headers: corsHeaders });
     }
     
-    // Existing authentication logic (Frontend bearer token)
+    // Authentication: verify bearer token (set FRONTEND_TOKEN in Cloudflare secrets)
     const url = new URL(request.url);
     if (url.pathname !== "/webhook") {
       const authHeader = request.headers.get("Authorization");
-      if (authHeader !== `Bearer ${env.Frontend}`) {
+      if (authHeader !== `Bearer ${env.FRONTEND_TOKEN}`) {
         return new Response(JSON.stringify({ error: "Unauthorized" }), {
           status: 401,
           headers: {
@@ -157,15 +168,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
       if (url.pathname === '/api/state' && request.method === 'GET') {
         const state = await getEngineStateFromD1(env.TRADINGBOT_DB);
         
-        const envKey = state.settings.secretName;
-        let rawKey = envKey && (env as any)[envKey] ? (env as any)[envKey] : null;
-
-        if (!rawKey && envKey && (envKey.startsWith('[') || envKey.length > 30)) {
-           rawKey = envKey;
-        }
-        if (!rawKey) {
-           rawKey = (env as any).PVK3 || (env as any).BOT_SECRET_KEY;
-        }
+        const rawKey = env.BOT_SECRET_KEY || null;
         
         state.settings.secretLoaded = !!rawKey;
         
@@ -173,7 +176,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
         if (rawKey && state.internalAccs.length === 0) {
           try {
              const secretRaw = rawKey.trim();
-             let secretKey = secretRaw.startsWith('[') ? new Uint8Array(JSON.parse(secretRaw)) : bs58.decode(secretRaw);
+             const secretKey = secretRaw.startsWith('[') ? new Uint8Array(JSON.parse(secretRaw)) : bs58.decode(secretRaw);
              
              if (secretKey) {
                const primaryWallet = Keypair.fromSecretKey(secretKey);
@@ -257,12 +260,13 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           const body: any = await request.json();
           console.log("Trade Request Received:", body);
           
-          // Log the transaction to DB
+          // Log the trade request to D1 for audit purposes
           await env.TRADINGBOT_DB.prepare("INSERT INTO trade_logs (id, wallet_address, symbol, action, price, amount, tx_signature, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(Date.now().toString(), "Worker API Test", body.symbol || "Unknown", body.action || "Trade", null, 0, "local-" + Math.random().toString(36).substring(7), "Success")
+            .bind(Date.now().toString(), "webhook-api", body.symbol || "Unknown", body.action || "Trade", null, 0, null, "PENDING")
             .run();
 
-          return new Response(JSON.stringify({ success: true, message: `Trade executed & logged for ${body.symbol}` }), {
+          return new Response(JSON.stringify({ success: false, message: "Trade execution not implemented. Request logged for review." }), {
+            status: 501,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
         } catch (e) {
@@ -301,14 +305,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
 
 async function processTradingLogic(txs: any[], env: Env) {
   const state = await getEngineStateFromD1(env.TRADINGBOT_DB);
-  const envKey = state.settings.secretName;
-  let rawKey = envKey && (env as any)[envKey] ? (env as any)[envKey] : null;
-  if (!rawKey && envKey && (envKey.startsWith('[') || envKey.length > 30)) {
-     rawKey = envKey;
-  }
-  if (!rawKey) {
-     rawKey = (env as any).PVK3 || (env as any).BOT_SECRET_KEY;
-  }
+  const rawKey = env.BOT_SECRET_KEY || null;
 
   // Loop through all transactions provided in this webhook batch
   for (const tx of txs) {
@@ -316,19 +313,21 @@ async function processTradingLogic(txs: any[], env: Env) {
     const nativeInputAmount = tx?.events?.swap?.nativeInput?.amount;
     
     if (nativeInputAmount > 1000000000) { 
-      console.log('Whale Buy Detected! Executing algorithm pullback protocol...');
-      const connection = new Connection(env.RPC_URL || "https://api.mainnet-beta.solana.com");
+      console.log('Whale Buy Detected! Strategy conditions met for pullback protocol.');
       try {
          if (rawKey) {
              const secretRaw = rawKey.trim();
              const secretKey = secretRaw.startsWith('[') ? Uint8Array.from(JSON.parse(secretRaw)) : bs58.decode(secretRaw);
              if (secretKey) {
                  const botKeypair = Keypair.fromSecretKey(secretKey);
-                 // Algorithm executing trades using our D1 state configuration...
+                 // TODO: Implement trade execution using botKeypair and state configuration
+                 console.log(`Bot wallet: ${botKeypair.publicKey.toBase58()}. Trade execution not yet implemented.`);
              }
+         } else {
+             console.warn('BOT_SECRET_KEY not configured; cannot execute trade.');
          }
       } catch(e) {
-         console.error("Invalid Secret in Worker ENV");
+         console.error("Invalid BOT_SECRET_KEY in Worker ENV");
       }
     }
   }

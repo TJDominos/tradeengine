@@ -5,7 +5,10 @@ node_compat = true
 
 [vars]
 RPC_URL = "https://api.mainnet-beta.solana.com"
-MY_VAR = "my-value"
+
+# Secrets (configure via Cloudflare Dashboard -> Settings -> Variables):
+#   BOT_SECRET_KEY  - base58 or JSON-array private key for the trading bot wallet
+#   FRONTEND_TOKEN  - bearer token to protect the dashboard API endpoints
 
 [[d1_databases]]
 binding = "TRADINGBOT_DB"

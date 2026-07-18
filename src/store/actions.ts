@@ -8,6 +8,13 @@ const formatWithCommas = (val: string) => {
   return parts.join('.');
 };
 
+const buildBackendUrl = (workerUrl: string, path: string): string | null => {
+  const trimmed = workerUrl.trim();
+  if (!trimmed) return null;
+  const base = trimmed.startsWith('http') ? trimmed : 'https://' + trimmed;
+  return base.replace(/\/$/, '') + path;
+};
+
 export const createActions = (set: any, get: any) => ({
   setActiveTab: (tab: string) => set({ activeTab: tab }),
   setDateRange: (range: { from: string; to: string }) => set({ dateRange: range }),
@@ -59,23 +66,29 @@ export const createActions = (set: any, get: any) => ({
   },
   deleteSavedItem: (key: string, val: string) => {
     if (key === 'savedContractAddresses') {
-       const newArr = get().savedContractAddresses.filter(v => v !== val);
+       const newArr = get().savedContractAddresses.filter((v: string) => v !== val);
        set({ savedContractAddresses: newArr });
        localStorage.setItem('savedContractAddresses', JSON.stringify(newArr));
     } else if (key === 'savedWorkerUrls') {
-       const newArr = get().savedWorkerUrls.filter(v => v !== val);
+       const newArr = get().savedWorkerUrls.filter((v: string) => v !== val);
        set({ savedWorkerUrls: newArr });
        localStorage.setItem('savedWorkerUrls', JSON.stringify(newArr));
     } else if (key === 'savedSecretNames') {
-       const newArr = get().savedSecretNames.filter(v => v !== val);
+       const newArr = get().savedSecretNames.filter((v: string) => v !== val);
        set({ savedSecretNames: newArr });
        localStorage.setItem('savedSecretNames', JSON.stringify(newArr));
     }
   },
 
   handleToggleAccount: async (id: string) => {
+    const { workerUrl } = get();
+    const endpoint = buildBackendUrl(workerUrl, '/api/toggleAccount');
+    if (!endpoint) {
+      console.error("Backend URL not configured");
+      return;
+    }
     try {
-      const res = await fetch('/api/toggleAccount', {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id })
@@ -90,20 +103,20 @@ export const createActions = (set: any, get: any) => ({
   },
 
   fetchState: async () => {
-    const { workerUrl, cfAccessClientId, cfAccessClientSecret } = get();
+    const { workerUrl } = get();
+    const endpoint = buildBackendUrl(workerUrl, '/api/state');
+
+    if (!endpoint) {
+      set({
+        engineState: {
+          error: "Backend URL Not Configured",
+          details: "Enter the Rust backend URL in the Settings tab (e.g. http://localhost:3000 for local dev)."
+        }
+      });
+      return;
+    }
+
     try {
-      let formattedUrl = workerUrl.trim();
-      if (formattedUrl && !formattedUrl.startsWith('http')) {
-        formattedUrl = 'https://' + formattedUrl;
-      }
-
-      let endpoint = formattedUrl 
-        ? `/api/relay/api/state?workerUrl=${encodeURIComponent(formattedUrl)}` 
-        : '/api/state';
-
-      if (cfAccessClientId) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientId=${encodeURIComponent(cfAccessClientId)}`;
-      if (cfAccessClientSecret) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientSecret=${encodeURIComponent(cfAccessClientSecret)}`;
-
       const res = await fetch(endpoint);
       if (!res.ok) {
         let errDetails = '';
@@ -160,33 +173,26 @@ export const createActions = (set: any, get: any) => ({
       set({
         engineState: {
           error: "Execution Engine Unreachable",
-          details: `Check your network connection or the status of the execution node. \nError: ${e.message}`
+          details: `Check that the backend is running and the URL is correct.\nError: ${e.message}`
         }
       });
     }
   },
 
   handleSaveConfig: async () => {
-    const { workerUrl, cfAccessClientId, cfAccessClientSecret, volTarget, pullbackTarget, volumeTarget, netBuyinTarget, timeRangeTarget, maxTransactions, maxSlippage, tradingAlgorithm, contractAddress, secretName } = get();
+    const { workerUrl, volTarget, pullbackTarget, volumeTarget, netBuyinTarget, timeRangeTarget, maxTransactions, maxSlippage, tradingAlgorithm, contractAddress, secretName } = get();
     const actions = get().actions;
+    const endpoint = buildBackendUrl(workerUrl, '/api/settings');
+
+    if (!endpoint) {
+      alert("Backend URL not configured. Please set it in the Settings tab.");
+      return;
+    }
+
     try {
-      let formattedUrl = workerUrl.trim();
-      if (formattedUrl && !formattedUrl.startsWith('http')) {
-        formattedUrl = 'https://' + formattedUrl;
-      }
-      
-      let endpoint = formattedUrl 
-        ? `/api/relay/api/settings?workerUrl=${encodeURIComponent(formattedUrl)}` 
-        : '/api/settings';
-
-      if (cfAccessClientId) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientId=${encodeURIComponent(cfAccessClientId)}`;
-      if (cfAccessClientSecret) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientSecret=${encodeURIComponent(cfAccessClientSecret)}`;
-        
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-
       const res = await fetch(endpoint, {
         method: 'POST',
-        headers,
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           volatilityTarget: volTarget,
           pullbackTarget: pullbackTarget,
@@ -218,27 +224,20 @@ export const createActions = (set: any, get: any) => ({
   },
 
   handleTestTrade: async () => {
-    const { workerUrl, cfAccessClientId, cfAccessClientSecret } = get();
+    const { workerUrl } = get();
     const actions = get().actions;
+    const endpoint = buildBackendUrl(workerUrl, '/api/trade');
+
+    if (!endpoint) {
+      alert("Backend URL not configured. Please set it in the Settings tab.");
+      return;
+    }
+
     try {
-      let formattedUrl = workerUrl.trim();
-      if (formattedUrl && !formattedUrl.startsWith('http')) {
-        formattedUrl = 'https://' + formattedUrl;
-      }
-      
-      let endpoint = formattedUrl 
-        ? `/api/relay/api/trade?workerUrl=${encodeURIComponent(formattedUrl)}` 
-        : '/api/trade';
-
-      if (cfAccessClientId) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientId=${encodeURIComponent(cfAccessClientId)}`;
-      if (cfAccessClientSecret) endpoint += (endpoint.includes('?') ? '&' : '?') + `cfClientSecret=${encodeURIComponent(cfAccessClientSecret)}`;
-
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-
       const res = await fetch(endpoint, {
         method: "POST",
-        headers,
-        body: JSON.stringify({ symbol: "AAPL", action: "buy" }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: "SOL/USDC", action: "buy" }),
       });
       if (!res.ok) {
         let errDetails = '';
@@ -249,7 +248,7 @@ export const createActions = (set: any, get: any) => ({
         throw new Error(`HTTP Error: ${res.status} ${res.statusText}${errDetails}`);
       }
       const data = await res.json();
-      alert(`Test Trade Result: ${data.message || 'Success'}`);
+      alert(`Test Trade Result: ${data.message || JSON.stringify(data)}`);
       actions.fetchState();
     } catch (e: any) {
       console.error(e);
