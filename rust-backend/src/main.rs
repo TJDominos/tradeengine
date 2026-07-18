@@ -5,7 +5,7 @@ use argon2::Argon2;
 use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
 use rand::RngCore;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use solana_sdk::pubkey::Pubkey;
@@ -428,7 +428,7 @@ impl Database {
         let token_hash = sha256_hex(token.as_bytes());
         let created_at = now_ts();
         let expires_at = created_at + ttl_hours.saturating_mul(3600);
-        let session_id = format!("sess-{}", sha256_hex(format!("{}:{}", user.id, created_at).as_bytes()));
+        let session_id = format!("sess-{}", sha256_hex(token.as_bytes()));
 
         self.conn
             .execute(
@@ -1268,7 +1268,11 @@ fn internal_error(error: impl std::fmt::Display) -> ApiError {
 
 fn conflict_or_internal(error: rusqlite::Error, conflict_message: &str) -> ApiError {
     match error {
-        rusqlite::Error::SqliteFailure(ref inner, _) if inner.extended_code == SQLITE_CONSTRAINT_UNIQUE || inner.extended_code == SQLITE_CONSTRAINT_PRIMARY_KEY => {
+        rusqlite::Error::SqliteFailure(ref inner, _)
+            if inner.code == ErrorCode::ConstraintViolation
+                && (inner.extended_code == SQLITE_CONSTRAINT_UNIQUE
+                    || inner.extended_code == SQLITE_CONSTRAINT_PRIMARY_KEY) =>
+        {
             conflict(conflict_message)
         }
         other => internal_error(other),
