@@ -1,20 +1,24 @@
-# WLT Trading Engine - Rust Backend
-This is the Rust implementation of the WLT smart trading algorithms and API backend. 
+# tradeengine Rust backend
 
-* **`main.rs`** - Holds the initialization of the `tokio` asynchronous runtime, establishes the Solana `RPC` connection, starts the active web server (`warp`), and drops the trading algorithms into background tasks.
-* **`strategy.rs`** - Manages the primary active strategies you configured: **Volatility Target Rebalancing** and **Outsider Pull Backs**. Simulates mem-pool scanning and performs automated logic to pull trading strings.
-* **`models.rs`** - Structures formatting out to your local trading dashboard.
+This directory now contains the active backend for the repository.
 
-## Requirements
-* `cargo` and `rustc` installed on your host machine.
+## Responsibilities
 
-## How to run locally
-Because the AI Studio live preview uses an isolated Node.js container to serve your live visuals on the web, this Rust engine code has been decoupled into its own directory so you can interact with it independently. 
+- Serve the built React admin UI from the same origin.
+- Initialize and connect to the SQLite database configured by `DATABASE_PATH`.
+- Bootstrap and authenticate the admin user.
+- Protect configuration, account import, and private-key import endpoints behind authenticated admin sessions.
+- Encrypt imported managed private keys at rest.
+- Return `501 Not Implemented` for trade execution until a real executor exists.
 
-1. Export this project to your machine (via the Settings Menu -> Export to GitHub / ZIP).
-2. Open your terminal and walk to `cd rust-backend`
-3. Run `cargo build`
-4. Run `cargo run`
+## Local run
 
-To serve the React Dashboard, open a second terminal from the root folder directory and run:
-`npm install && npm run dev`.
+From `/home/runner/work/tradeengine/tradeengine`:
+
+```bash
+npm install
+npm run build
+cargo run --manifest-path rust-backend/Cargo.toml
+```
+
+The backend reads the same environment variables documented in the repository root `README.md`.
