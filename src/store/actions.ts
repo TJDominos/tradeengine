@@ -61,7 +61,7 @@ export const createActions = (set: any, get: any) => ({
     if (secretName && !savedSecretNames.includes(secretName)) {
       const newArr = [...savedSecretNames, secretName];
       set({ savedSecretNames: newArr });
-      localStorage.setItem('savedSecretNames', JSON.stringify(newArr));
+      // Secret env-var names are not persisted to localStorage
     }
   },
   deleteSavedItem: (key: string, val: string) => {
@@ -76,7 +76,7 @@ export const createActions = (set: any, get: any) => ({
     } else if (key === 'savedSecretNames') {
        const newArr = get().savedSecretNames.filter((v: string) => v !== val);
        set({ savedSecretNames: newArr });
-       localStorage.setItem('savedSecretNames', JSON.stringify(newArr));
+       // Secret env-var names are not persisted to localStorage
     }
   },
 

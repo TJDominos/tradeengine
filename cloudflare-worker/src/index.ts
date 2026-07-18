@@ -262,7 +262,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           
           // Log the trade request to D1 for audit purposes
           await env.TRADINGBOT_DB.prepare("INSERT INTO trade_logs (id, wallet_address, symbol, action, price, amount, tx_signature, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(Date.now().toString(), "webhook-api", body.symbol || "Unknown", body.action || "Trade", null, 0, null, "PENDING")
+            .bind(Date.now().toString(), "webhook-api", body.symbol || "Unknown", body.action || "Trade", null, 0, null, "LOGGED")
             .run();
 
           return new Response(JSON.stringify({ success: false, message: "Trade execution not implemented. Request logged for review." }), {

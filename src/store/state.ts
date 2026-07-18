@@ -38,5 +38,5 @@ export const initialState: AppState = {
   
   savedContractAddresses: getSavedArr('savedContractAddresses'),
   savedWorkerUrls: getSavedArr('savedWorkerUrls'),
-  savedSecretNames: getSavedArr('savedSecretNames'),
+  savedSecretNames: [], // Not persisted to localStorage
 };
