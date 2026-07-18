@@ -154,10 +154,29 @@ export default function App() {
 
   React.useEffect(() => {
     if (!auth?.authenticated) return;
-    const timer = window.setInterval(() => {
-      loadState().catch((err: any) => setError(err.message || 'Failed to refresh state'));
-    }, 15000);
-    return () => window.clearInterval(timer);
+
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const schedule = async () => {
+      try {
+        await loadState();
+      } catch (err: any) {
+        if (!cancelled) {
+          setError(err.message || 'Failed to refresh state');
+        }
+      } finally {
+        if (!cancelled) {
+          timer = window.setTimeout(schedule, 15000);
+        }
+      }
+    };
+
+    timer = window.setTimeout(schedule, 15000);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [auth?.authenticated, loadState]);
 
   const submitWithFeedback = async (name: string, action: () => Promise<void>) => {
@@ -410,7 +429,7 @@ export default function App() {
                 <KeyRound className="text-emerald-400" />
                 <h2 className="text-xl font-semibold">Import managed private key</h2>
               </div>
-              <p className="mb-4 text-sm text-slate-400">Authentication is required before this section is usable. Imported private keys are encrypted server-side and only their derived public addresses are shown. Keep PRIVATE_KEY_ENCRYPTION_KEY stable per deployment and rotate it through a planned secret-migration process.</p>
+              <p className="mb-4 text-sm text-slate-400">Authentication is required before this section is usable. Imported private keys are encrypted server-side and only their derived public addresses are shown. Keep PRIVATE_KEY_ENCRYPTION_KEY as a 32-byte base64 or hex secret, stable per deployment, and rotate it through a planned secret-migration process.</p>
               <div className="space-y-4">
                 <input className={inputClass} placeholder="Label" value={privateKeyForm.label} onChange={(e) => setPrivateKeyForm((current) => ({ ...current, label: e.target.value }))} />
                 <textarea className={`${inputClass} min-h-28 font-mono text-xs`} placeholder="Paste a Solana base58 private key or 64-byte JSON array" value={privateKeyForm.privateKey} onChange={(e) => setPrivateKeyForm((current) => ({ ...current, privateKey: e.target.value }))} />

@@ -22,6 +22,9 @@ use warp::http::header::{CONTENT_TYPE, SET_COOKIE};
 use warp::http::{HeaderValue, Response, StatusCode};
 use warp::{Filter, Reply};
 
+const SQLITE_CONSTRAINT_PRIMARY_KEY: i32 = 1555;
+const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
+
 #[derive(Clone)]
 struct AppContext {
     db: Arc<Mutex<Database>>,
@@ -410,7 +413,10 @@ impl Database {
         let parsed_hash = PasswordHash::new(&password_hash).map_err(internal_error)?;
         Argon2::default()
             .verify_password(password.as_bytes(), &parsed_hash)
-            .map_err(|_| unauthorized("Invalid username or password"))?;
+            .map_err(|error| {
+                log::warn!("password verification failed for user '{}': {error}", username);
+                unauthorized("Invalid username or password")
+            })?;
 
         Ok(SessionUser { id, username, role })
     }
@@ -1133,10 +1139,12 @@ fn parse_encryption_key(value: &str) -> Result<[u8; 32], ApiError> {
         .ok()
         .filter(|value| value.len() == 32)
         .or_else(|| hex::decode(trimmed).ok().filter(|value| value.len() == 32))
-        .unwrap_or_else(|| trimmed.as_bytes().to_vec());
+        .ok_or_else(|| {
+            bad_request("PRIVATE_KEY_ENCRYPTION_KEY must be base64 or hex and decode to exactly 32 bytes")
+        })?;
     let array: [u8; 32] = decoded
         .try_into()
-        .map_err(|_| bad_request("PRIVATE_KEY_ENCRYPTION_KEY must decode to exactly 32 bytes"))?;
+        .map_err(|_| bad_request("PRIVATE_KEY_ENCRYPTION_KEY must be base64 or hex and decode to exactly 32 bytes"))?;
     Ok(array)
 }
 
@@ -1260,7 +1268,7 @@ fn internal_error(error: impl std::fmt::Display) -> ApiError {
 
 fn conflict_or_internal(error: rusqlite::Error, conflict_message: &str) -> ApiError {
     match error {
-        rusqlite::Error::SqliteFailure(ref inner, _) if inner.extended_code == 2067 || inner.extended_code == 1555 => {
+        rusqlite::Error::SqliteFailure(ref inner, _) if inner.extended_code == SQLITE_CONSTRAINT_UNIQUE || inner.extended_code == SQLITE_CONSTRAINT_PRIMARY_KEY => {
             conflict(conflict_message)
         }
         other => internal_error(other),
@@ -1284,8 +1292,8 @@ mod tests {
     }
 
     #[test]
-    fn encryption_key_parsing_accepts_plain_32_bytes() {
-        let key = parse_encryption_key("12345678901234567890123456789012").unwrap();
+    fn encryption_key_parsing_accepts_hex_encoded_32_bytes() {
+        let key = parse_encryption_key("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f").unwrap();
         assert_eq!(key.len(), 32);
     }
 }

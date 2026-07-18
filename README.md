@@ -18,7 +18,7 @@ Copy `/home/runner/work/tradeengine/tradeengine/.env.example` and set:
 - `STATIC_DIR` - built frontend directory, default `../dist`
 - `SESSION_TTL_HOURS` - session lifetime, default `12`
 - `COOKIE_SECURE` - set to `true` behind HTTPS in production
-- `PRIVATE_KEY_ENCRYPTION_KEY` - **required for private-key import**; must decode to exactly 32 bytes (raw 32-char string, base64, or hex)
+- `PRIVATE_KEY_ENCRYPTION_KEY` - **required for private-key import**; must decode to exactly 32 bytes (base64 or hex)
 - `RUST_LOG` - optional, for example `info`
 
 ## Local development
@@ -63,7 +63,7 @@ Run it with a persistent database directory:
 
 ```bash
 docker run --rm -p 3000:3000 \
-  -e PRIVATE_KEY_ENCRYPTION_KEY="replace-with-32-byte-secret" \
+  -e PRIVATE_KEY_ENCRYPTION_KEY="replace-with-base64-or-hex-32-byte-secret" \
   -e COOKIE_SECURE=false \
   -v $(pwd)/data:/data \
   tradeengine-rust-admin
