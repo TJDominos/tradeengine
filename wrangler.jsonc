@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "tradeengine",
-  "compatibility_date": "2026-07-18",
+  "compatibility_date": "2026-07-19",
   "observability": {
     "enabled": true
   },
