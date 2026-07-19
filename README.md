@@ -1,130 +1,87 @@
-# WLT Trading Engine
+# tradeengine
 
-A Solana trading dashboard with a **Rust backend** for strategy execution and a **Cloudflare Worker** for real-time webhook processing.
+This PR standardizes the active backend direction on the Rust service in `/rust-backend` and removes the old Node.js backend path from the default build and runtime flow.
 
-## Architecture
+## What this build now does
 
-```
-[React Dashboard (Vite static)]
-         │
-         │  direct HTTP (CORS)
-         ▼
-[Rust Backend — rust-backend/]
-  • GET /api/state  (price, strategy state)
-  • Volatility target rebalancing loop
-  • WebSocket contract monitor
+- Serves the React admin UI from the Rust backend.
+- Stores admin users, sessions, settings, imported accounts, and encrypted managed private keys in SQLite.
+- Requires authenticated login before any configuration, private-key import, or account import action is allowed.
+- Returns `501 Not Implemented` for trade execution instead of fake success.
 
-[Cloudflare Worker — cloudflare-worker/]
-  • POST /webhook   (Helius webhook receiver → D1)
-  • POST /api/trade (logs request; execution not yet implemented)
-  • D1 persistent storage for signals, accounts, settings
-```
+## Required environment variables
 
-## Frontend Dashboard
+Copy `/home/runner/work/tradeengine/tradeengine/.env.example` and set:
 
-The React dashboard connects **directly** to the Rust backend URL. Set the **Backend URL** in the Settings tab of the dashboard (e.g. `http://localhost:3000` for local dev).
+- `BIND_ADDR` - bind address for the Rust backend, default `0.0.0.0:3000`
+- `DATABASE_PATH` - SQLite database path, default `./data/tradeengine.db`
+- `STATIC_DIR` - built frontend directory, default `../dist`
+- `SESSION_TTL_HOURS` - session lifetime, default `12`
+- `COOKIE_SECURE` - set to `true` behind HTTPS in production
+- `PRIVATE_KEY_ENCRYPTION_KEY` - **required for private-key import**; must decode to exactly 32 bytes (base64 or hex)
+- `RUST_LOG` - optional, for example `info`
 
-**No Node.js relay server is used.**
+## Local development
 
-### Run Locally
+1. Install frontend dependencies:
+   ```bash
+   npm install
+   ```
+2. Build the frontend:
+   ```bash
+   npm run build
+   ```
+3. Start the Rust backend:
+   ```bash
+   cargo run --manifest-path /home/runner/work/tradeengine/tradeengine/rust-backend/Cargo.toml
+   ```
+4. Open `http://localhost:3000`.
+5. On first launch, create the initial admin username and password in the bootstrap screen.
 
-**Prerequisites:** Node.js ≥ 20, npm
+## Database initialization and binding
 
-```bash
-npm install
-npm run dev        # starts Vite dev server at http://localhost:5173
-```
+- The Rust service creates the SQLite schema automatically on startup using `CREATE TABLE IF NOT EXISTS` migrations.
+- The application does **not** drop tables during startup.
+- The backend reports its active database path from `/api/health` and the authenticated admin dashboard.
+- Use a persistent volume for the directory containing `DATABASE_PATH` when deploying.
 
-Then set the Backend URL in the dashboard Settings tab to point at your running Rust backend.
+## Deployment workflow
 
-### Build for Production (static site)
+The repository workflow now builds the Vite frontend, runs Rust tests, builds the Rust release binary, and builds the Docker image for the unified deployment path.
 
-```bash
-npm run build      # outputs to dist/
-```
+If you want GitHub Actions to trigger an actual deployment, set the repository secret `DEPLOY_WEBHOOK_URL` to your hosting platform's deploy hook. The workflow will POST to that hook after a successful build.
 
-Deploy the `dist/` folder to any static host (Cloudflare Pages, Vercel, Netlify, etc.).
+## Docker deployment
 
----
-
-## Rust Backend
-
-**Prerequisites:** Rust / Cargo
-
-```bash
-cd rust-backend
-cargo build
-```
-
-**Configuration** (`.env` in `rust-backend/` or environment variables):
-
-| Variable | Description | Default |
-|---|---|---|
-| `RPC_URL` | Solana RPC endpoint | `https://api.mainnet-beta.solana.com` |
-| `WSS_URL` | Solana WebSocket endpoint | `wss://api.mainnet-beta.solana.com` |
-| `CONTRACT_ADDRESS` | Token contract to monitor | _(empty — monitor disabled)_ |
-
-**Run:**
+Build the container:
 
 ```bash
-cd rust-backend
-RPC_URL=https://your-rpc-endpoint.com cargo run
+docker build -t tradeengine-rust-admin /home/runner/work/tradeengine/tradeengine
 ```
 
-The backend listens on port **3000** (`http://0.0.0.0:3000`).
-
-**Endpoints:**
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/state` | Returns current price, MA, and strategy targets |
-
----
-
-## Cloudflare Worker (Webhook Receiver)
-
-The Worker receives Helius webhooks and persists signals to D1.
-
-**Prerequisites:** Node.js ≥ 20, [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/)
+Run it with a persistent database directory:
 
 ```bash
-cd cloudflare-worker
-npm install
+docker run --rm -p 3000:3000 \
+  -e PRIVATE_KEY_ENCRYPTION_KEY="replace-with-base64-or-hex-32-byte-secret" \
+  -e COOKIE_SECURE=false \
+  -v $(pwd)/data:/data \
+  tradeengine-rust-admin
 ```
 
-### D1 Database Setup
+The image defaults `DATABASE_PATH` to `/data/tradeengine.db` and serves the built frontend from `/app/dist`.
 
-Initialize the database schema (run once per new D1 database):
+## Security notes
 
-```bash
-wrangler d1 execute tradingbot --file=schema.sql
-```
+- Passwords are hashed with Argon2.
+- Sessions use an opaque `HttpOnly` cookie; only the SHA-256 token hash is stored in the database.
+- Imported managed private keys are encrypted at rest and are never echoed back to the browser.
+- Settings and imported account records are scoped to the authenticated user.
+- Trade execution remains blocked until a real execution engine is implemented and reviewed.
 
-### Secrets (Cloudflare Dashboard → Settings → Variables)
+## Follow-up work for production hardening
 
-| Secret | Description |
-|---|---|
-| `BOT_SECRET_KEY` | Base58 or JSON-array private key for the trading bot wallet |
-| `FRONTEND_TOKEN` | ****** to authenticate dashboard API requests |
-
-### Deploy
-
-```bash
-cd cloudflare-worker
-wrangler deploy
-```
-
-### Local Development
-
-```bash
-cd cloudflare-worker
-wrangler dev
-```
-
----
-
-## GitHub Actions
-
-The `.github/workflows/deploy.yml` workflow automatically deploys the Cloudflare Worker on pushes to `main` that modify files under `cloudflare-worker/`.
-
-**Required GitHub secret:** `CF_API_TOKEN` (Cloudflare API token with Worker deploy permissions).
+- Add a reviewed trade executor with explicit policy enforcement and signing controls.
+- Rotate and manage `PRIVATE_KEY_ENCRYPTION_KEY` using a dedicated secret manager.
+- Add CSRF protection if the UI will be hosted cross-site instead of same-origin with the Rust backend.
+- Add user management flows beyond single-admin bootstrap when multi-operator access is needed.

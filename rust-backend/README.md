@@ -1,52 +1,24 @@
-# WLT Trading Engine - Rust Backend
+# tradeengine Rust backend
 
-This is the Rust implementation of the WLT trading strategy execution engine and API backend.
+This directory now contains the active backend for the repository.
 
-* **`main.rs`** — Initializes the Tokio runtime, establishes the Solana RPC connection, starts the HTTP API server (`warp` on port 3000), and spawns background tasks.
-* **`strategy.rs`** — Strategy loop: evaluates Volatility Target Rebalancing and Outsider Pull Back conditions. Execution stubs are present but not yet wired to Solana transactions.
-* **`monitor.rs`** — WebSocket monitor that subscribes to on-chain transaction logs for a configured contract address.
-* **`models.rs`** — API response DTOs and warp request handlers.
+## Responsibilities
 
-## Requirements
+- Serve the built React admin UI from the same origin.
+- Initialize and connect to the SQLite database configured by `DATABASE_PATH`.
+- Bootstrap and authenticate the admin user.
+- Protect configuration, account import, and private-key import endpoints behind authenticated admin sessions.
+- Encrypt imported managed private keys at rest.
+- Return `501 Not Implemented` for trade execution until a real executor exists.
 
-* `cargo` and `rustc` installed on your host machine.
+## Local run
 
-## Configuration
+From `/home/runner/work/tradeengine/tradeengine`:
 
-Copy and edit the example env file, or export variables directly:
-
-| Variable | Description | Default |
-|---|---|---|
-| `RPC_URL` | Solana HTTPS RPC endpoint | `https://api.mainnet-beta.solana.com` |
-| `WSS_URL` | Solana WebSocket endpoint | `wss://api.mainnet-beta.solana.com` |
-| `CONTRACT_ADDRESS` | Token contract address to monitor (optional) | _(empty)_ |
-
-## How to run locally
-
-1. Open a terminal and navigate to this directory:
-   ```
-   cd rust-backend
-   ```
-2. Build:
-   ```
-   cargo build
-   ```
-3. Run:
-   ```
-   cargo run
-   ```
-
-The server starts on `http://0.0.0.0:3000`.
-
-To run the React dashboard, open a second terminal from the repository root and run:
-```
-npm install && npm run dev
+```bash
+npm install
+npm run build
+cargo run --manifest-path rust-backend/Cargo.toml
 ```
 
-Then set the **Backend URL** in the dashboard Settings tab to `http://localhost:3000`.
-
-## API Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/state` | Returns `{ stats: { price, ma_price } }` |
+The backend reads the same environment variables documented in the repository root `README.md`.

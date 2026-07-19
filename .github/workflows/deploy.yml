@@ -1,47 +1,63 @@
-name: Deploy Cloudflare Worker
+name: Build and optionally deploy Rust admin backend
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'cloudflare-worker/**'
-      - '.github/workflows/**'
+      - 'src/**'
+      - 'rust-backend/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.ts'
+      - 'Dockerfile'
+      - '.github/workflows/deploy.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'rust-backend/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.ts'
+      - 'Dockerfile'
+      - '.github/workflows/deploy.yml'
 
 permissions:
   contents: read
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    name: Deploy
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
-        
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          
-      - name: Install Dependencies
-        run: npm install
-        working-directory: cloudflare-worker
+          node-version: '22'
+          cache: npm
 
-      # Apply any pending D1 migrations before deploying the new Worker code.
-      # This ensures the schema is up-to-date before the Worker starts handling requests.
-      # If you have not yet created the D1 database, run once locally:
-      #   cd cloudflare-worker && npx wrangler d1 create tradingbot
-      # Then commit the updated database_id in wrangler.toml.
-      - name: Apply D1 Migrations
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          workingDirectory: 'cloudflare-worker'
-          command: d1 migrations apply tradingbot --remote
+      - name: Install frontend dependencies
+        run: npm ci
 
-      - name: Deploy Worker
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          workingDirectory: 'cloudflare-worker'
+      - name: Build frontend
+        run: npm run build
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path rust-backend/Cargo.toml
+
+      - name: Build Rust release binary
+        run: cargo build --release --manifest-path rust-backend/Cargo.toml
+
+      - name: Build deployment image
+        run: docker build .
+
+      - name: Trigger deployment webhook
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.DEPLOY_WEBHOOK_URL != ''
+        run: curl -fsSL -X POST "$DEPLOY_WEBHOOK_URL"
+        env:
+          DEPLOY_WEBHOOK_URL: ${{ secrets.DEPLOY_WEBHOOK_URL }}
