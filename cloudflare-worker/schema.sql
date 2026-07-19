@@ -1,5 +1,4 @@
 -- cloudflare-worker/schema.sql
-<<<<<<< HEAD
 -- Run with: wrangler d1 execute tradingbot --file=schema.sql
 
 -- 1. SETTINGS TABLE
@@ -80,18 +79,3 @@ CREATE TABLE IF NOT EXISTS historic_setups (
     metadata JSON,               -- for optional inputs/extensibility 
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-=======
---
--- ⚠️  THIS FILE IS SUPERSEDED by the migrations directory.
---
--- The canonical schema is now managed via Wrangler D1 migrations:
---   cloudflare-worker/migrations/0001_init.sql
---
--- To initialise or update the database, run:
---   cd cloudflare-worker
---   npx wrangler d1 migrations apply tradingbot --remote
---
--- DO NOT run this file directly.  It is kept only for historical reference.
--- The migration files use CREATE TABLE IF NOT EXISTS and INSERT OR IGNORE,
--- making them safe to re-run without destroying existing data.
->>>>>>> origin/main

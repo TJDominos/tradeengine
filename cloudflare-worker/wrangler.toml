@@ -3,20 +3,6 @@ main = "src/index.ts"
 compatibility_date = "2024-04-05"
 node_compat = true
 
-<<<<<<< HEAD
-[vars]
-RPC_URL = "https://api.mainnet-beta.solana.com"
-
-# Secrets (configure via Cloudflare Dashboard -> Settings -> Variables):
-#   BOT_SECRET_KEY  - base58 or JSON-array private key for the trading bot wallet
-#   FRONTEND_TOKEN  - bearer token to protect the dashboard API endpoints
-=======
-# Secrets (set via `wrangler secret put <NAME>` from inside cloudflare-worker/)
-# - BOT_SECRET_KEY
-# - PVK3
-# - FRONTEND
->>>>>>> origin/main
-
 [vars]
 # Public / non-secret configuration.
 # Secret values (FRONTEND_TOKEN, BOT_SECRET_KEY) must be set via:
@@ -24,9 +10,6 @@ RPC_URL = "https://api.mainnet-beta.solana.com"
 #   wrangler secret put BOT_SECRET_KEY
 RPC_URL = "https://api.mainnet-beta.solana.com"
 
-# Bind a D1 Database for relational production data
-# Deploy from cloudflare-worker/ with: wrangler deploy
-# Apply schema with: wrangler d1 execute trading_engine_db --remote --file=schema.sql
 [[d1_databases]]
 binding      = "TRADINGBOT_DB"
 database_name = "tradingbot"
