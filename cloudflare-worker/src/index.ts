@@ -1,9 +1,23 @@
 import { Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 
+type D1Result<T = Record<string, unknown>> = {
+  results?: T[];
+  success?: boolean;
+  meta?: Record<string, unknown>;
+};
+
+interface D1PreparedStatement {
+  bind(...values: unknown[]): D1PreparedStatement;
+  all<T = Record<string, unknown>>(): Promise<D1Result<T>>;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  run(): Promise<D1Result>;
+}
+
 export interface D1Database {
   prepare(query: string): D1PreparedStatement;
   batch(stmts: D1PreparedStatement[]): Promise<D1Result[]>;
+<<<<<<< HEAD
   exec(query: string): Promise<D1ExecResult>;
 }
 
@@ -43,6 +57,20 @@ export interface Env {
   FRONTEND_TOKEN: string;
   /** D1 database binding – configured in wrangler.toml [[d1_databases]]. */
   TRADINGBOT_DB: D1Database;
+=======
+  exec(query: string): Promise<D1Result>;
+}
+
+export interface Env {
+  // Var bindings (declared in wrangler.toml [vars])
+  RPC_URL: string;
+  // D1 database binding (declared in wrangler.toml [[d1_databases]])
+  TRADINGBOT_DB: D1Database;
+  // Secrets (set via `wrangler secret put <NAME>`)
+  BOT_SECRET_KEY?: string;
+  PVK3?: string;
+  FRONTEND?: string;
+>>>>>>> origin/main
 }
 
 // Helper to build engineState from D1
@@ -139,7 +167,11 @@ export default {
     const url = new URL(request.url);
     if (url.pathname !== "/webhook") {
       const authHeader = request.headers.get("Authorization");
+<<<<<<< HEAD
       if (!env.FRONTEND_TOKEN || authHeader !== `Bearer ${env.FRONTEND_TOKEN}`) {
+=======
+      if (authHeader !== `Bearer ${env.FRONTEND}`) {
+>>>>>>> origin/main
         return new Response(JSON.stringify({ error: "Unauthorized" }), {
           status: 401,
           headers: {
