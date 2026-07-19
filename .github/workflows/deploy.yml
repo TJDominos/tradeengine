@@ -8,6 +8,9 @@ on:
       - 'cloudflare-worker/**'
       - '.github/workflows/**'
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
