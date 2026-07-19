@@ -4,11 +4,21 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+<<<<<<< HEAD
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
+=======
+    "dev": "tsx server.ts",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "start": "node dist/server.cjs",
+    "preview": "npm run build && wrangler dev",
+    "clean": "rm -rf dist server.js",
+    "lint": "tsc --noEmit",
+    "deploy": "npm run build && wrangler deploy"
+>>>>>>> origin/main
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
@@ -21,10 +31,24 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+<<<<<<< HEAD
+=======
+    "@cloudflare/vite-plugin": "^1.45.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^4.17.21",
+>>>>>>> origin/main
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "tailwindcss": "^4.1.14",
     "typescript": "~5.8.2",
+<<<<<<< HEAD
     "vite": "^6.2.3"
+=======
+    "vite": "^6.2.3",
+    "wrangler": "^4.112.0"
+  },
+  "overrides": {
+    "utf-8-validate": "5.0.10"
+>>>>>>> origin/main
   }
 }
