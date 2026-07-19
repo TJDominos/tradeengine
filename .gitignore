@@ -8,6 +8,13 @@ coverage/
 !.env.example
 rust-backend/target/
 
+# Local scratch / test scripts
+test.js
+test2.js
+
+# Environment variable dump – never commit
+env_dump.txt
+
 # wrangler files
 .wrangler
 .dev.vars*
