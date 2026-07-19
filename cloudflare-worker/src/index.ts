@@ -1,25 +1,34 @@
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
 
+type D1Result<T = Record<string, unknown>> = {
+  results?: T[];
+  success?: boolean;
+  meta?: Record<string, unknown>;
+};
+
+interface D1PreparedStatement {
+  bind(...values: unknown[]): D1PreparedStatement;
+  all<T = Record<string, unknown>>(): Promise<D1Result<T>>;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  run(): Promise<D1Result>;
+}
+
 export interface D1Database {
-  prepare(query: string): any;
-  batch(stmts: any[]): any;
-  exec(query: string): any;
+  prepare(query: string): D1PreparedStatement;
+  batch(stmts: D1PreparedStatement[]): Promise<D1Result[]>;
+  exec(query: string): Promise<D1Result>;
 }
 
 export interface Env {
-  // Configured in Cloudflare Dashboard -> Settings -> Variables
+  // Var bindings (declared in wrangler.toml [vars])
   RPC_URL: string;
-  BOT_SECRET_KEY: string; 
-  PVK3: string;
-  Frontend: string;
-  DB: D1Database; 
-  MY_KV: any;
-  MY_DB: D1Database;
-  MY_BUCKET: any;
-  MY_QUEUE: any;
-  MY_VAR: string;
-  MY_SECRET: string;
+  // D1 database binding (declared in wrangler.toml [[d1_databases]])
+  TRADINGBOT_DB: D1Database;
+  // Secrets (set via `wrangler secret put <NAME>`)
+  BOT_SECRET_KEY?: string;
+  PVK3?: string;
+  FRONTEND?: string;
 }
 
 // Helper to build engineState from D1
@@ -115,7 +124,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname !== "/webhook") {
       const authHeader = request.headers.get("Authorization");
-      if (authHeader !== `Bearer ${env.Frontend}`) {
+      if (authHeader !== `Bearer ${env.FRONTEND}`) {
         return new Response(JSON.stringify({ error: "Unauthorized" }), {
           status: 401,
           headers: {
@@ -147,15 +156,15 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
     try {
       const url = new URL(request.url);
 
-      if (!env.DB) {
-         return new Response(JSON.stringify({ error: "D1 Database binding 'DB' is missing" }), {
+      if (!env.TRADINGBOT_DB) {
+         return new Response(JSON.stringify({ error: "D1 Database binding 'TRADINGBOT_DB' is missing" }), {
            status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
          });
       }
 
       // --- DASHBOARD API ENDPOINTS ---
       if (url.pathname === '/api/state' && request.method === 'GET') {
-        const state = await getEngineStateFromD1(env.DB);
+        const state = await getEngineStateFromD1(env.TRADINGBOT_DB);
         
         const envKey = state.settings.secretName;
         let rawKey = envKey && (env as any)[envKey] ? (env as any)[envKey] : null;
@@ -186,12 +195,12 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
                   const hashBuffer = await crypto.subtle.digest('SHA-256', data);
                   const hashArray = new Uint8Array(hashBuffer);
                   const k = Keypair.fromSeed(hashArray.slice(0, 32));
-                  await env.DB.prepare("INSERT OR IGNORE INTO accounts (id, type, wallet_address, tag) VALUES (?, ?, ?, ?)")
+                  await env.TRADINGBOT_DB.prepare("INSERT OR IGNORE INTO accounts (id, type, wallet_address, tag) VALUES (?, ?, ?, ?)")
                     .bind(`int-${i}`, 'internal', k.publicKey.toBase58(), `Trading Bot #${i + 1}`)
                     .run();
                }
                // Refresh state after inserting
-               const refreshed = await getEngineStateFromD1(env.DB);
+               const refreshed = await getEngineStateFromD1(env.TRADINGBOT_DB);
                state.internalAccs = refreshed.internalAccs;
              }
           } catch(e) {
@@ -210,38 +219,38 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           const stmts = [];
           
           if (body.volatilityTarget) {
-             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('volatilityTarget', ?)").bind(parseFloat(body.volatilityTarget) / 100));
+             stmts.push(env.TRADINGBOT_DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('volatilityTarget', ?)").bind(parseFloat(body.volatilityTarget) / 100));
           }
           if (body.pullbackTarget) {
-             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('pullbackTarget', ?)").bind(parseFloat(body.pullbackTarget) / 100));
+             stmts.push(env.TRADINGBOT_DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('pullbackTarget', ?)").bind(parseFloat(body.pullbackTarget) / 100));
           }
           if (body.contractAddress !== undefined) {
-             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('contractAddress', ?)").bind(body.contractAddress));
+             stmts.push(env.TRADINGBOT_DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('contractAddress', ?)").bind(body.contractAddress));
           }
           if (body.secretName !== undefined) {
-             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('secretName', ?)").bind(body.secretName));
+             stmts.push(env.TRADINGBOT_DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('secretName', ?)").bind(body.secretName));
           }
           if (body.volumeTarget !== undefined) {
-             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('volumeTarget', ?)").bind(body.volumeTarget));
+             stmts.push(env.TRADINGBOT_DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('volumeTarget', ?)").bind(body.volumeTarget));
           }
           if (body.netBuyinTarget !== undefined) {
-             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('netBuyinTarget', ?)").bind(body.netBuyinTarget));
+             stmts.push(env.TRADINGBOT_DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('netBuyinTarget', ?)").bind(body.netBuyinTarget));
           }
           if (body.timeRangeTarget !== undefined) {
-             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('timeRangeTarget', ?)").bind(body.timeRangeTarget));
+             stmts.push(env.TRADINGBOT_DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('timeRangeTarget', ?)").bind(body.timeRangeTarget));
           }
           if (body.maxTransactions !== undefined) {
-             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maxTransactions', ?)").bind(body.maxTransactions));
+             stmts.push(env.TRADINGBOT_DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maxTransactions', ?)").bind(body.maxTransactions));
           }
           if (body.maxSlippage !== undefined) {
-             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maxSlippage', ?)").bind(body.maxSlippage));
+             stmts.push(env.TRADINGBOT_DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maxSlippage', ?)").bind(body.maxSlippage));
           }
           if (body.tradingAlgorithm !== undefined) {
-             stmts.push(env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('tradingAlgorithm', ?)").bind(body.tradingAlgorithm));
+             stmts.push(env.TRADINGBOT_DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('tradingAlgorithm', ?)").bind(body.tradingAlgorithm));
           }
           
           if (stmts.length > 0) {
-             await env.DB.batch(stmts);
+             await env.TRADINGBOT_DB.batch(stmts);
           }
 
           return new Response(JSON.stringify({ success: true }), { 
@@ -258,7 +267,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           console.log("Trade Request Received:", body);
           
           // Log the transaction to DB
-          await env.DB.prepare("INSERT INTO trade_logs (id, wallet_address, symbol, action, price, amount, tx_signature, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+          await env.TRADINGBOT_DB.prepare("INSERT INTO trade_logs (id, wallet_address, symbol, action, price, amount, tx_signature, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(Date.now().toString(), "Worker API Test", body.symbol || "Unknown", body.action || "Trade", null, 0, "local-" + Math.random().toString(36).substring(7), "Success")
             .run();
 
@@ -277,7 +286,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
           const response = new Response('Webhook received', { status: 200, headers: corsHeaders });
           
           // Log Webhook to D1 immediately
-          await env.DB.prepare("INSERT INTO signals (id, source, event_type, payload) VALUES (?, ?, ?, ?)")
+          await env.TRADINGBOT_DB.prepare("INSERT INTO signals (id, source, event_type, payload) VALUES (?, ?, ?, ?)")
             .bind(Date.now().toString() + Math.random().toString(36).slice(2), "helius", "SWAP", JSON.stringify(payload))
             .run();
             
@@ -300,7 +309,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
 }
 
 async function processTradingLogic(txs: any[], env: Env) {
-  const state = await getEngineStateFromD1(env.DB);
+  const state = await getEngineStateFromD1(env.TRADINGBOT_DB);
   const envKey = state.settings.secretName;
   let rawKey = envKey && (env as any)[envKey] ? (env as any)[envKey] : null;
   if (!rawKey && envKey && (envKey.startsWith('[') || envKey.length > 30)) {
