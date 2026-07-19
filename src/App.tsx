@@ -72,7 +72,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   if (!response.ok) {
     let error = `Request failed (${response.status})`;
     try {
-      const body = await response.json();
+      const body = await response.json() as { error?: string };
       if (body?.error) error = body.error;
     } catch {
       // ignore
@@ -312,8 +312,8 @@ export default function App() {
         <div className="mx-auto max-w-5xl">
           <header className="mb-8">
             <p className="text-sm uppercase tracking-[0.3em] text-blue-300">tradeengine</p>
-            <h1 className="mt-2 text-4xl font-bold">Rust-backed trading admin</h1>
-            <p className="mt-3 max-w-2xl text-slate-400">Node backend routes have been removed. This UI only unlocks after a real Rust session is established.</p>
+            <h1 className="mt-2 text-4xl font-bold">Worker-backed trading admin</h1>
+            <p className="mt-3 max-w-2xl text-slate-400">This UI is powered by a Cloudflare Worker with D1. It only unlocks after an authenticated session is established.</p>
           </header>
           {error && <div className="mb-4 rounded-xl border border-rose-900 bg-rose-950/50 p-4 text-sm text-rose-200">{error}</div>}
           {notice && <div className="mb-4 rounded-xl border border-emerald-900 bg-emerald-950/50 p-4 text-sm text-emerald-200">{notice}</div>}
@@ -329,7 +329,7 @@ export default function App() {
         <header className={`${cardClass} flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between`}>
           <div>
             <p className="text-sm uppercase tracking-[0.3em] text-blue-300">tradeengine</p>
-            <h1 className="mt-2 text-3xl font-bold">Authenticated Rust admin backend</h1>
+            <h1 className="mt-2 text-3xl font-bold">Authenticated Worker admin backend</h1>
             <p className="mt-2 text-sm text-slate-400">Only authenticated sessions can configure the system, import private keys, or import accounts.</p>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-sm">

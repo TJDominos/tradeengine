@@ -9,6 +9,9 @@
       "DOM",
       "DOM.Iterable"
     ],
+    "types": [
+      "@cloudflare/workers-types"
+    ],
     "skipLibCheck": true,
     "moduleResolution": "bundler",
     "isolatedModules": true,

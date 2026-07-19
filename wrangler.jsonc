@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "tradeengine",
+  "main": "src/worker.ts",
   "compatibility_date": "2026-07-19",
   "observability": {
     "enabled": true
@@ -10,5 +11,12 @@
   },
   "compatibility_flags": [
     "nodejs_compat"
+  ],
+  "d1_databases": [
+    {
+      "binding": "TRADINGBOT_DB",
+      "database_name": "tradingbot",
+      "database_id": "b93f4c50-a519-422c-9b31-15244ef3184f"
+    }
   ]
 }

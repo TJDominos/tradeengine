@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "start": "cargo run --manifest-path rust-backend/Cargo.toml",
     "preview": "npm run build && wrangler dev",
     "clean": "rm -rf dist rust-backend/target",
     "lint": "tsc --noEmit",
@@ -19,6 +18,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.45.1",
+    "@cloudflare/workers-types": "^5.20260719.1",
     "@tailwindcss/vite": "^4.1.14",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.4",
