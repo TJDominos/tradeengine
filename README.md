@@ -31,9 +31,11 @@ The Worker uses the following binding (already configured in `wrangler.jsonc`):
 }
 ```
 
-### Apply the schema migration
+### Apply the schema migration (optional pre-provisioning)
 
-Run this once to initialise the D1 tables:
+The Worker now auto-initialises the D1 schema on first auth request (`/api/auth/status` or `/api/auth/bootstrap`) by running idempotent `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` statements that match `migrations/0001_init.sql`.
+
+You can still run migrations manually to pre-provision environments:
 
 ```bash
 # remote (production)
@@ -76,6 +78,7 @@ npx wrangler secret put PRIVATE_KEY_ENCRYPTION_KEY
    ```
 4. Open `http://localhost:5173` (or the port shown by Vite).
 5. On first launch, create the initial admin username and password in the bootstrap screen.
+   - Passwords shorter than 12 characters are rejected with a clear `400` error response.
 
 > **Note:** For local development the `PRIVATE_KEY_ENCRYPTION_KEY` secret is read from a `.dev.vars` file.  
 > Copy `.env.example` to `.dev.vars` and fill in your key:

@@ -400,7 +400,87 @@ function isSecure(request: Request): boolean {
 
 // ─── D1 database operations ───────────────────────────────────────────────────
 
+const D1_SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'admin',
+    created_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS settings (
+    user_id INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (user_id, key),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    label TEXT NOT NULL,
+    wallet_address TEXT NOT NULL,
+    encrypted_private_key TEXT,
+    created_at INTEGER NOT NULL,
+    UNIQUE(user_id, type, wallet_address),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL,
+    details TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)',
+  'CREATE INDEX IF NOT EXISTS idx_accounts_user_type ON accounts(user_id, type)',
+  'CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created_at ON audit_logs(user_id, created_at DESC)',
+];
+
+interface CredentialsBody {
+  username: string;
+  password: string;
+}
+
+async function dbEnsureSchema(db: D1Database): Promise<void> {
+  await db.batch(D1_SCHEMA_STATEMENTS.map((statement) => db.prepare(statement)));
+}
+
+async function parseJsonBody<T>(request: Request): Promise<T> {
+  try {
+    return await request.json<T>();
+  } catch {
+    throw new ApiError(400, 'Request body must be valid JSON');
+  }
+}
+
+function parseCredentialsBody(body: unknown): CredentialsBody {
+  if (!body || typeof body !== 'object') {
+    throw new ApiError(400, 'Username and password are required');
+  }
+  const { username, password } = body as {
+    username?: unknown;
+    password?: unknown;
+  };
+  if (typeof username !== 'string' || typeof password !== 'string') {
+    throw new ApiError(400, 'Username and password are required');
+  }
+  return { username, password };
+}
+
 async function dbSetupRequired(db: D1Database): Promise<boolean> {
+  await dbEnsureSchema(db);
   const result = await db
     .prepare('SELECT COUNT(*) AS cnt FROM users')
     .first<{ cnt: number }>();
@@ -826,7 +906,7 @@ async function handleBootstrap(request: Request, env: Env): Promise<Response> {
       'Bootstrap is disabled because an admin user already exists',
     );
   }
-  const body = await request.json<{ username: string; password: string }>();
+  const body = parseCredentialsBody(await parseJsonBody<unknown>(request));
   const user = await dbCreateUser(
     env.TRADINGBOT_DB,
     body.username,
@@ -853,7 +933,14 @@ async function handleBootstrap(request: Request, env: Env): Promise<Response> {
 
 // POST /api/auth/login
 async function handleLogin(request: Request, env: Env): Promise<Response> {
-  const body = await request.json<{ username: string; password: string }>();
+  const setupRequired = await dbSetupRequired(env.TRADINGBOT_DB);
+  if (setupRequired) {
+    throw new ApiError(
+      403,
+      'Initial admin setup is required before login. Create an admin account first.',
+    );
+  }
+  const body = parseCredentialsBody(await parseJsonBody<unknown>(request));
   const user = await dbAuthenticateUser(
     env.TRADINGBOT_DB,
     body.username,
@@ -1034,25 +1121,25 @@ async function handleApi(
 
   try {
     if (method === 'GET' && pathname === '/api/health')
-      return handleHealth(request, env);
+      return await handleHealth(request, env);
     if (method === 'GET' && pathname === '/api/auth/status')
-      return handleAuthStatus(request, env);
+      return await handleAuthStatus(request, env);
     if (method === 'POST' && pathname === '/api/auth/bootstrap')
-      return handleBootstrap(request, env);
+      return await handleBootstrap(request, env);
     if (method === 'POST' && pathname === '/api/auth/login')
-      return handleLogin(request, env);
+      return await handleLogin(request, env);
     if (method === 'POST' && pathname === '/api/auth/logout')
-      return handleLogout(request, env);
+      return await handleLogout(request, env);
     if (method === 'GET' && pathname === '/api/state')
-      return handleGetState(request, env);
+      return await handleGetState(request, env);
     if (method === 'POST' && pathname === '/api/settings')
-      return handleSaveSettings(request, env);
+      return await handleSaveSettings(request, env);
     if (method === 'POST' && pathname === '/api/private-keys/import')
-      return handleImportPrivateKey(request, env);
+      return await handleImportPrivateKey(request, env);
     if (method === 'POST' && pathname === '/api/accounts/import')
-      return handleImportAccount(request, env);
+      return await handleImportAccount(request, env);
     if (method === 'POST' && pathname === '/api/trade')
-      return handleTrade(request, env);
+      return await handleTrade(request, env);
     return jsonResponse({ error: 'Not found' }, 404);
   } catch (err) {
     return errorResponse(err);
