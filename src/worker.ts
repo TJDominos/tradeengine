@@ -453,8 +453,18 @@ interface CredentialsBody {
   password: string;
 }
 
+let schemaInitPromise: Promise<void> | undefined;
+
 async function dbEnsureSchema(db: D1Database): Promise<void> {
-  await db.batch(D1_SCHEMA_STATEMENTS.map((statement) => db.prepare(statement)));
+  if (!schemaInitPromise) {
+    schemaInitPromise = db
+      .batch(D1_SCHEMA_STATEMENTS.map((statement) => db.prepare(statement)))
+      .catch((err) => {
+        schemaInitPromise = undefined;
+        throw err;
+      });
+  }
+  await schemaInitPromise;
 }
 
 async function parseJsonBody<T>(request: Request): Promise<T> {
