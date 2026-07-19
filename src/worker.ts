@@ -60,6 +60,15 @@ interface AuditLog {
   createdAt: number;
 }
 
+interface TradingPair {
+  id: number;
+  symbol: string;
+  baseMint: string;
+  quoteMint: string;
+  network: string;
+  isActive: boolean;
+}
+
 interface SessionUser {
   id: number;
   username: string;
@@ -767,6 +776,29 @@ async function dbListAuditLogs(
   }));
 }
 
+async function dbListTradingPairs(db: D1Database): Promise<TradingPair[]> {
+  const rows = await db
+    .prepare(
+      'SELECT id, symbol, base_mint, quote_mint, network, is_active FROM trading_pairs ORDER BY id ASC',
+    )
+    .all<{
+      id: number;
+      symbol: string;
+      base_mint: string;
+      quote_mint: string;
+      network: string;
+      is_active: number;
+    }>();
+  return rows.results.map((row) => ({
+    id: row.id,
+    symbol: row.symbol,
+    baseMint: row.base_mint,
+    quoteMint: row.quote_mint,
+    network: row.network,
+    isActive: row.is_active === 1,
+  }));
+}
+
 // ─── auth middleware helpers ──────────────────────────────────────────────────
 
 async function requireUser(request: Request, env: Env): Promise<SessionUser> {
@@ -906,18 +938,21 @@ async function handleLogout(request: Request, env: Env): Promise<Response> {
 // GET /api/state
 async function handleGetState(request: Request, env: Env): Promise<Response> {
   const user = await requireUser(request, env);
-  const [settings, internalAccs, outsiderAccs, logs] = await Promise.all([
-    dbLoadSettings(env.TRADINGBOT_DB, user.id),
-    dbListAccounts(env.TRADINGBOT_DB, user.id, 'managed'),
-    dbListAccounts(env.TRADINGBOT_DB, user.id, 'watch'),
-    dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
-  ]);
+  const [settings, internalAccs, outsiderAccs, logs, tradingPairs] =
+    await Promise.all([
+      dbLoadSettings(env.TRADINGBOT_DB, user.id),
+      dbListAccounts(env.TRADINGBOT_DB, user.id, 'managed'),
+      dbListAccounts(env.TRADINGBOT_DB, user.id, 'watch'),
+      dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
+      dbListTradingPairs(env.TRADINGBOT_DB).catch(() => [] as TradingPair[]),
+    ]);
   return jsonResponse({
     auth: { username: user.username, role: user.role },
     settings,
     internalAccs,
     outsiderAccs,
     logs,
+    tradingPairs,
     stats: {
       managedAccounts: internalAccs.length,
       watchedAccounts: outsiderAccs.length,

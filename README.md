@@ -2,6 +2,28 @@
 
 A Cloudflare Workers-native trading admin panel backed by **Cloudflare D1** (SQLite-compatible serverless database).
 
+## MVP scope: WLT/USDC on Solana
+
+The current version is intentionally scoped to a **single trading pair**:
+
+| Field | Value |
+|-------|-------|
+| Pair | **WLT/USDC** |
+| Network | **Solana** |
+| Execution | Disabled (returns `501`) until the execution engine is implemented |
+
+### Extension path
+
+When you are ready to add more trading pairs, the design stays the same:
+
+1. Insert a new row into the `trading_pairs` table (via a SQL migration or the future admin UI):
+   ```sql
+   INSERT INTO trading_pairs (symbol, base_mint, quote_mint, network, is_active, created_at)
+   VALUES ('NEWTOKEN/USDC', '<new_mint>', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'solana', 1, unixepoch());
+   ```
+2. Trade logs and positions already reference `pair_id`, so historical data stays clean.
+3. No schema rewrites are needed.
+
 ## Architecture
 
 - **Frontend** – React / Vite SPA served as Cloudflare static assets.
@@ -13,6 +35,7 @@ A Cloudflare Workers-native trading admin panel backed by **Cloudflare D1** (SQL
 - Serves the React admin UI from the same Cloudflare Worker origin.
 - Stores admin users, sessions, settings, imported accounts, and encrypted managed private keys in D1.
 - Requires authenticated login before any configuration, private-key import, or account import action is allowed.
+- Exposes the configured trading pairs (seeded: WLT/USDC on Solana) via the `/api/state` endpoint and admin UI.
 - Returns `501 Not Implemented` for trade execution until a real executor exists.
 
 ## D1 database binding
@@ -31,9 +54,9 @@ The Worker uses the following binding (already configured in `wrangler.jsonc`):
 }
 ```
 
-### Apply the schema migration
+### Apply the schema migrations
 
-Run this once to initialise the D1 tables:
+Run both migrations to initialise all D1 tables including the trade-domain tables:
 
 ```bash
 # remote (production)
@@ -43,7 +66,15 @@ npx wrangler d1 migrations apply tradingbot --remote
 npx wrangler d1 migrations apply tradingbot --local
 ```
 
-Migrations are located in `migrations/`.
+Migrations are located in `migrations/`:
+
+| File | Description |
+|------|-------------|
+| `0001_init.sql` | Core tables: users, sessions, settings, accounts, audit_logs |
+| `0002_trade_domain.sql` | Trade tables: trading_pairs (seeded WLT/USDC), trade_logs, signals, positions, historic_setups |
+
+> **Important:** `0002_trade_domain.sql` seeds `trading_pairs` with a placeholder WLT mint address (`PLACEHOLDER_WLT_MINT_REPLACE_BEFORE_USE`).  
+> Replace the `base_mint` value with the real WLT token mint before executing live trades.
 
 ## Cloudflare secrets
 
@@ -101,11 +132,44 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 | POST | `/api/auth/bootstrap` | No (once) | Create initial admin account |
 | POST | `/api/auth/login` | No | Authenticate and create session |
 | POST | `/api/auth/logout` | No | Delete session |
-| GET | `/api/state` | Yes | Full engine state |
+| GET | `/api/state` | Yes | Full engine state (includes trading pairs) |
 | POST | `/api/settings` | Admin | Save trading settings |
 | POST | `/api/private-keys/import` | Admin | Import + encrypt a managed private key |
 | POST | `/api/accounts/import` | Admin | Import a watch-only account |
 | POST | `/api/trade` | Admin | Trade (returns 501 – not implemented) |
+
+## Data model summary
+
+### Current MVP tables
+
+| Table | Purpose |
+|-------|---------|
+| `users` | Admin accounts |
+| `sessions` | Authenticated sessions |
+| `settings` | Per-user key-value strategy parameters |
+| `accounts` | Managed (signing) and watch-only wallets |
+| `audit_logs` | Immutable action log |
+| `trading_pairs` | Supported pairs — seeded with WLT/USDC on Solana |
+| `trade_logs` | Every proposed/executed trade with pair reference |
+| `signals` | Incoming webhook events (Helius, etc.) with dedup |
+| `positions` | Current holdings per wallet and pair |
+| `historic_setups` | Saved strategy snapshots, optionally scoped to a pair |
+
+### Is the current model sufficient for a single-pair Solana MVP?
+
+**Yes** — the trade domain tables introduced in `0002_trade_domain.sql` are sufficient for the WLT/USDC MVP:
+
+- `trading_pairs` makes the single-pair scope explicit and queryable rather than hard-coded.
+- `trade_logs` records every order with amounts, price, tx hash, and status.
+- `signals` gives deduplication-safe storage for Helius webhook events.
+- `positions` tracks per-wallet holdings in the base token.
+- `historic_setups` snapshots strategy parameters at each save so you can correlate outcomes.
+
+**What is not yet covered** (planned for later phases):
+
+- Balance synchronisation (on-chain → D1) — `accounts` holds no live balance; balances will be polled or pushed via webhooks when the executor is built.
+- Real-time PnL — `positions.realized_pnl` is populated by the executor; the current schema stores the field but no code writes to it yet.
+- Multi-user / role expansion — all tables are `user_id`-scoped, so adding roles is straightforward but not yet wired up.
 
 ## Security notes
 
@@ -117,7 +181,8 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 
 ## Follow-up work for production hardening
 
-- Add a reviewed trade executor with explicit policy enforcement and signing controls.
-- Rotate and manage `PRIVATE_KEY_ENCRYPTION_KEY` using Cloudflare Secrets or a dedicated secret manager.
+- Implement the trade executor: sign transactions with managed keys, submit to Solana, update `trade_logs` and `positions`.
+- Replace the placeholder WLT `base_mint` in `trading_pairs` with the real mint address.
+- Add balance-sync job (e.g. Helius webhook → `accounts` cache) to keep displayed balances fresh.
 - Add CSRF protection if the UI will be hosted cross-site.
-- Add user management flows beyond single-admin bootstrap when multi-operator access is needed.
+- Rotate and manage `PRIVATE_KEY_ENCRYPTION_KEY` using Cloudflare Secrets or a dedicated secret manager.

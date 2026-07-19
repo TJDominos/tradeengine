@@ -37,12 +37,22 @@ type AuditLog = {
   createdAt: number;
 };
 
+type TradingPair = {
+  id: number;
+  symbol: string;
+  baseMint: string;
+  quoteMint: string;
+  network: string;
+  isActive: boolean;
+};
+
 type EngineState = {
   auth: { username: string; role: string };
   settings: SettingsState;
   internalAccs: AccountRecord[];
   outsiderAccs: AccountRecord[];
   logs: AuditLog[];
+  tradingPairs: TradingPair[];
   stats: {
     managedAccounts: number;
     watchedAccounts: number;
@@ -392,6 +402,53 @@ export default function App() {
             <p className="text-sm text-slate-300">Trade execution is disabled in this PR. The backend returns a clear 501 until a reviewed execution engine exists.</p>
           </section>
         </div>
+
+        <section className={`${cardClass} p-6`}>
+          <div className="mb-4 flex items-center gap-3">
+            <ShieldCheck className="text-blue-400" />
+            <h2 className="text-lg font-semibold">Trading pairs</h2>
+          </div>
+          <p className="mb-4 text-sm text-slate-400">
+            MVP scope: <strong className="text-white">WLT/USDC on Solana</strong>.
+            Additional pairs can be added later by inserting rows into the <span className="font-mono text-xs text-blue-300">trading_pairs</span> table.
+          </p>
+          {engineState.tradingPairs.length === 0 ? (
+            <p className="text-sm text-slate-500">No trading pairs found. Run migration <span className="font-mono text-xs">0002_trade_domain.sql</span> to seed the initial WLT/USDC pair.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-slate-300">
+                <thead>
+                  <tr className="border-b border-slate-800 text-left text-xs text-slate-500">
+                    <th className="pb-2 pr-4">Symbol</th>
+                    <th className="pb-2 pr-4">Network</th>
+                    <th className="pb-2 pr-4">Base mint</th>
+                    <th className="pb-2 pr-4">Quote mint</th>
+                    <th className="pb-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {engineState.tradingPairs.map((pair) => (
+                    <tr key={pair.id} className="border-b border-slate-800/50">
+                      <td className="py-2 pr-4 font-semibold text-white">{pair.symbol}</td>
+                      <td className="py-2 pr-4 capitalize">{pair.network}</td>
+                      <td className="py-2 pr-4 font-mono text-xs text-blue-300 max-w-[160px] truncate">
+                        <span title={pair.baseMint} aria-label={`Base mint: ${pair.baseMint}`}>{pair.baseMint}</span>
+                      </td>
+                      <td className="py-2 pr-4 font-mono text-xs text-blue-300 max-w-[160px] truncate">
+                        <span title={pair.quoteMint} aria-label={`Quote mint: ${pair.quoteMint}`}>{pair.quoteMint}</span>
+                      </td>
+                      <td className="py-2">
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${pair.isActive ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-400'}`}>
+                          {pair.isActive ? 'Active' : 'Inactive'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
 
         <div className="grid gap-6 xl:grid-cols-2">
           <section className={`${cardClass} p-6`}>
