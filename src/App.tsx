@@ -268,7 +268,7 @@ export default function App() {
             <ShieldCheck className="text-emerald-400" />
             <div>
               <h1 className="text-2xl font-bold">Create the initial admin user</h1>
-              <p className="mt-1 text-sm text-slate-400">Bootstrap is only available once. Passwords are hashed with Argon2 before storage.</p>
+              <p className="mt-1 text-sm text-slate-400">Bootstrap is only available once. Passwords must be at least 12 characters and are hashed with PBKDF2-SHA256 before storage.</p>
             </div>
           </div>
           <div className="space-y-4">
