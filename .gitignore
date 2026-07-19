@@ -6,4 +6,12 @@ coverage/
 *.log
 .env*
 !.env.example
+<<<<<<< HEAD
 rust-backend/target/
+=======
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+>>>>>>> origin/main
