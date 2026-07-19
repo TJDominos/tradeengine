@@ -1,4 +1,4 @@
-import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+import { Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 
 type D1Result<T = Record<string, unknown>> = {
@@ -17,6 +17,47 @@ interface D1PreparedStatement {
 export interface D1Database {
   prepare(query: string): D1PreparedStatement;
   batch(stmts: D1PreparedStatement[]): Promise<D1Result[]>;
+<<<<<<< HEAD
+  exec(query: string): Promise<D1ExecResult>;
+}
+
+export interface D1PreparedStatement {
+  bind(...values: any[]): D1PreparedStatement;
+  all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+  run(): Promise<D1Result>;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+}
+
+export interface D1Result {
+  success: boolean;
+  meta?: Record<string, unknown>;
+}
+
+export interface D1ExecResult {
+  count: number;
+  duration: number;
+}
+
+export interface Env {
+  /**
+   * Solana RPC endpoint. Set in wrangler.toml [vars] or via Cloudflare Dashboard.
+   * Override with a paid RPC for better reliability (Helius, Chainstack, etc.).
+   */
+  RPC_URL: string;
+  /**
+   * Bot wallet private key – base58-encoded or JSON byte-array string.
+   * Set as a secret in the Cloudflare Dashboard (never in wrangler.toml).
+   * wrangler secret put BOT_SECRET_KEY
+   */
+  BOT_SECRET_KEY: string;
+  /**
+   * ****** used by the frontend/relay to authenticate with this worker.
+   * Set as a secret: wrangler secret put FRONTEND_TOKEN
+   */
+  FRONTEND_TOKEN: string;
+  /** D1 database binding – configured in wrangler.toml [[d1_databases]]. */
+  TRADINGBOT_DB: D1Database;
+=======
   exec(query: string): Promise<D1Result>;
 }
 
@@ -29,6 +70,7 @@ export interface Env {
   BOT_SECRET_KEY?: string;
   PVK3?: string;
   FRONTEND?: string;
+>>>>>>> origin/main
 }
 
 // Helper to build engineState from D1
@@ -120,11 +162,16 @@ export default {
       return new Response(null, { status: 200, headers: corsHeaders });
     }
     
-    // Existing authentication logic (Frontend bearer token)
+    // Authenticate non-webhook requests with the FRONTEND_TOKEN bearer token.
+    // Set this secret via: wrangler secret put FRONTEND_TOKEN
     const url = new URL(request.url);
     if (url.pathname !== "/webhook") {
       const authHeader = request.headers.get("Authorization");
+<<<<<<< HEAD
+      if (!env.FRONTEND_TOKEN || authHeader !== `Bearer ${env.FRONTEND_TOKEN}`) {
+=======
       if (authHeader !== `Bearer ${env.FRONTEND}`) {
+>>>>>>> origin/main
         return new Response(JSON.stringify({ error: "Unauthorized" }), {
           status: 401,
           headers: {
@@ -173,7 +220,7 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
            rawKey = envKey;
         }
         if (!rawKey) {
-           rawKey = (env as any).PVK3 || (env as any).BOT_SECRET_KEY;
+           rawKey = env.BOT_SECRET_KEY || null;
         }
         
         state.settings.secretLoaded = !!rawKey;
@@ -262,21 +309,17 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
       }
 
       if (url.pathname === '/api/trade' && request.method === 'POST') {
-        try {
-          const body: any = await request.json();
-          console.log("Trade Request Received:", body);
-          
-          // Log the transaction to DB
-          await env.TRADINGBOT_DB.prepare("INSERT INTO trade_logs (id, wallet_address, symbol, action, price, amount, tx_signature, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(Date.now().toString(), "Worker API Test", body.symbol || "Unknown", body.action || "Trade", null, 0, "local-" + Math.random().toString(36).substring(7), "Success")
-            .run();
-
-          return new Response(JSON.stringify({ success: true, message: `Trade executed & logged for ${body.symbol}` }), {
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-          });
-        } catch (e) {
-          return new Response('Invalid JSON', { status: 400, headers: corsHeaders });
-        }
+        // Real on-chain trade execution is not yet implemented.
+        // Returning 501 instead of pretending success with mock data.
+        // TODO: Implement signed transaction building and submission via Solana RPC.
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: "Trade execution is not yet implemented. Configure your trading strategy and ensure BOT_SECRET_KEY is set to enable real on-chain execution.",
+            code: "NOT_IMPLEMENTED"
+          }),
+          { status: 501, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
       }
 
       // --- HELIUS WEBHOOK RECEIVER ---
@@ -311,12 +354,12 @@ async function handleRequest(request: Request, env: Env, ctx: any): Promise<Resp
 async function processTradingLogic(txs: any[], env: Env) {
   const state = await getEngineStateFromD1(env.TRADINGBOT_DB);
   const envKey = state.settings.secretName;
-  let rawKey = envKey && (env as any)[envKey] ? (env as any)[envKey] : null;
+  let rawKey: string | null = envKey && (env as any)[envKey] ? (env as any)[envKey] : null;
   if (!rawKey && envKey && (envKey.startsWith('[') || envKey.length > 30)) {
      rawKey = envKey;
   }
   if (!rawKey) {
-     rawKey = (env as any).PVK3 || (env as any).BOT_SECRET_KEY;
+     rawKey = env.BOT_SECRET_KEY || null;
   }
 
   // Loop through all transactions provided in this webhook batch
@@ -325,19 +368,21 @@ async function processTradingLogic(txs: any[], env: Env) {
     const nativeInputAmount = tx?.events?.swap?.nativeInput?.amount;
     
     if (nativeInputAmount > 1000000000) { 
-      console.log('Whale Buy Detected! Executing algorithm pullback protocol...');
-      const connection = new Connection(env.RPC_URL || "https://api.mainnet-beta.solana.com");
-      try {
-         if (rawKey) {
-             const secretRaw = rawKey.trim();
-             const secretKey = secretRaw.startsWith('[') ? Uint8Array.from(JSON.parse(secretRaw)) : bs58.decode(secretRaw);
-             if (secretKey) {
-                 const botKeypair = Keypair.fromSecretKey(secretKey);
-                 // Algorithm executing trades using our D1 state configuration...
-             }
-         }
-      } catch(e) {
-         console.error("Invalid Secret in Worker ENV");
+      console.log('Whale Buy Detected (>1 SOL). On-chain execution not yet implemented.');
+      // TODO: Implement signed transaction building and submission.
+      // The bot keypair can be loaded below once trade execution logic is ready.
+      if (rawKey) {
+        try {
+          const secretRaw = rawKey.trim();
+          const secretKey = secretRaw.startsWith('[') ? Uint8Array.from(JSON.parse(secretRaw)) : bs58.decode(secretRaw);
+          const _botKeypair = Keypair.fromSecretKey(secretKey);
+          // Use _botKeypair and env.RPC_URL to build and submit a VersionedTransaction.
+          void _botKeypair; // suppress unused variable warning until implemented
+        } catch(e) {
+          console.error("Invalid BOT_SECRET_KEY in Worker ENV");
+        }
+      } else {
+        console.warn("BOT_SECRET_KEY not configured; skipping trade.");
       }
     }
   }
