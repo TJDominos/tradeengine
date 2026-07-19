@@ -328,8 +328,6 @@ export default function App() {
     secretName,
     contractAddress,
     workerUrl,
-    cfAccessClientId,
-    cfAccessClientSecret,
     
     savedContractAddresses,
     savedWorkerUrls,
@@ -346,7 +344,7 @@ export default function App() {
       actions.fetchState();
     }, 3000);
     return () => clearInterval(interval);
-  }, [workerUrl, cfAccessClientId, cfAccessClientSecret, actions]);
+  }, [workerUrl, actions]);
 
   const [isSimulationModalOpen, setIsSimulationModalOpen] = React.useState(false);
 
@@ -658,33 +656,11 @@ export default function App() {
               onSave={actions.saveWorkerUrl}
               onDelete={actions.deleteSavedItem}
               savedItems={savedWorkerUrls}
-              placeholder="e.g. https://tradeengine.tjluckydominos.workers.dev"
+              placeholder="e.g. http://localhost:3000 or https://your-rust-backend.example.com"
               storageKey="savedWorkerUrls"
-              labelText="Cloudflare Worker API URL"
+              labelText="Backend URL (Rust Engine)"
             />
-            <p className="text-[10px] text-slate-500 mt-1">If provided, this dashboard acts as a frontend to your deployed Worker.</p>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">CF Access Client ID</label>
-              <input 
-                type="text" 
-                className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500 focus:bg-slate-900 transition-colors"
-                value={cfAccessClientId || ''}
-                onChange={(e) => actions.setCfAccessClientId(e.target.value)}
-                placeholder="Optional"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-400 mb-1">CF Access Client Secret</label>
-              <input 
-                type="password" 
-                className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-emerald-500 focus:bg-slate-900 transition-colors"
-                value={cfAccessClientSecret || ''}
-                onChange={(e) => actions.setCfAccessClientSecret(e.target.value)}
-                placeholder="Optional"
-              />
-            </div>
+            <p className="text-[10px] text-slate-500 mt-1">URL of the running Rust backend. Required for all dashboard operations.</p>
           </div>
         </div>
 
