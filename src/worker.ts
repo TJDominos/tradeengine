@@ -204,7 +204,7 @@ async function verifyPassword(
   const [, , iterStr, saltHex, expectedHash] = parts;
   const iterations = parseInt(iterStr, 10);
   const salt = new Uint8Array(
-    saltHex.match(/.{2}/g)!.map((b) => parseInt(b, 16)),
+    (saltHex.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)),
   );
   const enc = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
@@ -247,7 +247,7 @@ function parseEncryptionKey(keyStr: string): Uint8Array {
   // Try hex (64 hex chars for 32 bytes)
   if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
     return new Uint8Array(
-      trimmed.match(/.{2}/g)!.map((b) => parseInt(b, 16)),
+      (trimmed.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)),
     );
   }
   throw new ApiError(
@@ -351,7 +351,7 @@ function validateUsername(username: string): void {
   if (t.length < 3 || t.length > 64) {
     throw new ApiError(400, 'Username must be between 3 and 64 characters');
   }
-  if (!/^[a-zA-Z0-9_.\\-]+$/.test(t)) {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(t)) {
     throw new ApiError(
       400,
       "Username may only include letters, numbers, '.', '_' and '-'",
