@@ -110,6 +110,7 @@ export default function App() {
   const [error, setError] = React.useState<string>('');
   const [notice, setNotice] = React.useState<string>('');
   const [isAdminPanelOpen, setIsAdminPanelOpen] = React.useState(false);
+  const [currentTab, setCurrentTab] = React.useState<'dashboard' | 'accounts' | 'setup' | 'history'>('dashboard');
 
   const [credentials, setCredentials] = React.useState({ username: '', password: '' });
   const [bootstrap, setBootstrap] = React.useState({ username: '', password: '' });
@@ -365,6 +366,14 @@ export default function App() {
             {error || notice}
           </div>
         )}
+
+        {/* Tab Navigation */}
+        <div className={`${cardClass} p-3 flex gap-2 border border-slate-700 overflow-x-auto`}>
+          <button onClick={() => setCurrentTab('dashboard')} className={`px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap ${currentTab === 'dashboard' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}>📊 Dashboard</button>
+          <button onClick={() => setCurrentTab('accounts')} className={`px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap ${currentTab === 'accounts' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}>👥 Accounts</button>
+          <button onClick={() => setCurrentTab('setup')} className={`px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap ${currentTab === 'setup' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}>⚙️ Trading Setup</button>
+          <button onClick={() => setCurrentTab('history')} className={`px-4 py-2 rounded-lg font-medium transition-colors whitespace-nowrap ${currentTab === 'history' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}>📋 Historical Setups</button>
+        </div>
 
         <div className="grid gap-6 lg:grid-cols-3">
           <section className={`${cardClass} p-6`}>
