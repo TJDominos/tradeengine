@@ -104,8 +104,12 @@ function errorResponse(err: unknown): Response {
   if (err instanceof ApiError) {
     return jsonResponse({ error: err.message }, err.status);
   }
-  console.error('Unexpected error:', err);
-  return jsonResponse({ error: 'Internal server error' }, 500);
+  const errorMsg = err instanceof Error ? err.message : String(err);
+  console.error('Unexpected error:', errorMsg, err);
+  return jsonResponse(
+    { error: 'Internal server error', details: errorMsg },
+    500,
+  );
 }
 
 // ─── misc helpers ─────────────────────────────────────────────────────────────
