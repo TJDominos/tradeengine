@@ -13,6 +13,7 @@ export interface Env {
 
 const COOKIE_NAME = 'te_session';
 const SESSION_TTL_HOURS = 12;
+const PBKDF2_ITERATIONS = 100_000; // Max supported by Cloudflare Workers
 const BASE58_ALPHABET =
   '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
@@ -196,7 +197,7 @@ async function hashPassword(password: string): Promise<string> {
     ['deriveBits'],
   );
   const derived = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt, iterations: 210_000, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
     keyMaterial,
     256,
   );
@@ -206,7 +207,7 @@ async function hashPassword(password: string): Promise<string> {
   const saltHex = Array.from(salt)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
-  return `pbkdf2:sha256:210000:${saltHex}:${hashHex}`;
+  return `pbkdf2:sha256:${PBKDF2_ITERATIONS}:${saltHex}:${hashHex}`;
 }
 
 async function verifyPassword(
