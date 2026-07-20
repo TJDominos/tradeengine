@@ -1168,6 +1168,91 @@ async function handleTrade(request: Request, env: Env): Promise<Response> {
   );
 }
 
+// POST /api/admin/password - Change admin password
+async function handleAdminChangePassword(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const body = await request.json<{ oldPassword: string; newPassword: string }>();
+
+  if (!body.oldPassword || !body.newPassword) {
+    throw new ApiError(400, 'Old and new passwords are required');
+  }
+
+  // Verify old password
+  const dbUser = await env.TRADINGBOT_DB
+    .prepare('SELECT password_hash FROM users WHERE id = ?1')
+    .bind(user.id)
+    .first<{ password_hash: string }>();
+
+  if (!dbUser) throw new ApiError(401, 'User not found');
+
+  const oldPasswordValid = await verifyPassword(body.oldPassword, dbUser.password_hash);
+  if (!oldPasswordValid) throw new ApiError(401, 'Old password is incorrect');
+
+  validatePassword(body.newPassword);
+  const newPasswordHash = await hashPassword(body.newPassword);
+
+  // Update password
+  await env.TRADINGBOT_DB
+    .prepare('UPDATE users SET password_hash = ?1 WHERE id = ?2')
+    .bind(newPasswordHash, user.id)
+    .run();
+
+  await dbAddAuditLog(
+    env.TRADINGBOT_DB,
+    user.id,
+    'admin.password_changed',
+    user.username,
+    'Admin password was changed',
+  );
+
+  return jsonResponse({ success: true, message: 'Password updated successfully' }, 200);
+}
+
+// DELETE /api/admin/private-keys/{address} - Delete imported private key
+async function handleAdminDeletePrivateKey(
+  request: Request,
+  url: URL,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const addressPath = url.pathname.split('/').pop();
+
+  if (!addressPath) {
+    throw new ApiError(400, 'Wallet address is required');
+  }
+
+  // Verify the wallet exists and belongs to this user
+  const account = await env.TRADINGBOT_DB
+    .prepare(
+      "SELECT id, label FROM accounts WHERE user_id = ?1 AND wallet_address = ?2 AND type = 'managed'",
+    )
+    .bind(user.id, addressPath)
+    .first<{ id: number; label: string }>();
+
+  if (!account) {
+    throw new ApiError(404, 'Wallet not found or does not belong to this user');
+  }
+
+  // Delete the account
+  await env.TRADINGBOT_DB
+    .prepare('DELETE FROM accounts WHERE id = ?1')
+    .bind(account.id)
+    .run();
+
+  await dbAddAuditLog(
+    env.TRADINGBOT_DB,
+    user.id,
+    'admin.private_key_deleted',
+    addressPath,
+    `Deleted managed key '${account.label}'`,
+  );
+
+  return jsonResponse({ success: true, message: 'Wallet deleted successfully' }, 200);
+}
+
 // ─── API router ───────────────────────────────────────────────────────────────
 
 async function handleApi(
@@ -1199,6 +1284,10 @@ async function handleApi(
       return await handleImportAccount(request, env);
     if (method === 'POST' && pathname === '/api/trade')
       return await handleTrade(request, env);
+    if (method === 'POST' && pathname === '/api/admin/password')
+      return await handleAdminChangePassword(request, env);
+    if (method === 'DELETE' && pathname.startsWith('/api/admin/private-keys/'))
+      return await handleAdminDeletePrivateKey(request, url, env);
     return jsonResponse({ error: 'Not found' }, 404);
   } catch (err) {
     return errorResponse(err);

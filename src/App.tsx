@@ -1,5 +1,6 @@
 import React from 'react';
-import { Lock, LogOut, RefreshCw, ShieldCheck, Wallet, KeyRound, Database, AlertTriangle } from 'lucide-react';
+import { Lock, LogOut, RefreshCw, ShieldCheck, Wallet, KeyRound, Database, AlertTriangle, Shield } from 'lucide-react';
+import AdminPanel from './AdminPanel';
 
 type AuthStatus = {
   setupRequired: boolean;
@@ -108,6 +109,7 @@ export default function App() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string>('');
   const [notice, setNotice] = React.useState<string>('');
+  const [isAdminPanelOpen, setIsAdminPanelOpen] = React.useState(false);
 
   const [credentials, setCredentials] = React.useState({ username: '', password: '' });
   const [bootstrap, setBootstrap] = React.useState({ username: '', password: '' });
@@ -335,8 +337,9 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 px-6 py-8 text-slate-100">
-      <div className="mx-auto max-w-7xl space-y-6">
+    <>
+      <div className="min-h-screen bg-slate-950 px-6 py-8 text-slate-100">
+        <div className="mx-auto max-w-7xl space-y-6">
         <header className={`${cardClass} flex flex-col gap-4 p-6 lg:flex-row lg:items-center lg:justify-between`}>
           <div>
             <p className="text-sm uppercase tracking-[0.3em] text-blue-300">tradeengine</p>
@@ -345,6 +348,9 @@ export default function App() {
           </div>
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <span className="rounded-full border border-emerald-800 bg-emerald-950/60 px-3 py-2 text-emerald-300">{engineState.auth.username} · {engineState.auth.role}</span>
+            <button className={`${buttonClass} border border-amber-700 bg-amber-950/40 text-amber-300 hover:bg-amber-900/50`} onClick={() => setIsAdminPanelOpen(true)}>
+              <Shield size={16} className="mr-2" /> Admin
+            </button>
             <button className={`${buttonClass} border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800`} onClick={() => refresh()}>
               <RefreshCw size={16} className="mr-2" /> Refresh
             </button>
@@ -538,8 +544,15 @@ export default function App() {
             </div>
           </section>
         </div>
+        </div>
       </div>
-    </div>
+      <AdminPanel
+        isOpen={isAdminPanelOpen}
+        onClose={() => setIsAdminPanelOpen(false)}
+        engineState={engineState}
+        onRefresh={() => refresh()}
+      />
+    </>
   );
 }
 
