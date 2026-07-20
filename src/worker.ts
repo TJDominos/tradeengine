@@ -60,6 +60,16 @@ interface AuditLog {
   createdAt: number;
 }
 
+interface TradableToken {
+  id: number;
+  network: string;
+  contractAddress: string;
+  symbol: string | null;
+  name: string | null;
+  decimals: number | null;
+  isActive: boolean;
+}
+
 interface SessionUser {
   id: number;
   username: string;
@@ -459,6 +469,7 @@ async function dbEnsureSchema(db: D1Database): Promise<void> {
   if (!schemaInitPromise) {
     schemaInitPromise = db
       .batch(D1_SCHEMA_STATEMENTS.map((statement) => db.prepare(statement)))
+      .then(() => undefined)
       .catch((err) => {
         schemaInitPromise = undefined;
         throw err;
@@ -857,6 +868,31 @@ async function dbListAuditLogs(
   }));
 }
 
+async function dbListTradableTokens(db: D1Database): Promise<TradableToken[]> {
+  const rows = await db
+    .prepare(
+      'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens ORDER BY id ASC',
+    )
+    .all<{
+      id: number;
+      network: string;
+      contract_address: string;
+      symbol: string | null;
+      name: string | null;
+      decimals: number | null;
+      is_active: number;
+    }>();
+  return rows.results.map((row) => ({
+    id: row.id,
+    network: row.network,
+    contractAddress: row.contract_address,
+    symbol: row.symbol,
+    name: row.name,
+    decimals: row.decimals,
+    isActive: row.is_active === 1,
+  }));
+}
+
 // ─── auth middleware helpers ──────────────────────────────────────────────────
 
 async function requireUser(request: Request, env: Env): Promise<SessionUser> {
@@ -1003,18 +1039,26 @@ async function handleLogout(request: Request, env: Env): Promise<Response> {
 // GET /api/state
 async function handleGetState(request: Request, env: Env): Promise<Response> {
   const user = await requireUser(request, env);
-  const [settings, internalAccs, outsiderAccs, logs] = await Promise.all([
-    dbLoadSettings(env.TRADINGBOT_DB, user.id),
-    dbListAccounts(env.TRADINGBOT_DB, user.id, 'managed'),
-    dbListAccounts(env.TRADINGBOT_DB, user.id, 'watch'),
-    dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
-  ]);
+  const [settings, internalAccs, outsiderAccs, logs, tradableTokens] =
+    await Promise.all([
+      dbLoadSettings(env.TRADINGBOT_DB, user.id),
+      dbListAccounts(env.TRADINGBOT_DB, user.id, 'managed'),
+      dbListAccounts(env.TRADINGBOT_DB, user.id, 'watch'),
+      dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
+      dbListTradableTokens(env.TRADINGBOT_DB).catch((err: unknown) => {
+        // Only swallow "no such table" errors that occur before the migration runs.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('no such table')) return [] as TradableToken[];
+        throw err;
+      }),
+    ]);
   return jsonResponse({
     auth: { username: user.username, role: user.role },
     settings,
     internalAccs,
     outsiderAccs,
     logs,
+    tradableTokens,
     stats: {
       managedAccounts: internalAccs.length,
       watchedAccounts: outsiderAccs.length,

@@ -2,6 +2,24 @@
 
 A Cloudflare Workers-native trading admin panel backed by **Cloudflare D1** (SQLite-compatible serverless database).
 
+## MVP scope: Solana token onboarding via contract address
+
+The product is **Solana-first** and **token-onboarding-first**. There is no pre-seeded fixed trading pair.
+
+### Intended flow
+
+1. **Select network** — currently Solana only.
+2. **Enter contract address** — the token mint address on Solana.
+3. **Fetch token metadata** — the backend retrieves symbol, name, and decimals from on-chain.
+4. **Trade** — the configured token is traded against **USDC on Solana** via the **Jupiter aggregator** ([jup.ag](https://jup.ag)).
+
+| Field | Value |
+|-------|-------|
+| Network | **Solana** |
+| Quote asset | **USDC** (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) |
+| Execution path | **Jupiter (jup.ag)** |
+| Execution status | Disabled (returns `501`) until the execution engine is implemented |
+
 ## Architecture
 
 - **Frontend** – React / Vite SPA served as Cloudflare static assets.
@@ -13,6 +31,7 @@ A Cloudflare Workers-native trading admin panel backed by **Cloudflare D1** (SQL
 - Serves the React admin UI from the same Cloudflare Worker origin.
 - Stores admin users, sessions, settings, imported accounts, and encrypted managed private keys in D1.
 - Requires authenticated login before any configuration, private-key import, or account import action is allowed.
+- Exposes configured tradable tokens (added via network + contract address) via the `/api/state` endpoint and admin UI.
 - Returns `501 Not Implemented` for trade execution until a real executor exists.
 
 ## D1 database binding
@@ -45,7 +64,14 @@ npx wrangler d1 migrations apply tradingbot --remote
 npx wrangler d1 migrations apply tradingbot --local
 ```
 
-Migrations are located in `migrations/`.
+Migrations are located in `migrations/`:
+
+| File | Description |
+|------|-------------|
+| `0001_init.sql` | Core tables: users, sessions, settings, accounts, audit_logs |
+| `0002_trade_domain.sql` | Trade tables: tradable_tokens (network + contract address), trade_logs, signals, positions, historic_setups |
+
+> **Note:** `0002_trade_domain.sql` creates the `tradable_tokens` table. Tokens are added at runtime by providing a network and contract address; no rows are seeded by the migration.
 
 ## Cloudflare secrets
 
@@ -104,11 +130,55 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 | POST | `/api/auth/bootstrap` | No (once) | Create initial admin account |
 | POST | `/api/auth/login` | No | Authenticate and create session |
 | POST | `/api/auth/logout` | No | Delete session |
-| GET | `/api/state` | Yes | Full engine state |
+| GET | `/api/state` | Yes | Full engine state (includes configured tradable tokens) |
 | POST | `/api/settings` | Admin | Save trading settings |
 | POST | `/api/private-keys/import` | Admin | Import + encrypt a managed private key |
 | POST | `/api/accounts/import` | Admin | Import a watch-only account |
 | POST | `/api/trade` | Admin | Trade (returns 501 – not implemented) |
+
+## Data model summary
+
+### Current MVP tables
+
+| Table | Purpose |
+|-------|---------|
+| `users` | Admin accounts |
+| `sessions` | Authenticated sessions |
+| `settings` | Per-user key-value strategy parameters |
+| `accounts` | Managed (signing) and watch-only wallets |
+| `audit_logs` | Immutable action log |
+| `tradable_tokens` | Tokens configured via network + contract address; metadata fetched on-chain |
+| `trade_logs` | Every proposed/executed trade with token reference |
+| `signals` | Incoming webhook events (Helius, etc.) with dedup |
+| `positions` | Current holdings per wallet and token |
+| `historic_setups` | Saved strategy snapshots, optionally scoped to a token |
+
+### Is the current model sufficient for a Solana token-onboarding MVP?
+
+**Yes** — the trade domain tables introduced in `0002_trade_domain.sql` are sufficient:
+
+- `tradable_tokens` stores each token configured by the admin (network + contract address + fetched metadata).
+- `trade_logs` records every order with amounts, price, tx hash, and status; each log references a `token_id`.
+- `signals` gives deduplication-safe storage for Helius webhook events (`external_id NOT NULL` ensures the `UNIQUE(source, external_id)` constraint is reliable).
+- `positions` tracks per-wallet holdings for each configured token.
+- `historic_setups` snapshots strategy parameters at each save so you can correlate outcomes.
+
+### Adding a token at runtime
+
+Insert a row directly into `tradable_tokens` (a future admin UI form will do this):
+
+```sql
+INSERT INTO tradable_tokens (network, contract_address, symbol, name, decimals, is_active, created_at)
+VALUES ('solana', '<mint_address>', 'SYM', 'Token Name', 6, 1, unixepoch());
+```
+
+The system will trade this token against USDC (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) on Solana via Jupiter.
+
+**What is not yet covered** (planned for later phases):
+
+- Balance synchronisation (on-chain → D1) — `accounts` holds no live balance; balances will be polled or pushed via webhooks when the executor is built.
+- Real-time PnL — `positions.realized_pnl` is populated by the executor; the current schema stores the field but no code writes to it yet.
+- Multi-user / role expansion — all tables are `user_id`-scoped, so adding roles is straightforward but not yet wired up.
 
 ## Security notes
 
@@ -120,7 +190,8 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 
 ## Follow-up work for production hardening
 
-- Add a reviewed trade executor with explicit policy enforcement and signing controls.
-- Rotate and manage `PRIVATE_KEY_ENCRYPTION_KEY` using Cloudflare Secrets or a dedicated secret manager.
+- Implement the trade executor: sign transactions with managed keys, submit to Solana via Jupiter, update `trade_logs` and `positions`.
+- Build the add-token form in the UI: select network, enter contract address, trigger on-chain metadata fetch.
+- Add balance-sync job (e.g. Helius webhook → `accounts` cache) to keep displayed balances fresh.
 - Add CSRF protection if the UI will be hosted cross-site.
-- Add user management flows beyond single-admin bootstrap when multi-operator access is needed.
+- Rotate and manage `PRIVATE_KEY_ENCRYPTION_KEY` using Cloudflare Secrets or a dedicated secret manager.

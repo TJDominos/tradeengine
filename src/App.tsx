@@ -37,12 +37,23 @@ type AuditLog = {
   createdAt: number;
 };
 
+type TradableToken = {
+  id: number;
+  network: string;
+  contractAddress: string;
+  symbol: string | null;
+  name: string | null;
+  decimals: number | null;
+  isActive: boolean;
+};
+
 type EngineState = {
   auth: { username: string; role: string };
   settings: SettingsState;
   internalAccs: AccountRecord[];
   outsiderAccs: AccountRecord[];
   logs: AuditLog[];
+  tradableTokens: TradableToken[];
   stats: {
     managedAccounts: number;
     watchedAccounts: number;
@@ -392,6 +403,51 @@ export default function App() {
             <p className="text-sm text-slate-300">Trade execution is disabled in this PR. The backend returns a clear 501 until a reviewed execution engine exists.</p>
           </section>
         </div>
+
+        <section className={`${cardClass} p-6`}>
+          <div className="mb-4 flex items-center gap-3">
+            <ShieldCheck className="text-blue-400" />
+            <h2 className="text-lg font-semibold">Tradable tokens</h2>
+          </div>
+          <p className="mb-4 text-sm text-slate-400">
+            Tokens are added by selecting a <strong className="text-white">network</strong> and entering a <strong className="text-white">contract address</strong>.
+            The backend fetches token metadata on-chain; trades are executed against <strong className="text-white">USDC on Solana</strong> via <span className="text-blue-300">Jupiter (jup.ag)</span>.
+          </p>
+          {engineState.tradableTokens.length === 0 ? (
+            <p className="text-sm text-slate-500">No tokens configured. Add a token by providing its network and contract address.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-slate-300">
+                <thead>
+                  <tr className="border-b border-slate-800 text-left text-xs text-slate-500">
+                    <th className="pb-2 pr-4">Network</th>
+                    <th className="pb-2 pr-4">Contract address</th>
+                    <th className="pb-2 pr-4">Symbol</th>
+                    <th className="pb-2 pr-4">Name</th>
+                    <th className="pb-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {engineState.tradableTokens.map((token) => (
+                    <tr key={token.id} className="border-b border-slate-800/50">
+                      <td className="py-2 pr-4 capitalize">{token.network}</td>
+                      <td className="py-2 pr-4 font-mono text-xs text-blue-300 max-w-[160px] truncate">
+                        <span title={token.contractAddress} aria-label={`Contract address: ${token.contractAddress}`}>{token.contractAddress}</span>
+                      </td>
+                      <td className="py-2 pr-4 font-semibold text-white">{token.symbol ?? <span aria-label="Not available">—</span>}</td>
+                      <td className="py-2 pr-4">{token.name ?? <span aria-label="Not available">—</span>}</td>
+                      <td className="py-2">
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${token.isActive ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-400'}`}>
+                          {token.isActive ? 'Active' : 'Inactive'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
 
         <div className="grid gap-6 xl:grid-cols-2">
           <section className={`${cardClass} p-6`}>
