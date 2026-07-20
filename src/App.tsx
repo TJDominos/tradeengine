@@ -37,12 +37,13 @@ type AuditLog = {
   createdAt: number;
 };
 
-type TradingPair = {
+type TradableToken = {
   id: number;
-  symbol: string;
-  baseMint: string;
-  quoteMint: string;
   network: string;
+  contractAddress: string;
+  symbol: string | null;
+  name: string | null;
+  decimals: number | null;
   isActive: boolean;
 };
 
@@ -52,7 +53,7 @@ type EngineState = {
   internalAccs: AccountRecord[];
   outsiderAccs: AccountRecord[];
   logs: AuditLog[];
-  tradingPairs: TradingPair[];
+  tradableTokens: TradableToken[];
   stats: {
     managedAccounts: number;
     watchedAccounts: number;
@@ -406,40 +407,38 @@ export default function App() {
         <section className={`${cardClass} p-6`}>
           <div className="mb-4 flex items-center gap-3">
             <ShieldCheck className="text-blue-400" />
-            <h2 className="text-lg font-semibold">Trading pairs</h2>
+            <h2 className="text-lg font-semibold">Tradable tokens</h2>
           </div>
           <p className="mb-4 text-sm text-slate-400">
-            MVP scope: <strong className="text-white">WLT/USDC on Solana</strong>.
-            Additional pairs can be added later by inserting rows into the <span className="font-mono text-xs text-blue-300">trading_pairs</span> table.
+            Tokens are added by selecting a <strong className="text-white">network</strong> and entering a <strong className="text-white">contract address</strong>.
+            The backend fetches token metadata on-chain; trades are executed against <strong className="text-white">USDC on Solana</strong> via <span className="text-blue-300">Jupiter (jup.ag)</span>.
           </p>
-          {engineState.tradingPairs.length === 0 ? (
-            <p className="text-sm text-slate-500">No trading pairs found. Run migration <span className="font-mono text-xs">0002_trade_domain.sql</span> to seed the initial WLT/USDC pair.</p>
+          {engineState.tradableTokens.length === 0 ? (
+            <p className="text-sm text-slate-500">No tokens configured. Add a token by providing its network and contract address.</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm text-slate-300">
                 <thead>
                   <tr className="border-b border-slate-800 text-left text-xs text-slate-500">
-                    <th className="pb-2 pr-4">Symbol</th>
                     <th className="pb-2 pr-4">Network</th>
-                    <th className="pb-2 pr-4">Base mint</th>
-                    <th className="pb-2 pr-4">Quote mint</th>
+                    <th className="pb-2 pr-4">Contract address</th>
+                    <th className="pb-2 pr-4">Symbol</th>
+                    <th className="pb-2 pr-4">Name</th>
                     <th className="pb-2">Status</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {engineState.tradingPairs.map((pair) => (
-                    <tr key={pair.id} className="border-b border-slate-800/50">
-                      <td className="py-2 pr-4 font-semibold text-white">{pair.symbol}</td>
-                      <td className="py-2 pr-4 capitalize">{pair.network}</td>
+                  {engineState.tradableTokens.map((token) => (
+                    <tr key={token.id} className="border-b border-slate-800/50">
+                      <td className="py-2 pr-4 capitalize">{token.network}</td>
                       <td className="py-2 pr-4 font-mono text-xs text-blue-300 max-w-[160px] truncate">
-                        <span title={pair.baseMint} aria-label={`Base mint: ${pair.baseMint}`}>{pair.baseMint}</span>
+                        <span title={token.contractAddress} aria-label={`Contract address: ${token.contractAddress}`}>{token.contractAddress}</span>
                       </td>
-                      <td className="py-2 pr-4 font-mono text-xs text-blue-300 max-w-[160px] truncate">
-                        <span title={pair.quoteMint} aria-label={`Quote mint: ${pair.quoteMint}`}>{pair.quoteMint}</span>
-                      </td>
+                      <td className="py-2 pr-4 font-semibold text-white">{token.symbol ?? '—'}</td>
+                      <td className="py-2 pr-4">{token.name ?? '—'}</td>
                       <td className="py-2">
-                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${pair.isActive ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-400'}`}>
-                          {pair.isActive ? 'Active' : 'Inactive'}
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${token.isActive ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-400'}`}>
+                          {token.isActive ? 'Active' : 'Inactive'}
                         </span>
                       </td>
                     </tr>

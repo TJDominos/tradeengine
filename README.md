@@ -2,27 +2,23 @@
 
 A Cloudflare Workers-native trading admin panel backed by **Cloudflare D1** (SQLite-compatible serverless database).
 
-## MVP scope: WLT/USDC on Solana
+## MVP scope: Solana token onboarding via contract address
 
-The current version is intentionally scoped to a **single trading pair**:
+The product is **Solana-first** and **token-onboarding-first**. There is no pre-seeded fixed trading pair.
+
+### Intended flow
+
+1. **Select network** — currently Solana only.
+2. **Enter contract address** — the token mint address on Solana.
+3. **Fetch token metadata** — the backend retrieves symbol, name, and decimals from on-chain.
+4. **Trade** — the configured token is traded against **USDC on Solana** via the **Jupiter aggregator** ([jup.ag](https://jup.ag)).
 
 | Field | Value |
 |-------|-------|
-| Pair | **WLT/USDC** |
 | Network | **Solana** |
-| Execution | Disabled (returns `501`) until the execution engine is implemented |
-
-### Extension path
-
-When you are ready to add more trading pairs, the design stays the same:
-
-1. Insert a new row into the `trading_pairs` table (via a SQL migration or the future admin UI):
-   ```sql
-   INSERT INTO trading_pairs (symbol, base_mint, quote_mint, network, is_active, created_at)
-   VALUES ('NEWTOKEN/USDC', '<new_mint>', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'solana', 1, unixepoch());
-   ```
-2. Trade logs and positions already reference `pair_id`, so historical data stays clean.
-3. No schema rewrites are needed.
+| Quote asset | **USDC** (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) |
+| Execution path | **Jupiter (jup.ag)** |
+| Execution status | Disabled (returns `501`) until the execution engine is implemented |
 
 ## Architecture
 
@@ -35,7 +31,7 @@ When you are ready to add more trading pairs, the design stays the same:
 - Serves the React admin UI from the same Cloudflare Worker origin.
 - Stores admin users, sessions, settings, imported accounts, and encrypted managed private keys in D1.
 - Requires authenticated login before any configuration, private-key import, or account import action is allowed.
-- Exposes the configured trading pairs (seeded: WLT/USDC on Solana) via the `/api/state` endpoint and admin UI.
+- Exposes configured tradable tokens (added via network + contract address) via the `/api/state` endpoint and admin UI.
 - Returns `501 Not Implemented` for trade execution until a real executor exists.
 
 ## D1 database binding
@@ -71,10 +67,9 @@ Migrations are located in `migrations/`:
 | File | Description |
 |------|-------------|
 | `0001_init.sql` | Core tables: users, sessions, settings, accounts, audit_logs |
-| `0002_trade_domain.sql` | Trade tables: trading_pairs (seeded WLT/USDC), trade_logs, signals, positions, historic_setups |
+| `0002_trade_domain.sql` | Trade tables: tradable_tokens (network + contract address), trade_logs, signals, positions, historic_setups |
 
-> **Important:** `0002_trade_domain.sql` seeds `trading_pairs` with a placeholder WLT mint address (`PLACEHOLDER_WLT_MINT_REPLACE_BEFORE_USE`).  
-> Replace the `base_mint` value with the real WLT token mint before executing live trades.
+> **Note:** `0002_trade_domain.sql` creates the `tradable_tokens` table. Tokens are added at runtime by providing a network and contract address; no rows are seeded by the migration.
 
 ## Cloudflare secrets
 
@@ -132,7 +127,7 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 | POST | `/api/auth/bootstrap` | No (once) | Create initial admin account |
 | POST | `/api/auth/login` | No | Authenticate and create session |
 | POST | `/api/auth/logout` | No | Delete session |
-| GET | `/api/state` | Yes | Full engine state (includes trading pairs) |
+| GET | `/api/state` | Yes | Full engine state (includes configured tradable tokens) |
 | POST | `/api/settings` | Admin | Save trading settings |
 | POST | `/api/private-keys/import` | Admin | Import + encrypt a managed private key |
 | POST | `/api/accounts/import` | Admin | Import a watch-only account |
@@ -149,21 +144,32 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 | `settings` | Per-user key-value strategy parameters |
 | `accounts` | Managed (signing) and watch-only wallets |
 | `audit_logs` | Immutable action log |
-| `trading_pairs` | Supported pairs — seeded with WLT/USDC on Solana |
-| `trade_logs` | Every proposed/executed trade with pair reference |
+| `tradable_tokens` | Tokens configured via network + contract address; metadata fetched on-chain |
+| `trade_logs` | Every proposed/executed trade with token reference |
 | `signals` | Incoming webhook events (Helius, etc.) with dedup |
-| `positions` | Current holdings per wallet and pair |
-| `historic_setups` | Saved strategy snapshots, optionally scoped to a pair |
+| `positions` | Current holdings per wallet and token |
+| `historic_setups` | Saved strategy snapshots, optionally scoped to a token |
 
-### Is the current model sufficient for a single-pair Solana MVP?
+### Is the current model sufficient for a Solana token-onboarding MVP?
 
-**Yes** — the trade domain tables introduced in `0002_trade_domain.sql` are sufficient for the WLT/USDC MVP:
+**Yes** — the trade domain tables introduced in `0002_trade_domain.sql` are sufficient:
 
-- `trading_pairs` makes the single-pair scope explicit and queryable rather than hard-coded.
-- `trade_logs` records every order with amounts, price, tx hash, and status.
-- `signals` gives deduplication-safe storage for Helius webhook events.
-- `positions` tracks per-wallet holdings in the base token.
+- `tradable_tokens` stores each token configured by the admin (network + contract address + fetched metadata).
+- `trade_logs` records every order with amounts, price, tx hash, and status; each log references a `token_id`.
+- `signals` gives deduplication-safe storage for Helius webhook events (`external_id NOT NULL` ensures the `UNIQUE(source, external_id)` constraint is reliable).
+- `positions` tracks per-wallet holdings for each configured token.
 - `historic_setups` snapshots strategy parameters at each save so you can correlate outcomes.
+
+### Adding a token at runtime
+
+Insert a row directly into `tradable_tokens` (a future admin UI form will do this):
+
+```sql
+INSERT INTO tradable_tokens (network, contract_address, symbol, name, decimals, is_active, created_at)
+VALUES ('solana', '<mint_address>', 'SYM', 'Token Name', 6, 1, unixepoch());
+```
+
+The system will trade this token against USDC (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) on Solana via Jupiter.
 
 **What is not yet covered** (planned for later phases):
 
@@ -181,8 +187,8 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 
 ## Follow-up work for production hardening
 
-- Implement the trade executor: sign transactions with managed keys, submit to Solana, update `trade_logs` and `positions`.
-- Replace the placeholder WLT `base_mint` in `trading_pairs` with the real mint address.
+- Implement the trade executor: sign transactions with managed keys, submit to Solana via Jupiter, update `trade_logs` and `positions`.
+- Build the add-token form in the UI: select network, enter contract address, trigger on-chain metadata fetch.
 - Add balance-sync job (e.g. Helius webhook → `accounts` cache) to keep displayed balances fresh.
 - Add CSRF protection if the UI will be hosted cross-site.
 - Rotate and manage `PRIVATE_KEY_ENCRYPTION_KEY` using Cloudflare Secrets or a dedicated secret manager.
