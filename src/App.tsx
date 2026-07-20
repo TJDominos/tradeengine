@@ -434,8 +434,8 @@ export default function App() {
                       <td className="py-2 pr-4 font-mono text-xs text-blue-300 max-w-[160px] truncate">
                         <span title={token.contractAddress} aria-label={`Contract address: ${token.contractAddress}`}>{token.contractAddress}</span>
                       </td>
-                      <td className="py-2 pr-4 font-semibold text-white">{token.symbol ?? '—'}</td>
-                      <td className="py-2 pr-4">{token.name ?? '—'}</td>
+                      <td className="py-2 pr-4 font-semibold text-white">{token.symbol ?? <span aria-label="Not available">—</span>}</td>
+                      <td className="py-2 pr-4">{token.name ?? <span aria-label="Not available">—</span>}</td>
                       <td className="py-2">
                         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${token.isActive ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800' : 'bg-slate-800 text-slate-400'}`}>
                           {token.isActive ? 'Active' : 'Inactive'}

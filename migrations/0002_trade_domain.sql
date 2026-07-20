@@ -104,6 +104,9 @@ CREATE TABLE IF NOT EXISTS historic_setups (
 -- ─── indexes ─────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_positions_wallet          ON positions(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_signals_processed_created ON signals(processed, created_at);
+-- The UNIQUE constraint covers (source, external_id) lookups; add source-only index for
+-- queries that filter by source without specifying external_id.
+CREATE INDEX IF NOT EXISTS idx_signals_source            ON signals(source);
 -- Note: no separate index on (source, external_id) — the UNIQUE constraint already covers it.
 CREATE INDEX IF NOT EXISTS idx_trade_logs_token_created  ON trade_logs(token_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trade_logs_wallet_created ON trade_logs(wallet_address, created_at DESC);
