@@ -469,6 +469,7 @@ async function dbEnsureSchema(db: D1Database): Promise<void> {
   if (!schemaInitPromise) {
     schemaInitPromise = db
       .batch(D1_SCHEMA_STATEMENTS.map((statement) => db.prepare(statement)))
+      .then(() => undefined)
       .catch((err) => {
         schemaInitPromise = undefined;
         throw err;
