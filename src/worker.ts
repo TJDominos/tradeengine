@@ -119,6 +119,7 @@ interface WalletBalanceResponse {
 
 interface ManagedWalletImportRequest {
   label: string;
+  adminPassword?: string;
   privateKey?: string;
   recoveryPhrase?: string;
   derivationPath?: string;
@@ -713,8 +714,9 @@ function parseManagedWalletImportRequest(
       'Wallet label and either a private key or recovery phrase are required',
     );
   }
-  const { label, privateKey, recoveryPhrase, derivationPath } = body as {
+  const { label, adminPassword, privateKey, recoveryPhrase, derivationPath } = body as {
     label?: unknown;
+    adminPassword?: unknown;
     privateKey?: unknown;
     recoveryPhrase?: unknown;
     derivationPath?: unknown;
@@ -735,8 +737,15 @@ function parseManagedWalletImportRequest(
   if (derivationPath != null && typeof derivationPath !== 'string') {
     throw new ApiError(400, 'Derivation path must be a string');
   }
+  if (adminPassword != null && typeof adminPassword !== 'string') {
+    throw new ApiError(400, 'Admin password must be a string');
+  }
   return {
     label,
+    adminPassword:
+      typeof adminPassword === 'string' && adminPassword.trim().length > 0
+        ? adminPassword
+        : undefined,
     privateKey: hasPrivateKey ? (privateKey as string) : undefined,
     recoveryPhrase: hasRecoveryPhrase ? (recoveryPhrase as string) : undefined,
     derivationPath: typeof derivationPath === 'string' ? derivationPath : undefined,
@@ -815,6 +824,21 @@ async function dbAuthenticateUser(
   const valid = await verifyPassword(password, row.password_hash);
   if (!valid) throw new ApiError(401, 'Invalid username or password');
   return { id: row.id, username: row.username, role: row.role };
+}
+
+async function dbVerifyUserPassword(
+  db: D1Database,
+  userId: number,
+  password: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare('SELECT password_hash FROM users WHERE id = ?1')
+    .bind(userId)
+    .first<{ password_hash: string }>();
+  if (!row) {
+    throw new ApiError(401, 'User not found');
+  }
+  return verifyPassword(password, row.password_hash);
 }
 
 async function dbCreateSession(
@@ -1758,6 +1782,16 @@ async function handleImportManagedWallet(
   const body = parseManagedWalletImportRequest(
     await parseJsonBody<unknown>(request),
   );
+  if (body.adminPassword) {
+    const passwordValid = await dbVerifyUserPassword(
+      env.TRADINGBOT_DB,
+      user.id,
+      body.adminPassword,
+    );
+    if (!passwordValid) {
+      throw new ApiError(401, 'Admin password is incorrect');
+    }
+  }
   const account = body.privateKey
     ? await dbImportManagedKey(
         env.TRADINGBOT_DB,
@@ -1941,6 +1975,17 @@ async function handleAdminDeletePrivateKey(
   env: Env,
 ): Promise<Response> {
   const user = await requireAdmin(request, env);
+  const adminPasswordHeader = request.headers.get('Authorization')?.trim();
+  if (adminPasswordHeader) {
+    const passwordValid = await dbVerifyUserPassword(
+      env.TRADINGBOT_DB,
+      user.id,
+      adminPasswordHeader,
+    );
+    if (!passwordValid) {
+      throw new ApiError(401, 'Admin password is incorrect');
+    }
+  }
   const addressPath = url.pathname.split('/').pop();
 
   if (!addressPath) {
