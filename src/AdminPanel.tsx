@@ -1,23 +1,53 @@
 import React from 'react';
-import { Shield, Key, Trash2, Lock, Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff, Key, Shield, Trash2 } from 'lucide-react';
+
+type AdminTab = 'password' | 'import' | 'list';
+type ImportMode = 'private-key' | 'recovery';
 
 interface AdminPanelProps {
   isOpen: boolean;
   onClose: () => void;
-  engineState: any;
-  onRefresh: () => void;
+  engineState: {
+    internalAccs: Array<{
+      address: string;
+      label: string;
+      type: string;
+      createdAt: number;
+    }>;
+  };
+  walletBalances: Record<string, WalletBalance>;
+  walletBalanceErrors: Record<string, string>;
+  walletBalancePending: Record<string, boolean>;
+  onRefresh: () => Promise<void>;
+}
+
+interface WalletBalanceToken {
+  mint: string;
+  symbol: string;
+  network: string;
+  amount: string;
+  decimals: number | null;
+}
+
+interface WalletBalance {
+  address: string;
+  sol: string;
+  usdc: string;
+  tokens: WalletBalanceToken[];
+  updatedAt: number;
 }
 
 interface AdminPasswordForm {
   old: string;
-  new1: string;
-  new2: string;
+  next: string;
+  confirm: string;
 }
 
 interface AdminImportForm {
-  key: string;
-  password: string;
   label: string;
+  importMode: ImportMode;
+  privateKey: string;
+  recoveryPhrase: string;
 }
 
 interface AdminMessage {
@@ -25,168 +55,241 @@ interface AdminMessage {
   text: string;
 }
 
-export default function AdminPanel({ isOpen, onClose, engineState, onRefresh }: AdminPanelProps) {
-  const [adminTab, setAdminTab] = React.useState('password'); // password, import, list
-  const [adminPasswordForm, setAdminPasswordForm] = React.useState<AdminPasswordForm>({ old: '', new1: '', new2: '' });
-  const [adminImportForm, setAdminImportForm] = React.useState<AdminImportForm>({ key: '', password: '', label: '' });
-  const [adminMsg, setAdminMsg] = React.useState<AdminMessage>({ type: '', text: '' });
+function compactAddress(address: string) {
+  if (address.length <= 12) return address;
+  return `${address.slice(0, 4)}…${address.slice(-4)}`;
+}
+
+function formatDate(timestamp: number) {
+  return new Date(timestamp * 1000).toLocaleString();
+}
+
+export default function AdminPanel({
+  isOpen,
+  onClose,
+  engineState,
+  walletBalances,
+  walletBalanceErrors,
+  walletBalancePending,
+  onRefresh,
+}: AdminPanelProps) {
+  const [adminTab, setAdminTab] = React.useState<AdminTab>('password');
+  const [adminPasswordForm, setAdminPasswordForm] =
+    React.useState<AdminPasswordForm>({ old: '', next: '', confirm: '' });
+  const [adminImportForm, setAdminImportForm] = React.useState<AdminImportForm>({
+    label: '',
+    importMode: 'private-key',
+    privateKey: '',
+    recoveryPhrase: '',
+  });
+  const [adminMsg, setAdminMsg] = React.useState<AdminMessage>({
+    type: '',
+    text: '',
+  });
   const [showOldPassword, setShowOldPassword] = React.useState(false);
-  const [showNewPassword1, setShowNewPassword1] = React.useState(false);
-  const [showNewPassword2, setShowNewPassword2] = React.useState(false);
-  const [showImportPassword, setShowImportPassword] = React.useState(false);
-  const [showPrivateKey, setShowPrivateKey] = React.useState(false);
+  const [showNewPassword, setShowNewPassword] = React.useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = React.useState(false);
 
   if (!isOpen) return null;
 
+  const managedWallets = engineState.internalAccs.filter(
+    (account) => account.type === 'managed',
+  );
+
   const handleChangePassword = async () => {
-    if (adminPasswordForm.new1 !== adminPasswordForm.new2) {
-      setAdminMsg({ type: 'error', text: 'Passwords do not match' });
+    if (adminPasswordForm.next !== adminPasswordForm.confirm) {
+      setAdminMsg({ type: 'error', text: 'New passwords do not match.' });
       return;
     }
-    if (adminPasswordForm.new1.length < 12) {
-      setAdminMsg({ type: 'error', text: 'Password must be at least 12 characters' });
+    if (adminPasswordForm.next.length < 12) {
+      setAdminMsg({
+        type: 'error',
+        text: 'New password must be at least 12 characters long.',
+      });
       return;
     }
 
-    setAdminMsg({ type: '', text: 'Updating...' });
+    setAdminMsg({ type: '', text: 'Updating password…' });
     try {
-      const res = await fetch('/api/admin/password', {
+      const response = await fetch('/api/admin/password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
           oldPassword: adminPasswordForm.old,
-          newPassword: adminPasswordForm.new1,
+          newPassword: adminPasswordForm.next,
         }),
       });
-
-      const data = (await res.json()) as any;
-      if (!res.ok) {
-        setAdminMsg({ type: 'error', text: data?.error || data?.message || 'Failed to change password' });
-      } else {
-        setAdminMsg({ type: 'success', text: 'Password updated successfully' });
-        setAdminPasswordForm({ old: '', new1: '', new2: '' });
+      const data = (await response.json()) as {
+        error?: string;
+        message?: string;
+      };
+      if (!response.ok) {
+        setAdminMsg({
+          type: 'error',
+          text: data.error || data.message || 'Failed to change password.',
+        });
+        return;
       }
-    } catch (e) {
-      setAdminMsg({ type: 'error', text: 'Network error' });
+      setAdminPasswordForm({ old: '', next: '', confirm: '' });
+      setAdminMsg({
+        type: 'success',
+        text: data.message || 'Password updated successfully.',
+      });
+    } catch {
+      setAdminMsg({ type: 'error', text: 'Network error while changing password.' });
     }
   };
 
-  const handleImportKey = async () => {
-    if (!adminImportForm.key || !adminImportForm.label) {
-      setAdminMsg({ type: 'error', text: 'Please fill all fields' });
+  const handleImportWallet = async () => {
+    if (!adminImportForm.label.trim()) {
+      setAdminMsg({ type: 'error', text: 'Wallet label is required.' });
       return;
     }
 
-    setAdminMsg({ type: '', text: 'Importing...' });
+    if (adminImportForm.importMode === 'private-key') {
+      if (!adminImportForm.privateKey.trim()) {
+        setAdminMsg({ type: 'error', text: 'Private key input is required.' });
+        return;
+      }
+    } else {
+      const words = adminImportForm.recoveryPhrase
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      if (words.length !== 12 && words.length !== 24) {
+        setAdminMsg({
+          type: 'error',
+          text: 'Recovery phrase must contain 12 or 24 words.',
+        });
+        return;
+      }
+    }
+
+    setAdminMsg({ type: '', text: 'Importing wallet…' });
     try {
-      const res = await fetch('/api/private-keys/import', {
+      const response = await fetch('/api/admin/private-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
           label: adminImportForm.label,
-          privateKey: adminImportForm.key,
+          privateKey:
+            adminImportForm.importMode === 'private-key'
+              ? adminImportForm.privateKey
+              : undefined,
+          recoveryPhrase:
+            adminImportForm.importMode === 'recovery'
+              ? adminImportForm.recoveryPhrase
+              : undefined,
         }),
       });
-
-      const data = (await res.json()) as any;
-      if (!res.ok) {
-        setAdminMsg({ type: 'error', text: data?.error || data?.message || 'Failed to import key' });
-      } else {
-        setAdminMsg({ type: 'success', text: `Imported successfully: ${data?.account?.address || 'wallet'}` });
-        setAdminImportForm({ key: '', password: '', label: '' });
-        onRefresh();
+      const data = (await response.json()) as {
+        error?: string;
+        account?: { address: string };
+      };
+      if (!response.ok) {
+        setAdminMsg({
+          type: 'error',
+          text: data.error || 'Failed to import wallet.',
+        });
+        return;
       }
-    } catch (e) {
-      setAdminMsg({ type: 'error', text: 'Network error' });
+      setAdminImportForm({
+        label: '',
+        importMode: 'private-key',
+        privateKey: '',
+        recoveryPhrase: '',
+      });
+      await onRefresh();
+      setAdminMsg({
+        type: 'success',
+        text: `Imported wallet ${data.account?.address ?? ''}`.trim(),
+      });
+      setAdminTab('list');
+    } catch {
+      setAdminMsg({ type: 'error', text: 'Network error while importing wallet.' });
     }
   };
 
-  const handleDeleteKey = async (address: string, label: string) => {
-    if (!window.confirm(`Delete wallet "${label}"?`)) return;
-    if (!window.confirm('This action cannot be undone. Are you sure?')) return;
+  const handleDeleteWallet = async (address: string, label: string) => {
+    if (!window.confirm(`Delete managed wallet "${label}"?`)) return;
+    if (!window.confirm('This action cannot be undone. Continue?')) return;
 
     try {
-      const res = await fetch(`/api/admin/private-keys/${address}`, {
+      const response = await fetch(`/api/admin/private-keys/${address}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
       });
-
-      const data = (await res.json()) as any;
-      if (!res.ok) {
-        setAdminMsg({ type: 'error', text: data?.error || data?.message || 'Failed to delete wallet' });
-      } else {
-        setAdminMsg({ type: 'success', text: 'Wallet deleted successfully' });
-        onRefresh();
+      const data = (await response.json()) as { error?: string; message?: string };
+      if (!response.ok) {
+        setAdminMsg({
+          type: 'error',
+          text: data.error || 'Failed to delete wallet.',
+        });
+        return;
       }
-    } catch (e) {
-      setAdminMsg({ type: 'error', text: 'Network error' });
+      await onRefresh();
+      setAdminMsg({
+        type: 'success',
+        text: data.message || 'Wallet deleted successfully.',
+      });
+    } catch {
+      setAdminMsg({ type: 'error', text: 'Network error while deleting wallet.' });
     }
   };
 
-  const managedWallets = engineState?.internalAccs?.filter((acc: any) => acc.type === 'managed') || [];
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-2xl flex flex-col overflow-hidden max-h-[85vh]">
-        <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/80">
-          <h3 className="font-semibold text-lg flex items-center gap-2">
-            <Shield size={18} className="text-amber-500" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/90 p-4">
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-white">
+            <Shield className="size-5 text-amber-400" />
             Admin Panel
-          </h3>
+          </h2>
           <button
             onClick={onClose}
-            className="text-slate-400 hover:text-white p-1 rounded transition-colors"
+            className="rounded-md p-1 text-slate-400 transition hover:bg-slate-800 hover:text-white"
           >
             ✕
           </button>
         </div>
 
-        <div className="flex border-b border-slate-800 bg-slate-900/50">
-          <button
+        <div className="flex border-b border-slate-800 bg-slate-950/40">
+          <AdminTabButton
+            label="Change Password"
+            active={adminTab === 'password'}
             onClick={() => {
               setAdminTab('password');
               setAdminMsg({ type: '', text: '' });
             }}
-            className={`flex-1 py-3 text-sm font-medium ${
-              adminTab === 'password' ? 'text-amber-400 border-b-2 border-amber-500' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Change Password
-          </button>
-          <button
+          />
+          <AdminTabButton
+            label="Import Wallet"
+            active={adminTab === 'import'}
             onClick={() => {
               setAdminTab('import');
               setAdminMsg({ type: '', text: '' });
             }}
-            className={`flex-1 py-3 text-sm font-medium ${
-              adminTab === 'import' ? 'text-amber-400 border-b-2 border-amber-500' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Import Wallet
-          </button>
-          <button
+          />
+          <AdminTabButton
+            label="Manage Wallets"
+            active={adminTab === 'list'}
             onClick={() => {
               setAdminTab('list');
               setAdminMsg({ type: '', text: '' });
             }}
-            className={`flex-1 py-3 text-sm font-medium ${
-              adminTab === 'list' ? 'text-amber-400 border-b-2 border-amber-500' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Manage Wallets
-          </button>
+          />
         </div>
 
-        <div className="p-6 space-y-4 overflow-y-auto flex-1">
+        <div className="flex-1 overflow-y-auto p-6">
           {adminMsg.text && (
             <div
-              className={`p-3 rounded text-sm ${
+              className={`mb-4 rounded-xl border p-3 text-sm ${
                 adminMsg.type === 'error'
-                  ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                  : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                  ? 'border-rose-500/20 bg-rose-500/10 text-rose-300'
+                  : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
               }`}
             >
               {adminMsg.text}
@@ -195,60 +298,40 @@ export default function AdminPanel({ isOpen, onClose, engineState, onRefresh }: 
 
           {adminTab === 'password' && (
             <div className="space-y-4">
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-400 uppercase">Current Password</label>
-                <div className="relative">
-                  <input
-                    type={showOldPassword ? 'text' : 'password'}
-                    value={adminPasswordForm.old}
-                    onChange={(e) => setAdminPasswordForm({ ...adminPasswordForm, old: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm focus:border-amber-500 outline-none pr-10"
-                  />
-                  <button
-                    onClick={() => setShowOldPassword(!showOldPassword)}
-                    className="absolute right-3 top-2.5 text-slate-500 hover:text-slate-300"
-                  >
-                    {showOldPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-400 uppercase">New Password (12+ chars)</label>
-                <div className="relative">
-                  <input
-                    type={showNewPassword1 ? 'text' : 'password'}
-                    value={adminPasswordForm.new1}
-                    onChange={(e) => setAdminPasswordForm({ ...adminPasswordForm, new1: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm focus:border-amber-500 outline-none pr-10"
-                  />
-                  <button
-                    onClick={() => setShowNewPassword1(!showNewPassword1)}
-                    className="absolute right-3 top-2.5 text-slate-500 hover:text-slate-300"
-                  >
-                    {showNewPassword1 ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-400 uppercase">Confirm New Password</label>
-                <div className="relative">
-                  <input
-                    type={showNewPassword2 ? 'text' : 'password'}
-                    value={adminPasswordForm.new2}
-                    onChange={(e) => setAdminPasswordForm({ ...adminPasswordForm, new2: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm focus:border-amber-500 outline-none pr-10"
-                  />
-                  <button
-                    onClick={() => setShowNewPassword2(!showNewPassword2)}
-                    className="absolute right-3 top-2.5 text-slate-500 hover:text-slate-300"
-                  >
-                    {showNewPassword2 ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
-                </div>
-              </div>
+              <PasswordField
+                label="Current Password"
+                value={adminPasswordForm.old}
+                visible={showOldPassword}
+                onToggle={() => setShowOldPassword((current) => !current)}
+                onChange={(value) =>
+                  setAdminPasswordForm((current) => ({ ...current, old: value }))
+                }
+              />
+              <PasswordField
+                label="New Password"
+                helper="Use at least 12 characters."
+                value={adminPasswordForm.next}
+                visible={showNewPassword}
+                onToggle={() => setShowNewPassword((current) => !current)}
+                onChange={(value) =>
+                  setAdminPasswordForm((current) => ({ ...current, next: value }))
+                }
+              />
+              <PasswordField
+                label="Confirm New Password"
+                value={adminPasswordForm.confirm}
+                visible={showConfirmPassword}
+                onToggle={() => setShowConfirmPassword((current) => !current)}
+                onChange={(value) =>
+                  setAdminPasswordForm((current) => ({
+                    ...current,
+                    confirm: value,
+                  }))
+                }
+              />
               <button
                 onClick={handleChangePassword}
-                className="w-full bg-amber-600 hover:bg-amber-700 text-white font-medium py-2.5 rounded transition-colors mt-4"
+                className="w-full rounded-xl bg-amber-600 px-4 py-3 font-semibold text-white transition hover:bg-amber-500"
               >
                 Change Password
               </button>
@@ -256,91 +339,298 @@ export default function AdminPanel({ isOpen, onClose, engineState, onRefresh }: 
           )}
 
           {adminTab === 'import' && (
-            <div className="space-y-4">
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-400 uppercase">Wallet Label</label>
+            <div className="space-y-5">
+              <div className="grid gap-4 md:grid-cols-2">
+                <button
+                  onClick={() =>
+                    setAdminImportForm((current) => ({
+                      ...current,
+                      importMode: 'private-key',
+                    }))
+                  }
+                  className={`rounded-xl border px-4 py-3 text-left transition ${
+                    adminImportForm.importMode === 'private-key'
+                      ? 'border-amber-500 bg-amber-950/40 text-amber-200'
+                      : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-slate-600'
+                  }`}
+                >
+                  <div className="font-semibold">Private Key</div>
+                  <div className="mt-1 text-xs text-slate-400">
+                    Accepts base58 or 64-byte JSON array input.
+                  </div>
+                </button>
+                <button
+                  onClick={() =>
+                    setAdminImportForm((current) => ({
+                      ...current,
+                      importMode: 'recovery',
+                    }))
+                  }
+                  className={`rounded-xl border px-4 py-3 text-left transition ${
+                    adminImportForm.importMode === 'recovery'
+                      ? 'border-amber-500 bg-amber-950/40 text-amber-200'
+                      : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-slate-600'
+                  }`}
+                >
+                  <div className="font-semibold">Recovery Phrase</div>
+                  <div className="mt-1 text-xs text-slate-400">
+                    Supports 12-word and 24-word BIP39 phrases.
+                  </div>
+                </button>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium text-slate-300">
+                  Wallet Label
+                </label>
                 <input
-                  type="text"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-amber-500"
                   value={adminImportForm.label}
-                  onChange={(e) => setAdminImportForm({ ...adminImportForm, label: e.target.value })}
-                  placeholder="e.g., Trading Bot #1"
-                  className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm focus:border-amber-500 outline-none"
+                  onChange={(event) =>
+                    setAdminImportForm((current) => ({
+                      ...current,
+                      label: event.target.value,
+                    }))
+                  }
+                  placeholder="e.g. Main Trading Wallet"
                 />
               </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-400 uppercase">Private Key (Base58 or JSON array)</label>
-                <div className="relative">
+
+              {adminImportForm.importMode === 'private-key' ? (
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-300">
+                    Private Key
+                  </label>
                   <textarea
-                    value={adminImportForm.key}
-                    onChange={(e) => setAdminImportForm({ ...adminImportForm, key: e.target.value })}
-                    placeholder="Paste your Solana private key here"
-                    className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm focus:border-amber-500 outline-none font-mono h-24 resize-none pr-10"
+                    className="h-32 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 font-mono text-xs text-slate-100 outline-none transition focus:border-amber-500"
+                    value={adminImportForm.privateKey}
+                    onChange={(event) =>
+                      setAdminImportForm((current) => ({
+                        ...current,
+                        privateKey: event.target.value,
+                      }))
+                    }
+                    placeholder="Paste a Solana base58 private key or 64-byte JSON array"
                   />
-                  <button
-                    onClick={() => setShowPrivateKey(!showPrivateKey)}
-                    className="absolute right-3 top-2.5 text-slate-500 hover:text-slate-300"
-                    title="Toggle visibility"
-                  >
-                    {showPrivateKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
                 </div>
+              ) : (
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-300">
+                    Recovery Phrase
+                  </label>
+                  <textarea
+                    className="h-32 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-amber-500"
+                    value={adminImportForm.recoveryPhrase}
+                    onChange={(event) =>
+                      setAdminImportForm((current) => ({
+                        ...current,
+                        recoveryPhrase: event.target.value,
+                      }))
+                    }
+                    placeholder="Enter a 12-word or 24-word recovery phrase separated by spaces"
+                  />
+                  <p className="mt-2 text-xs text-slate-500">
+                    Uses the default Solana derivation path m/44'/501'/0'/0'.
+                  </p>
+                </div>
+              )}
+
+              <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 text-xs text-slate-400">
+                Imported secrets are encrypted server-side with AES-256-GCM and are
+                never returned by the API.
               </div>
-              <div className="text-xs text-slate-500 leading-tight">
-                Private keys are encrypted at rest using AES-256-GCM and are never returned by the API.
-              </div>
+
               <button
-                onClick={handleImportKey}
-                className="w-full bg-amber-600 hover:bg-amber-700 text-white font-medium py-2.5 rounded transition-colors flex items-center justify-center gap-2"
+                onClick={handleImportWallet}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-amber-600 px-4 py-3 font-semibold text-white transition hover:bg-amber-500"
               >
-                <Key size={16} /> Import Wallet
+                <Key className="size-4" /> Import Wallet
               </button>
             </div>
           )}
 
           {adminTab === 'list' && (
             <div className="space-y-4">
-              <div className="border border-slate-800 rounded-md overflow-hidden bg-slate-950/50">
-                <div className="p-3 border-b border-slate-800 text-xs font-semibold text-slate-400 bg-slate-900/50 flex justify-between">
-                  <span>Managed Wallets</span>
-                  <span>{managedWallets.length}</span>
+              <div className="flex items-center justify-between gap-4 rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+                <div>
+                  <div className="font-semibold text-white">Managed wallets</div>
+                  <div className="text-sm text-slate-400">
+                    {managedWallets.length} wallet{managedWallets.length === 1 ? '' : 's'} imported
+                  </div>
                 </div>
-                <div className="max-h-64 overflow-y-auto p-2 space-y-2">
-                  {managedWallets.length === 0 ? (
-                    <div className="text-slate-500 text-xs text-center py-4">No managed wallets found.</div>
-                  ) : (
-                    managedWallets.map((acc: any, index: number) => (
-                      <div key={acc.address} className="flex items-center justify-between bg-slate-900 border border-slate-800 p-2 rounded">
-                        <div className="flex items-center gap-2 flex-1 min-w-0">
-                          <span className="text-slate-500 font-mono text-xs w-4">{index + 1}.</span>
-                          <div className="flex flex-col min-w-0">
-                            <div className="text-xs text-slate-300 font-semibold truncate">{acc.label || 'Unnamed'}</div>
-                            <div className="font-mono text-xs text-slate-500 truncate">{acc.address}</div>
+                <button
+                  onClick={() => void onRefresh()}
+                  className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 transition hover:bg-slate-800"
+                >
+                  Refresh
+                </button>
+              </div>
+
+              {managedWallets.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/50 p-6 text-sm text-slate-400">
+                  No managed wallets imported yet.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {managedWallets.map((account) => (
+                    <div
+                      key={account.address}
+                      className="rounded-xl border border-slate-800 bg-slate-950/60 p-4"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate font-semibold text-white">
+                            {account.label}
+                          </div>
+                          <div className="mt-1 font-mono text-xs text-blue-300">
+                            {account.address}
+                          </div>
+                          <div className="mt-1 text-xs text-slate-500">
+                            Imported {formatDate(account.createdAt)}
                           </div>
                         </div>
                         <button
-                          onClick={() => handleDeleteKey(acc.address, acc.label || 'Unnamed')}
-                          className="text-rose-400 hover:bg-rose-500/20 p-1.5 bg-rose-500/10 rounded transition-colors flex items-center gap-1 text-xs font-semibold ml-2 flex-shrink-0"
+                          onClick={() =>
+                            void handleDeleteWallet(account.address, account.label)
+                          }
+                          className="inline-flex items-center gap-1 rounded-lg bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 transition hover:bg-rose-500/20"
                         >
-                          <Trash2 size={14} /> Delete
+                          <Trash2 className="size-4" /> Delete
                         </button>
                       </div>
-                    ))
-                  )}
+
+                      <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+                        <WalletBalanceSummary
+                          address={account.address}
+                          balance={walletBalances[account.address]}
+                          loading={walletBalancePending[account.address] ?? false}
+                          error={walletBalanceErrors[account.address]}
+                        />
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              </div>
+              )}
             </div>
           )}
         </div>
-
-        <div className="p-4 border-t border-slate-800 bg-slate-900 flex justify-end">
-          <button
-            onClick={onClose}
-            className="px-6 h-10 bg-slate-800 hover:bg-slate-700 font-medium text-white rounded-md transition-colors border border-slate-700"
-          >
-            Close
-          </button>
-        </div>
       </div>
+    </div>
+  );
+}
+
+function AdminTabButton({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex-1 border-b-2 px-4 py-3 text-sm font-medium transition ${
+        active
+          ? 'border-amber-500 text-amber-300'
+          : 'border-transparent text-slate-400 hover:text-slate-200'
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function PasswordField({
+  label,
+  helper,
+  value,
+  visible,
+  onToggle,
+  onChange,
+}: {
+  label: string;
+  helper?: string;
+  value: string;
+  visible: boolean;
+  onToggle: () => void;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div>
+      <label className="mb-2 block text-sm font-medium text-slate-300">
+        {label}
+      </label>
+      {helper && <p className="mb-2 text-xs text-slate-500">{helper}</p>}
+      <div className="relative">
+        <input
+          type={visible ? 'text' : 'password'}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 pr-11 text-sm text-slate-100 outline-none transition focus:border-amber-500"
+        />
+        <button
+          onClick={onToggle}
+          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 transition hover:text-slate-300"
+        >
+          {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function WalletBalanceSummary({
+  address,
+  balance,
+  loading,
+  error,
+}: {
+  address: string;
+  balance?: WalletBalance;
+  loading: boolean;
+  error?: string;
+}) {
+  if (loading) {
+    return <p className="text-xs text-slate-500">Loading balances…</p>;
+  }
+  if (error) {
+    return <p className="text-xs text-rose-300">{error}</p>;
+  }
+  if (!balance) {
+    return (
+      <p className="text-xs text-slate-500">
+        No balance data loaded for {compactAddress(address)} yet.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2 text-xs text-slate-200">
+        <span className="rounded-full border border-slate-700 bg-slate-950 px-2 py-1">
+          SOL {balance.sol}
+        </span>
+        <span className="rounded-full border border-slate-700 bg-slate-950 px-2 py-1">
+          USDC {balance.usdc}
+        </span>
+      </div>
+      {balance.tokens.length > 0 && (
+        <div className="flex flex-wrap gap-2 text-xs text-slate-300">
+          {balance.tokens.map((token) => (
+            <span
+              key={`${token.network}-${token.mint}`}
+              className="rounded-full border border-blue-900 bg-blue-950/40 px-2 py-1"
+            >
+              {token.symbol} {token.amount}
+            </span>
+          ))}
+        </div>
+      )}
+      <p className="text-[11px] text-slate-500">
+        Updated {formatDate(balance.updatedAt)}
+      </p>
     </div>
   );
 }

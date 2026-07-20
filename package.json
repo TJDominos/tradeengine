@@ -12,9 +12,12 @@
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
+    "@scure/bip39": "^2.2.0",
     "lucide-react": "^0.546.0",
+    "micro-ed25519-hdkey": "^0.1.2",
     "react": "^19.0.1",
-    "react-dom": "^19.0.1"
+    "react-dom": "^19.0.1",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.45.1",

@@ -1,5 +1,10 @@
 /// <reference types="@cloudflare/workers-types" />
 
+import { mnemonicToSeedSync, validateMnemonic } from '@scure/bip39';
+import { wordlist as englishWordlist } from '@scure/bip39/wordlists/english.js';
+import { HDKey } from 'micro-ed25519-hdkey';
+import nacl from 'tweetnacl';
+
 // ─── environment bindings ────────────────────────────────────────────────────
 
 export interface Env {
@@ -7,6 +12,8 @@ export interface Env {
   ASSETS: Fetcher;
   /** 32-byte key encoded as base64 or hex; required for private-key import */
   PRIVATE_KEY_ENCRYPTION_KEY?: string;
+  /** Optional Solana RPC URL. Falls back to the public mainnet endpoint. */
+  SOLANA_RPC_URL?: string;
 }
 
 // ─── constants ───────────────────────────────────────────────────────────────
@@ -14,8 +21,17 @@ export interface Env {
 const COOKIE_NAME = 'te_session';
 const SESSION_TTL_HOURS = 12;
 const PBKDF2_ITERATIONS = 100_000; // Max supported by Cloudflare Workers
+const DEFAULT_SOLANA_DERIVATION_PATH = "m/44'/501'/0'/0'";
+const DEFAULT_SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com';
+const SOLANA_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const WALLET_BALANCE_CACHE_TTL_MS = 30_000;
 const BASE58_ALPHABET =
   '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+const walletBalanceCache = new Map<
+  string,
+  { expiresAt: number; value: WalletBalanceResponse }
+>();
 
 // ─── types (mirror frontend type shapes) ─────────────────────────────────────
 
@@ -69,6 +85,55 @@ interface TradableToken {
   name: string | null;
   decimals: number | null;
   isActive: boolean;
+}
+
+interface HistoricalSetupRecord {
+  id: number;
+  tokenSymbol: string | null;
+  contractAddress: string | null;
+  timeRangeTarget: string;
+  maxTransactions: number;
+  maxSlippage: number;
+  volumeTarget: number;
+  netBuyinTarget: number;
+  volatilityTarget: number;
+  pullbackTarget: number;
+  createdAt: number;
+}
+
+interface WalletBalanceToken {
+  mint: string;
+  symbol: string;
+  network: string;
+  amount: string;
+  decimals: number | null;
+}
+
+interface WalletBalanceResponse {
+  address: string;
+  sol: string;
+  usdc: string;
+  tokens: WalletBalanceToken[];
+  updatedAt: number;
+}
+
+interface ManagedWalletImportRequest {
+  label: string;
+  privateKey?: string;
+  recoveryPhrase?: string;
+  derivationPath?: string;
+}
+
+interface TradableTokenCreateRequest {
+  network: string;
+  contractAddress: string;
+}
+
+interface TrackedTokenDescriptor {
+  mint: string;
+  symbol: string;
+  network: string;
+  decimals: number | null;
 }
 
 interface SessionUser {
@@ -293,6 +358,10 @@ async function encryptPrivateKey(
   return btoa(binary);
 }
 
+function normalizeWhitespace(value: string): string {
+  return value.trim().split(/\s+/).filter(Boolean).join(' ');
+}
+
 // ─── Solana key helpers ───────────────────────────────────────────────────────
 
 function normalizePrivateKey(raw: string): Uint8Array {
@@ -318,6 +387,40 @@ function normalizePrivateKey(raw: string): Uint8Array {
       'Private key must be a base58 string or JSON array',
     );
   }
+}
+
+function normalizeRecoveryPhrase(raw: string): string {
+  const normalized = normalizeWhitespace(raw).toLowerCase();
+  if (!normalized) {
+    throw new ApiError(400, 'Recovery phrase is required');
+  }
+  const wordCount = normalized.split(' ').length;
+  if (wordCount !== 12 && wordCount !== 24) {
+    throw new ApiError(400, 'Recovery phrase must contain 12 or 24 words');
+  }
+  if (!validateMnemonic(normalized, englishWordlist)) {
+    throw new ApiError(400, 'Recovery phrase is not a valid BIP39 mnemonic');
+  }
+  return normalized;
+}
+
+function deriveSolanaKeypairFromRecoveryPhrase(
+  recoveryPhraseRaw: string,
+  derivationPath = DEFAULT_SOLANA_DERIVATION_PATH,
+): Uint8Array {
+  const recoveryPhrase = normalizeRecoveryPhrase(recoveryPhraseRaw);
+  if (!/^m(\/[0-9]+'?)+$/.test(derivationPath)) {
+    throw new ApiError(400, 'Invalid derivation path');
+  }
+  const seed = mnemonicToSeedSync(recoveryPhrase);
+  const derived = HDKey.fromMasterSeed(seed).derive(derivationPath);
+  if (!derived.privateKey || derived.privateKey.length !== 32) {
+    throw new ApiError(
+      400,
+      'Could not derive a Solana private key from the recovery phrase',
+    );
+  }
+  return nacl.sign.keyPair.fromSeed(derived.privateKey).secretKey;
 }
 
 /** Extract the base58-encoded public key from a 64-byte Solana keypair. */
@@ -350,6 +453,52 @@ function normalizePubkey(value: string): string {
 function validateContractAddress(value: string): void {
   if (!value.trim()) return;
   normalizePubkey(value);
+}
+
+function formatTokenAmount(rawAmount: bigint, decimals: number): string {
+  if (decimals <= 0) return rawAmount.toString();
+  const base = 10n ** BigInt(decimals);
+  const whole = rawAmount / base;
+  const fraction = rawAmount % base;
+  if (fraction === 0n) return whole.toString();
+  const fractionText = fraction
+    .toString()
+    .padStart(decimals, '0')
+    .replace(/0+$/, '');
+  return `${whole.toString()}.${fractionText}`;
+}
+
+function walletBalanceCacheKey(
+  address: string,
+  trackedTokens: TrackedTokenDescriptor[],
+): string {
+  const tokenKey = trackedTokens
+    .map((token) => `${token.network}:${token.mint}`)
+    .sort()
+    .join('|');
+  return `${address}|${tokenKey}`;
+}
+
+function readWalletBalanceCache(
+  cacheKey: string,
+): WalletBalanceResponse | null {
+  const cached = walletBalanceCache.get(cacheKey);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    walletBalanceCache.delete(cacheKey);
+    return null;
+  }
+  return cached.value;
+}
+
+function writeWalletBalanceCache(
+  cacheKey: string,
+  value: WalletBalanceResponse,
+): void {
+  walletBalanceCache.set(cacheKey, {
+    expiresAt: Date.now() + WALLET_BALANCE_CACHE_TTL_MS,
+    value,
+  });
 }
 
 // ─── input validation ─────────────────────────────────────────────────────────
@@ -463,12 +612,44 @@ const D1_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created_at ON audit_logs(user_id, created_at DESC)',
 ];
 
+const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS tradable_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    network TEXT NOT NULL DEFAULT 'solana',
+    contract_address TEXT NOT NULL,
+    symbol TEXT,
+    name TEXT,
+    decimals INTEGER,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    UNIQUE(network, contract_address)
+  )`,
+  `CREATE TABLE IF NOT EXISTS historic_setups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_id INTEGER,
+    time_range_target TEXT NOT NULL,
+    max_transactions INTEGER NOT NULL,
+    max_slippage REAL NOT NULL,
+    volume_target REAL NOT NULL DEFAULT 0,
+    net_buyin_target REAL NOT NULL DEFAULT 0,
+    volatility_target REAL NOT NULL DEFAULT 0,
+    pullback_target REAL NOT NULL DEFAULT 0,
+    contract_address TEXT,
+    metadata TEXT,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id)
+  )`,
+];
+
 interface CredentialsBody {
   username: string;
   password: string;
 }
 
 let schemaInitPromise: Promise<void> | undefined;
+let tradeDomainSchemaInitPromise: Promise<void> | undefined;
 
 async function dbEnsureSchema(db: D1Database): Promise<void> {
   if (!schemaInitPromise) {
@@ -481,6 +662,24 @@ async function dbEnsureSchema(db: D1Database): Promise<void> {
       });
   }
   await schemaInitPromise;
+}
+
+async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
+  await dbEnsureSchema(db);
+  if (!tradeDomainSchemaInitPromise) {
+    tradeDomainSchemaInitPromise = db
+      .batch(
+        D1_TRADE_DOMAIN_SCHEMA_STATEMENTS.map((statement) =>
+          db.prepare(statement),
+        ),
+      )
+      .then(() => undefined)
+      .catch((err) => {
+        tradeDomainSchemaInitPromise = undefined;
+        throw err;
+      });
+  }
+  await tradeDomainSchemaInitPromise;
 }
 
 async function parseJsonBody<T>(request: Request): Promise<T> {
@@ -503,6 +702,61 @@ function parseCredentialsBody(body: unknown): CredentialsBody {
     throw new ApiError(400, 'Username and password are required');
   }
   return { username, password };
+}
+
+function parseManagedWalletImportRequest(
+  body: unknown,
+): ManagedWalletImportRequest {
+  if (!body || typeof body !== 'object') {
+    throw new ApiError(
+      400,
+      'Wallet label and either a private key or recovery phrase are required',
+    );
+  }
+  const { label, privateKey, recoveryPhrase, derivationPath } = body as {
+    label?: unknown;
+    privateKey?: unknown;
+    recoveryPhrase?: unknown;
+    derivationPath?: unknown;
+  };
+  if (typeof label !== 'string') {
+    throw new ApiError(400, 'Wallet label is required');
+  }
+  const hasPrivateKey =
+    typeof privateKey === 'string' && privateKey.trim().length > 0;
+  const hasRecoveryPhrase =
+    typeof recoveryPhrase === 'string' && recoveryPhrase.trim().length > 0;
+  if (hasPrivateKey === hasRecoveryPhrase) {
+    throw new ApiError(
+      400,
+      'Provide exactly one of privateKey or recoveryPhrase',
+    );
+  }
+  if (derivationPath != null && typeof derivationPath !== 'string') {
+    throw new ApiError(400, 'Derivation path must be a string');
+  }
+  return {
+    label,
+    privateKey: hasPrivateKey ? (privateKey as string) : undefined,
+    recoveryPhrase: hasRecoveryPhrase ? (recoveryPhrase as string) : undefined,
+    derivationPath: typeof derivationPath === 'string' ? derivationPath : undefined,
+  };
+}
+
+function parseTradableTokenCreateRequest(
+  body: unknown,
+): TradableTokenCreateRequest {
+  if (!body || typeof body !== 'object') {
+    throw new ApiError(400, 'Network and contract address are required');
+  }
+  const { network, contractAddress } = body as {
+    network?: unknown;
+    contractAddress?: unknown;
+  };
+  if (typeof network !== 'string' || typeof contractAddress !== 'string') {
+    throw new ApiError(400, 'Network and contract address are required');
+  }
+  return { network, contractAddress };
 }
 
 async function dbSetupRequired(db: D1Database): Promise<boolean> {
@@ -611,6 +865,22 @@ async function dbDeleteSession(db: D1Database, token: string): Promise<void> {
     .prepare('DELETE FROM sessions WHERE token_hash = ?1')
     .bind(tokenHash)
     .run();
+}
+
+async function dbDeleteOtherSessions(
+  db: D1Database,
+  userId: number,
+  exceptToken: string | null,
+): Promise<void> {
+  if (exceptToken) {
+    const exceptTokenHash = await sha256Hex(exceptToken);
+    await db
+      .prepare('DELETE FROM sessions WHERE user_id = ?1 AND token_hash != ?2')
+      .bind(userId, exceptTokenHash)
+      .run();
+    return;
+  }
+  await db.prepare('DELETE FROM sessions WHERE user_id = ?1').bind(userId).run();
 }
 
 async function dbSaveSettings(
@@ -799,6 +1069,23 @@ async function dbImportManagedKey(
 ): Promise<AccountRecord> {
   validateLabel(label);
   const keypairBytes = normalizePrivateKey(privateKeyRaw);
+  return dbImportManagedKeyBytes(
+    db,
+    userId,
+    label,
+    keypairBytes,
+    encryptionKeyStr,
+  );
+}
+
+async function dbImportManagedKeyBytes(
+  db: D1Database,
+  userId: number,
+  label: string,
+  keypairBytes: Uint8Array,
+  encryptionKeyStr: string,
+): Promise<AccountRecord> {
+  validateLabel(label);
   const address = solanaPubkeyFromKeypairBytes(keypairBytes);
   const encryptedKey = await encryptPrivateKey(keypairBytes, encryptionKeyStr);
   const createdAt = nowTs();
@@ -874,6 +1161,7 @@ async function dbListAuditLogs(
 }
 
 async function dbListTradableTokens(db: D1Database): Promise<TradableToken[]> {
+  await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
       'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens ORDER BY id ASC',
@@ -896,6 +1184,356 @@ async function dbListTradableTokens(db: D1Database): Promise<TradableToken[]> {
     decimals: row.decimals,
     isActive: row.is_active === 1,
   }));
+}
+
+async function dbCreateTradableToken(
+  db: D1Database,
+  input: TradableTokenCreateRequest,
+  decimals: number | null,
+): Promise<TradableToken> {
+  await dbEnsureTradeDomainSchema(db);
+  const network = input.network.trim().toLowerCase();
+  if (network !== 'solana') {
+    throw new ApiError(400, 'Only the solana network is supported right now');
+  }
+  const contractAddress = normalizePubkey(input.contractAddress);
+  const createdAt = nowTs();
+  try {
+    await db
+      .prepare(
+        'INSERT INTO tradable_tokens (network, contract_address, symbol, name, decimals, is_active, created_at) VALUES (?1, ?2, NULL, NULL, ?3, 1, ?4)',
+      )
+      .bind(network, contractAddress, decimals, createdAt)
+      .run();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('UNIQUE constraint failed')) {
+      throw new ApiError(409, 'This token has already been added');
+    }
+    throw err;
+  }
+  const row = await db
+    .prepare(
+      'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2',
+    )
+    .bind(network, contractAddress)
+    .first<{
+      id: number;
+      network: string;
+      contract_address: string;
+      symbol: string | null;
+      name: string | null;
+      decimals: number | null;
+      is_active: number;
+    }>();
+  if (!row) throw new ApiError(500, 'Failed to load the saved token');
+  return {
+    id: row.id,
+    network: row.network,
+    contractAddress: row.contract_address,
+    symbol: row.symbol,
+    name: row.name,
+    decimals: row.decimals,
+    isActive: row.is_active === 1,
+  };
+}
+
+async function dbResolveTradableTokenId(
+  db: D1Database,
+  contractAddress: string,
+): Promise<number | null> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      'SELECT id FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2 LIMIT 1',
+    )
+    .bind('solana', normalizePubkey(contractAddress))
+    .first<{ id: number }>();
+  return row?.id ?? null;
+}
+
+async function dbCreateHistoricalSetupSnapshot(
+  db: D1Database,
+  userId: number,
+  settings: SettingsState,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  const tokenId = settings.contractAddress.trim()
+    ? await dbResolveTradableTokenId(db, settings.contractAddress)
+    : null;
+  await db
+    .prepare(
+      `INSERT INTO historic_setups (
+        user_id,
+        token_id,
+        time_range_target,
+        max_transactions,
+        max_slippage,
+        volume_target,
+        net_buyin_target,
+        volatility_target,
+        pullback_target,
+        contract_address,
+        metadata,
+        created_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+    )
+    .bind(
+      userId,
+      tokenId,
+      settings.timeRangeTarget,
+      settings.maxTransactions,
+      settings.maxSlippage,
+      settings.volumeTarget,
+      settings.netBuyinTarget,
+      settings.volatilityTarget,
+      settings.pullbackTarget,
+      settings.contractAddress.trim() || null,
+      JSON.stringify({ managedKeyCount: settings.managedKeyCount }),
+      nowTs(),
+    )
+    .run();
+}
+
+async function dbListHistoricalSetups(
+  db: D1Database,
+  userId: number,
+): Promise<HistoricalSetupRecord[]> {
+  await dbEnsureTradeDomainSchema(db);
+  const rows = await db
+    .prepare(
+      `SELECT
+         hs.id,
+         hs.contract_address,
+         hs.time_range_target,
+         hs.max_transactions,
+         hs.max_slippage,
+         hs.volume_target,
+         hs.net_buyin_target,
+         hs.volatility_target,
+         hs.pullback_target,
+         hs.created_at,
+         tt.symbol AS token_symbol
+       FROM historic_setups hs
+       LEFT JOIN tradable_tokens tt ON tt.id = hs.token_id
+       WHERE hs.user_id = ?1
+       ORDER BY hs.created_at DESC, hs.id DESC
+       LIMIT 20`,
+    )
+    .bind(userId)
+    .all<{
+      id: number;
+      contract_address: string | null;
+      time_range_target: string;
+      max_transactions: number;
+      max_slippage: number;
+      volume_target: number;
+      net_buyin_target: number;
+      volatility_target: number;
+      pullback_target: number;
+      created_at: number;
+      token_symbol: string | null;
+    }>();
+  return rows.results.map((row) => ({
+    id: row.id,
+    tokenSymbol: row.token_symbol,
+    contractAddress: row.contract_address,
+    timeRangeTarget: row.time_range_target,
+    maxTransactions: row.max_transactions,
+    maxSlippage: row.max_slippage,
+    volumeTarget: row.volume_target,
+    netBuyinTarget: row.net_buyin_target,
+    volatilityTarget: row.volatility_target,
+    pullbackTarget: row.pullback_target,
+    createdAt: row.created_at,
+  }));
+}
+
+async function dbUserOwnsAccount(
+  db: D1Database,
+  userId: number,
+  address: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      'SELECT id FROM accounts WHERE user_id = ?1 AND wallet_address = ?2 LIMIT 1',
+    )
+    .bind(userId, address)
+    .first<{ id: number }>();
+  return !!row;
+}
+
+async function solanaRpc<T>(
+  rpcUrl: string,
+  method: string,
+  params: unknown[],
+): Promise<T> {
+  const response = await fetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: method, method, params }),
+  });
+  if (!response.ok) {
+    throw new ApiError(502, `Solana RPC request failed with ${response.status}`);
+  }
+  const body = await response.json<{
+    result?: T;
+    error?: { code?: number; message?: string };
+  }>();
+  if (body.error) {
+    throw new ApiError(
+      502,
+      `Solana RPC error: ${body.error.message ?? 'unknown error'}`,
+    );
+  }
+  if (body.result == null) {
+    throw new ApiError(502, 'Solana RPC returned an empty result');
+  }
+  return body.result;
+}
+
+async function fetchSolanaMintDecimals(
+  rpcUrl: string,
+  mint: string,
+): Promise<number | null> {
+  const result = await solanaRpc<{ value: { decimals: number } }>(
+    rpcUrl,
+    'getTokenSupply',
+    [mint],
+  );
+  return result.value?.decimals ?? null;
+}
+
+async function fetchSolanaTokenBalance(
+  rpcUrl: string,
+  owner: string,
+  token: TrackedTokenDescriptor,
+): Promise<WalletBalanceToken> {
+  const result = await solanaRpc<{
+    value: Array<{
+      account: {
+        data: {
+          parsed?: {
+            info?: {
+              tokenAmount?: {
+                amount?: string;
+                decimals?: number;
+              };
+            };
+          };
+        };
+      };
+    }>;
+  }>(rpcUrl, 'getTokenAccountsByOwner', [owner, { mint: token.mint }, { encoding: 'jsonParsed' }]);
+
+  let total = 0n;
+  let decimals = token.decimals;
+  for (const account of result.value) {
+    const tokenAmount =
+      account.account.data.parsed?.info?.tokenAmount;
+    if (!tokenAmount?.amount) continue;
+    total += BigInt(tokenAmount.amount);
+    if (typeof tokenAmount.decimals === 'number') {
+      decimals = tokenAmount.decimals;
+    }
+  }
+
+  return {
+    mint: token.mint,
+    symbol: token.symbol,
+    network: token.network,
+    amount: formatTokenAmount(total, decimals ?? 0),
+    decimals,
+  };
+}
+
+function buildTrackedTokens(
+  settings: SettingsState,
+  tradableTokens: TradableToken[],
+): TrackedTokenDescriptor[] {
+  const tracked = new Map<string, TrackedTokenDescriptor>();
+
+  for (const token of tradableTokens) {
+    if (!token.isActive || token.network !== 'solana') continue;
+    if (token.contractAddress === SOLANA_USDC_MINT) continue;
+    tracked.set(token.contractAddress, {
+      mint: token.contractAddress,
+      symbol: token.symbol ?? `${token.contractAddress.slice(0, 4)}…${token.contractAddress.slice(-4)}`,
+      network: token.network,
+      decimals: token.decimals,
+    });
+  }
+
+  if (
+    settings.contractAddress.trim() &&
+    settings.contractAddress !== SOLANA_USDC_MINT
+  ) {
+    const mint = normalizePubkey(settings.contractAddress);
+    if (!tracked.has(mint)) {
+      tracked.set(mint, {
+        mint,
+        symbol: 'Configured Token',
+        network: 'solana',
+        decimals: null,
+      });
+    }
+  }
+
+  return [...tracked.values()];
+}
+
+async function loadWalletBalance(
+  address: string,
+  settings: SettingsState,
+  tradableTokens: TradableToken[],
+  rpcUrl: string,
+): Promise<WalletBalanceResponse> {
+  const trackedTokens = buildTrackedTokens(settings, tradableTokens);
+  const cacheKey = walletBalanceCacheKey(address, trackedTokens);
+  const cached = readWalletBalanceCache(cacheKey);
+  if (cached) return cached;
+
+  const lamportsResult = await solanaRpc<{ value: number }>(
+    rpcUrl,
+    'getBalance',
+    [address],
+  );
+  const sol = formatTokenAmount(BigInt(lamportsResult.value), 9);
+  const usdc = await fetchSolanaTokenBalance(rpcUrl, address, {
+    mint: SOLANA_USDC_MINT,
+    symbol: 'USDC',
+    network: 'solana',
+    decimals: 6,
+  });
+
+  const tokenResults = await Promise.allSettled(
+    trackedTokens.map(async (token) => {
+      const decimals =
+        token.decimals ?? (await fetchSolanaMintDecimals(rpcUrl, token.mint));
+      return fetchSolanaTokenBalance(rpcUrl, address, {
+        ...token,
+        decimals,
+      });
+    }),
+  );
+
+  const tokens = tokenResults
+    .filter(
+      (result): result is PromiseFulfilledResult<WalletBalanceToken> =>
+        result.status === 'fulfilled',
+    )
+    .map((result) => result.value);
+
+  const response: WalletBalanceResponse = {
+    address,
+    sol,
+    usdc: usdc.amount,
+    tokens,
+    updatedAt: nowTs(),
+  };
+
+  writeWalletBalanceCache(cacheKey, response);
+  return response;
 }
 
 // ─── auth middleware helpers ──────────────────────────────────────────────────
@@ -1044,18 +1682,21 @@ async function handleLogout(request: Request, env: Env): Promise<Response> {
 // GET /api/state
 async function handleGetState(request: Request, env: Env): Promise<Response> {
   const user = await requireUser(request, env);
-  const [settings, internalAccs, outsiderAccs, logs, tradableTokens] =
+  const [
+    settings,
+    internalAccs,
+    outsiderAccs,
+    logs,
+    tradableTokens,
+    historicalSetups,
+  ] =
     await Promise.all([
       dbLoadSettings(env.TRADINGBOT_DB, user.id),
       dbListAccounts(env.TRADINGBOT_DB, user.id, 'managed'),
       dbListAccounts(env.TRADINGBOT_DB, user.id, 'watch'),
       dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
-      dbListTradableTokens(env.TRADINGBOT_DB).catch((err: unknown) => {
-        // Only swallow "no such table" errors that occur before the migration runs.
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes('no such table')) return [] as TradableToken[];
-        throw err;
-      }),
+      dbListTradableTokens(env.TRADINGBOT_DB),
+      dbListHistoricalSetups(env.TRADINGBOT_DB, user.id),
     ]);
   return jsonResponse({
     auth: { username: user.username, role: user.role },
@@ -1064,6 +1705,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     outsiderAccs,
     logs,
     tradableTokens,
+    historicalSetups,
     stats: {
       managedAccounts: internalAccs.length,
       watchedAccounts: outsiderAccs.length,
@@ -1083,8 +1725,14 @@ async function handleSaveSettings(
   env: Env,
 ): Promise<Response> {
   const user = await requireAdmin(request, env);
-  const body = await request.json<SettingsUpdateRequest>();
+  const body = await parseJsonBody<SettingsUpdateRequest>(request);
   await dbSaveSettings(env.TRADINGBOT_DB, user.id, body);
+  const updated = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+  await dbCreateHistoricalSetupSnapshot(
+    env.TRADINGBOT_DB,
+    user.id,
+    updated,
+  );
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
@@ -1092,12 +1740,11 @@ async function handleSaveSettings(
     'settings',
     'Trading settings were updated',
   );
-  const updated = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
   return jsonResponse(updated);
 }
 
-// POST /api/private-keys/import
-async function handleImportPrivateKey(
+// POST /api/private-keys/import and POST /api/admin/private-keys
+async function handleImportManagedWallet(
   request: Request,
   env: Env,
 ): Promise<Response> {
@@ -1108,22 +1755,66 @@ async function handleImportPrivateKey(
     );
   }
   const user = await requireAdmin(request, env);
-  const body = await request.json<{ label: string; privateKey: string }>();
-  const account = await dbImportManagedKey(
-    env.TRADINGBOT_DB,
-    user.id,
-    body.label,
-    body.privateKey,
-    env.PRIVATE_KEY_ENCRYPTION_KEY,
+  const body = parseManagedWalletImportRequest(
+    await parseJsonBody<unknown>(request),
   );
+  const account = body.privateKey
+    ? await dbImportManagedKey(
+        env.TRADINGBOT_DB,
+        user.id,
+        body.label,
+        body.privateKey,
+        env.PRIVATE_KEY_ENCRYPTION_KEY,
+      )
+    : await dbImportManagedKeyBytes(
+        env.TRADINGBOT_DB,
+        user.id,
+        body.label,
+        deriveSolanaKeypairFromRecoveryPhrase(
+          body.recoveryPhrase ?? '',
+          body.derivationPath,
+        ),
+        env.PRIVATE_KEY_ENCRYPTION_KEY,
+      );
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
     'private_key.imported',
     account.address,
-    `Imported managed key '${account.label}'. Private key material was encrypted at rest and is never returned by the API.`,
+    body.privateKey
+      ? `Imported managed key '${account.label}' from a private key. Private key material was encrypted at rest and is never returned by the API.`
+      : `Imported managed key '${account.label}' from a recovery phrase using ${body.derivationPath ?? DEFAULT_SOLANA_DERIVATION_PATH}. Derived key material was encrypted at rest and is never returned by the API.`,
   );
   return jsonResponse({ account }, 201);
+}
+
+// POST /api/tradable-tokens
+async function handleAddTradableToken(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const body = parseTradableTokenCreateRequest(
+    await parseJsonBody<unknown>(request),
+  );
+  const normalizedAddress = normalizePubkey(body.contractAddress);
+  const decimals = await fetchSolanaMintDecimals(
+    env.SOLANA_RPC_URL ?? DEFAULT_SOLANA_RPC_URL,
+    normalizedAddress,
+  );
+  const token = await dbCreateTradableToken(
+    env.TRADINGBOT_DB,
+    { network: body.network, contractAddress: normalizedAddress },
+    decimals,
+  );
+  await dbAddAuditLog(
+    env.TRADINGBOT_DB,
+    user.id,
+    'token.added',
+    token.contractAddress,
+    `Added tradable token on ${token.network}`,
+  );
+  return jsonResponse({ token }, 201);
 }
 
 // POST /api/accounts/import
@@ -1174,6 +1865,7 @@ async function handleAdminChangePassword(
   env: Env,
 ): Promise<Response> {
   const user = await requireAdmin(request, env);
+  const currentToken = sessionTokenFromCookie(request.headers.get('Cookie'));
   const body = await request.json<{ oldPassword: string; newPassword: string }>();
 
   if (!body.oldPassword || !body.newPassword) {
@@ -1199,6 +1891,7 @@ async function handleAdminChangePassword(
     .prepare('UPDATE users SET password_hash = ?1 WHERE id = ?2')
     .bind(newPasswordHash, user.id)
     .run();
+  await dbDeleteOtherSessions(env.TRADINGBOT_DB, user.id, currentToken);
 
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
@@ -1209,6 +1902,36 @@ async function handleAdminChangePassword(
   );
 
   return jsonResponse({ success: true, message: 'Password updated successfully' }, 200);
+}
+
+// GET /api/wallets/{address}/balance
+async function handleGetWalletBalance(
+  request: Request,
+  url: URL,
+  env: Env,
+): Promise<Response> {
+  const user = await requireUser(request, env);
+  const addressPath = decodeURIComponent(url.pathname.split('/')[3] ?? '');
+  const address = normalizePubkey(addressPath);
+  const ownsAccount = await dbUserOwnsAccount(
+    env.TRADINGBOT_DB,
+    user.id,
+    address,
+  );
+  if (!ownsAccount) {
+    throw new ApiError(404, 'Wallet not found for the current user');
+  }
+  const [settings, tradableTokens] = await Promise.all([
+    dbLoadSettings(env.TRADINGBOT_DB, user.id),
+    dbListTradableTokens(env.TRADINGBOT_DB),
+  ]);
+  const balance = await loadWalletBalance(
+    address,
+    settings,
+    tradableTokens,
+    env.SOLANA_RPC_URL ?? DEFAULT_SOLANA_RPC_URL,
+  );
+  return jsonResponse(balance);
 }
 
 // DELETE /api/admin/private-keys/{address} - Delete imported private key
@@ -1278,14 +2001,20 @@ async function handleApi(
       return await handleGetState(request, env);
     if (method === 'POST' && pathname === '/api/settings')
       return await handleSaveSettings(request, env);
+    if (method === 'POST' && pathname === '/api/tradable-tokens')
+      return await handleAddTradableToken(request, env);
     if (method === 'POST' && pathname === '/api/private-keys/import')
-      return await handleImportPrivateKey(request, env);
+      return await handleImportManagedWallet(request, env);
+    if (method === 'POST' && pathname === '/api/admin/private-keys')
+      return await handleImportManagedWallet(request, env);
     if (method === 'POST' && pathname === '/api/accounts/import')
       return await handleImportAccount(request, env);
     if (method === 'POST' && pathname === '/api/trade')
       return await handleTrade(request, env);
     if (method === 'POST' && pathname === '/api/admin/password')
       return await handleAdminChangePassword(request, env);
+    if (method === 'GET' && /^\/api\/wallets\/[^/]+\/balance$/.test(pathname))
+      return await handleGetWalletBalance(request, url, env);
     if (method === 'DELETE' && pathname.startsWith('/api/admin/private-keys/'))
       return await handleAdminDeletePrivateKey(request, url, env);
     return jsonResponse({ error: 'Not found' }, 404);
