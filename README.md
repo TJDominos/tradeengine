@@ -33,7 +33,7 @@ The product is **Solana-first** and **token-onboarding-first**. There is no pre-
 - Requires authenticated login before any configuration, private-key import, or account import action is allowed.
 - Exposes configured tradable tokens (added via network + contract address) via the `/api/state` endpoint and admin UI.
 - Fetches and persists token market snapshots in D1, including price, FDV, liquidity, volume, transaction count, and outsider holder count.
-- Automatically initializes token market data when the active trading token is saved or explicitly added from the setup UI.
+- Automatically initializes token market data when a tracked token is activated or explicitly added from the setup UI.
 - Accepts Alchemy Notify webhook events for the active trading token so on-chain activity is stored as signals and can trigger downstream strategy evaluation.
 - Returns `501 Not Implemented` for trade execution until a real executor exists.
 
@@ -148,6 +148,7 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 | POST | `/api/auth/logout` | No | Delete session |
 | GET | `/api/state` | Yes | Full engine state (includes configured tradable tokens) |
 | POST | `/api/settings` | Admin | Save trading settings |
+| POST | `/api/settings/active-token` | Admin | Save the active tracked token without overwriting unsaved strategy settings |
 | POST | `/api/market-snapshot/refresh` | Admin | Force a live market fetch for the active trading token and store a new historical snapshot |
 | POST | `/api/webhooks/alchemy/notify` | No | Verify the webhook signature, return `200`, then persist `signals` and trigger strategy evaluation in the background with D1-backed idempotency |
 | POST | `/api/private-keys/import` | Admin | Import + encrypt a managed private key |

@@ -74,6 +74,10 @@ interface SettingsUpdateRequest {
   strategyNotes: string;
 }
 
+interface ActiveTokenUpdateRequest {
+  contractAddress: string;
+}
+
 interface AccountRecord {
   id: number;
   label: string;
@@ -1072,6 +1076,21 @@ function parseTradableTokenCreateRequest(
   return { network, contractAddress };
 }
 
+function parseActiveTokenUpdateRequest(
+  body: unknown,
+): ActiveTokenUpdateRequest {
+  if (!body || typeof body !== 'object') {
+    throw new ApiError(400, 'Contract address is required');
+  }
+  const { contractAddress } = body as {
+    contractAddress?: unknown;
+  };
+  if (typeof contractAddress !== 'string') {
+    throw new ApiError(400, 'Contract address is required');
+  }
+  return { contractAddress };
+}
+
 function parseRpcEndpointCreateRequest(
   body: unknown,
 ): RpcEndpointCreateRequest {
@@ -1273,6 +1292,24 @@ async function dbSaveSettings(
       .bind(userId, key, value),
   );
   await db.batch(stmts);
+}
+
+async function dbSaveActiveContractAddress(
+  db: D1Database,
+  userId: number,
+  contractAddress: string,
+): Promise<string> {
+  validateContractAddress(contractAddress);
+  const normalizedContractAddress = contractAddress.trim()
+    ? normalizePubkey(contractAddress)
+    : '';
+  await db
+    .prepare(
+      'INSERT INTO settings (user_id, key, value) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value',
+    )
+    .bind(userId, 'contractAddress', normalizedContractAddress)
+    .run();
+  return normalizedContractAddress;
 }
 
 async function dbLoadSettings(
@@ -3439,6 +3476,89 @@ async function handleSaveSettings(
   return jsonResponse(updated);
 }
 
+// POST /api/settings/active-token
+async function handleSaveActiveToken(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const body = parseActiveTokenUpdateRequest(
+    await parseJsonBody<unknown>(request),
+  );
+  const normalizedContractAddress = await dbSaveActiveContractAddress(
+    env.TRADINGBOT_DB,
+    user.id,
+    body.contractAddress,
+  );
+
+  let marketSnapshot: TokenMarketSnapshot | null = null;
+  if (normalizedContractAddress) {
+    const rpcUrls = await dbResolveSolanaRpcUrls(
+      env.TRADINGBOT_DB,
+      user.id,
+      env.SOLANA_RPC_URL,
+    );
+
+    const existingTokenId = await dbResolveTradableTokenId(
+      env.TRADINGBOT_DB,
+      normalizedContractAddress,
+    );
+    if (!existingTokenId) {
+      try {
+        const decimals = await fetchSolanaMintDecimals(
+          rpcUrls,
+          normalizedContractAddress,
+        );
+        await dbCreateTradableToken(
+          env.TRADINGBOT_DB,
+          {
+            network: 'solana',
+            contractAddress: normalizedContractAddress,
+          },
+          decimals,
+        );
+      } catch (err: unknown) {
+        console.warn(
+          `Failed to ensure tracked token metadata for ${normalizedContractAddress}:`,
+          err,
+        );
+      }
+    }
+
+    try {
+      marketSnapshot = await syncTokenMarketSnapshotForUser(
+        env.TRADINGBOT_DB,
+        user.id,
+        'solana',
+        normalizedContractAddress,
+        rpcUrls,
+      );
+    } catch (err: unknown) {
+      console.warn(
+        `Failed to initialize market snapshot after activating ${normalizedContractAddress}:`,
+        err,
+      );
+    }
+  }
+
+  await dbAddAuditLog(
+    env.TRADINGBOT_DB,
+    user.id,
+    normalizedContractAddress ? 'token.activated' : 'token.cleared',
+    normalizedContractAddress || 'none',
+    normalizedContractAddress
+      ? marketSnapshot
+        ? 'Activated the tracked token and initialized market data.'
+        : 'Activated the tracked token. Live market data will load on the next successful refresh.'
+      : 'Cleared the active tracked token.',
+  );
+
+  return jsonResponse({
+    contractAddress: normalizedContractAddress,
+    marketSnapshot,
+  });
+}
+
 // POST /api/private-keys/import and POST /api/admin/private-keys
 async function handleImportManagedWallet(
   request: Request,
@@ -3881,6 +4001,8 @@ async function handleApi(
       return await handleGetState(request, env);
     if (method === 'POST' && pathname === '/api/webhooks/alchemy/notify')
       return await handleAlchemyNotifyWebhook(request, url, env, ctx);
+    if (method === 'POST' && pathname === '/api/settings/active-token')
+      return await handleSaveActiveToken(request, env);
     if (method === 'POST' && pathname === '/api/settings')
       return await handleSaveSettings(request, env);
     if (method === 'POST' && pathname === '/api/tradable-tokens')

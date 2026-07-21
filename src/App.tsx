@@ -236,6 +236,21 @@ function serializeSettings(settings: SettingsState) {
   };
 }
 
+function mergeTradableToken(tokens: TradableToken[], nextToken: TradableToken) {
+  const existingIndex = tokens.findIndex(
+    (token) =>
+      token.network === nextToken.network &&
+      token.contractAddress === nextToken.contractAddress,
+  );
+  if (existingIndex === -1) {
+    return [...tokens, nextToken];
+  }
+
+  return tokens.map((token, index) =>
+    index === existingIndex ? nextToken : token,
+  );
+}
+
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     credentials: 'include',
@@ -724,12 +739,37 @@ export default function App() {
   const [adminMsg, setAdminMsg] = React.useState({ type: '', text: '' });
 
   const [isSimulationModalOpen, setIsSimulationModalOpen] = React.useState(false);
+  const settingsDirtyRef = React.useRef(false);
 
   const hasDateRange = dateRange.from !== '' && dateRange.to !== '';
 
   useEffect(() => {
     setTradingAlgorithm(loadStoredString('tradeengine.tradingAlgorithm', workerAlgorithmTemplate));
   }, []);
+
+  const syncSettingsFromServer = React.useCallback(
+    (nextSettings: SettingsState, options?: { preserveDraft?: boolean }) => {
+      setSettings((current) => {
+        if (options?.preserveDraft && settingsDirtyRef.current) {
+          return {
+            ...current,
+            contractAddress: nextSettings.contractAddress,
+            managedKeyCount: nextSettings.managedKeyCount,
+          };
+        }
+        return nextSettings;
+      });
+    },
+    [],
+  );
+
+  const updateStrategySettings = React.useCallback(
+    (updater: (current: SettingsState) => SettingsState) => {
+      settingsDirtyRef.current = true;
+      setSettings((current) => updater(current));
+    },
+    [],
+  );
 
   const loadAuth = React.useCallback(async () => {
     const status = await api<AuthStatus>('/api/auth/status');
@@ -740,10 +780,10 @@ export default function App() {
   const loadState = React.useCallback(async () => {
     const state = await api<EngineState>('/api/state');
     setEngineState(state);
-    setSettings(state.settings);
+    syncSettingsFromServer(state.settings, { preserveDraft: true });
     setLastUpdated(new Date().toLocaleString());
     return state;
-  }, []);
+  }, [syncSettingsFromServer]);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -823,6 +863,36 @@ export default function App() {
     void refreshWalletBalances();
   }, [auth?.authenticated, engineState, activeTab, isAdminModalOpen, refreshWalletBalances]);
 
+  // Auto-initialize market data when dashboard loads with active token
+  useEffect(() => {
+    if (!auth?.authenticated || !engineState || activeTab !== 'dashboard') return;
+    if (!settings.contractAddress.trim()) return;
+    if (engineState.marketSnapshot) return; // Already loaded
+
+    const initializeMarketData = async () => {
+      try {
+        const result = await api<{ marketSnapshot: TokenMarketSnapshot | null }>(
+          '/api/market-snapshot/refresh',
+          { method: 'POST' },
+        );
+        if (result.marketSnapshot) {
+          setEngineState((current) =>
+            current
+              ? {
+                  ...current,
+                  marketSnapshot: result.marketSnapshot,
+                }
+              : current,
+          );
+        }
+      } catch (err: unknown) {
+        // Silently fail, market data will load in next poll
+      }
+    };
+
+    void initializeMarketData();
+  }, [auth?.authenticated, activeTab, settings.contractAddress, engineState]);
+
   const submitWithFeedback = async (name: string, action: () => Promise<void>) => {
     setSubmitting(name);
     setError('');
@@ -842,6 +912,7 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify(bootstrap),
       });
+      settingsDirtyRef.current = false;
       setBootstrap({ username: '', password: '' });
       setNotice('Initial admin user created. You are now logged in.');
       await refresh();
@@ -853,6 +924,7 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify(credentials),
       });
+      settingsDirtyRef.current = false;
       setCredentials({ username: '', password: '' });
       setNotice('Login successful.');
       await refresh();
@@ -861,6 +933,7 @@ export default function App() {
   const handleLogout = () =>
     submitWithFeedback('logout', async () => {
       await api('/api/auth/logout', { method: 'POST' });
+      settingsDirtyRef.current = false;
       setEngineState(null);
       setWalletBalances({});
       setNotice('Logged out.');
@@ -870,17 +943,26 @@ export default function App() {
   const handleRefresh = () =>
     void submitWithFeedback('force-refresh', async () => {
       if (auth?.authenticated && settings.contractAddress.trim()) {
-        await api<{ marketSnapshot: TokenMarketSnapshot | null }>(
+        const result = await api<{ marketSnapshot: TokenMarketSnapshot | null }>(
           '/api/market-snapshot/refresh',
           { method: 'POST' },
         );
-        setNotice('Force sync completed with a live token refresh.');
+        if (result.marketSnapshot) {
+          setEngineState((current) =>
+            current
+              ? {
+                  ...current,
+                  marketSnapshot: result.marketSnapshot,
+                }
+              : current,
+          );
+        }
+        setNotice('Market data refreshed with live token update.');
       } else {
         setNotice(
-          'Application state refreshed. Set an active trading token to force a live market fetch.',
+          'No active trading token. Select a token first to refresh market data.',
         );
       }
-      await refresh();
     });
 
   const handleStartTrading = () => {
@@ -893,7 +975,19 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify(serializeSettings(settings)),
       });
-      setNotice('Configuration saved. The current trading token is tracked automatically and historical records stay intact.');
+      settingsDirtyRef.current = false;
+      setNotice('Strategy configuration saved. The active tracked token stays unchanged.');
+      await refresh();
+    });
+
+  const handleUseToken = (contractAddress: string) =>
+    submitWithFeedback('use-token', async () => {
+      await api('/api/settings/active-token', {
+        method: 'POST',
+        body: JSON.stringify({ contractAddress }),
+      });
+      setSettings((current) => ({ ...current, contractAddress }));
+      setNotice('Tracked token saved as active. Loading market data.');
       await refresh();
     });
 
@@ -934,16 +1028,26 @@ export default function App() {
         }),
       });
 
+      setEngineState((current) =>
+        current
+          ? {
+              ...current,
+              tradableTokens: mergeTradableToken(current.tradableTokens, response.token),
+            }
+          : current,
+      );
+
       if (!hadActiveContract) {
-        const nextSettings: SettingsState = {
-          ...settings,
-          contractAddress: response.token.contractAddress,
-        };
-        await api('/api/settings', {
+        await api('/api/settings/active-token', {
           method: 'POST',
-          body: JSON.stringify(serializeSettings(nextSettings)),
+          body: JSON.stringify({
+            contractAddress: response.token.contractAddress,
+          }),
         });
-        setSettings(nextSettings);
+        setSettings((current) => ({
+          ...current,
+          contractAddress: response.token.contractAddress,
+        }));
       }
 
       setTradableTokenForm((current) => ({ ...current, contractAddress: '' }));
@@ -951,10 +1055,10 @@ export default function App() {
         response.marketSnapshot
           ? hadActiveContract
             ? 'Tracked token added and initialized with live market data.'
-            : 'Tracked token added, initialized, and set as the active trading contract.'
+            : 'Tracked token added, saved as the active token, and initialized with live market data.'
           : hadActiveContract
             ? 'Tracked token added. Live market data will appear after the next successful refresh.'
-            : 'Tracked token added and set as the active trading contract. Live market data will appear after the next successful refresh.',
+            : 'Tracked token added and saved as the active token. Live market data will appear after the next successful refresh.',
       );
       await refresh();
     });
@@ -1619,7 +1723,7 @@ export default function App() {
                   Tracked Token Registry
                 </label>
                 <p className="text-xs text-slate-500">
-                  Existing tokens remain available for history and balance lookups even after you switch the active contract.
+                  Activating a tracked token saves it immediately and starts loading market data. Save Configuration only applies to strategy settings.
                 </p>
               </div>
               <span className="rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-400">
@@ -1650,16 +1754,21 @@ export default function App() {
                       </div>
                     </div>
                     <button
-                      onClick={() => setSettings((current) => ({ ...current, contractAddress: token.contractAddress }))}
-                      className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
+                      onClick={() => void handleUseToken(token.contractAddress)}
+                      disabled={submitting === 'use-token' || settings.contractAddress === token.contractAddress}
+                      className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-60"
                     >
-                      Use
+                      {settings.contractAddress === token.contractAddress
+                        ? 'Active'
+                        : submitting === 'use-token'
+                          ? 'Activating...'
+                          : 'Use'}
                     </button>
                   </div>
                 ))
               ) : (
                 <div className="rounded-md border border-dashed border-slate-700 px-3 py-3 text-xs text-slate-500">
-                  Save a contract address once to create the first tracked token automatically.
+                  Add your first tracked token to save it as the active token automatically.
                 </div>
               )}
             </div>
@@ -1729,7 +1838,7 @@ export default function App() {
             label="Time Range Target"
             sublabel="Target Pre-Condition"
             value={settings.timeRangeTarget}
-            onChange={(value) => setSettings((current) => ({ ...current, timeRangeTarget: value }))}
+            onChange={(value) => updateStrategySettings((current) => ({ ...current, timeRangeTarget: value }))}
             options={[
               { label: '1 Hour', value: '1h' },
               { label: '6 Hours', value: '6h' },
@@ -1741,18 +1850,18 @@ export default function App() {
           />
 
           <div className="grid grid-cols-2 gap-4">
-            <SettingInput label="Max Transactions" sublabel="Time Range Limit" value={settings.maxTransactions} onChange={(value) => setSettings((current) => ({ ...current, maxTransactions: Number(value) }))} />
-            <SettingInput label="Max Slippage" sublabel="Min 0.0001" value={settings.maxSlippage} onChange={(value) => setSettings((current) => ({ ...current, maxSlippage: Number(value) }))} />
+            <SettingInput label="Max Transactions" sublabel="Time Range Limit" value={settings.maxTransactions} onChange={(value) => updateStrategySettings((current) => ({ ...current, maxTransactions: Number(value) }))} />
+            <SettingInput label="Max Slippage" sublabel="Min 0.0001" value={settings.maxSlippage} onChange={(value) => updateStrategySettings((current) => ({ ...current, maxSlippage: Number(value) }))} />
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <SettingInput label="Volume Target (USDC)" value={settings.volumeTarget} onChange={(value) => setSettings((current) => ({ ...current, volumeTarget: Number(value) }))} />
-            <SettingInput label="Net Buyin Target" sublabel="Negative = Sell" value={settings.netBuyinTarget} onChange={(value) => setSettings((current) => ({ ...current, netBuyinTarget: Number(value) }))} />
+            <SettingInput label="Volume Target (USDC)" value={settings.volumeTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, volumeTarget: Number(value) }))} />
+            <SettingInput label="Net Buyin Target" sublabel="Negative = Sell" value={settings.netBuyinTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, netBuyinTarget: Number(value) }))} />
           </div>
 
           <div className="grid grid-cols-2 gap-4">
-            <SettingInput label="Volatility Target (%)" value={settings.volatilityTarget} onChange={(value) => setSettings((current) => ({ ...current, volatilityTarget: Number(value) }))} />
-            <SettingInput label="Outsider Pull Back (%)" value={settings.pullbackTarget} onChange={(value) => setSettings((current) => ({ ...current, pullbackTarget: Number(value) }))} />
+            <SettingInput label="Volatility Target (%)" value={settings.volatilityTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, volatilityTarget: Number(value) }))} />
+            <SettingInput label="Outsider Pull Back (%)" value={settings.pullbackTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, pullbackTarget: Number(value) }))} />
           </div>
 
           <div>
@@ -1761,7 +1870,7 @@ export default function App() {
             </label>
             <textarea
               value={settings.strategyNotes}
-              onChange={(event) => setSettings((current) => ({ ...current, strategyNotes: event.target.value }))}
+              onChange={(event) => updateStrategySettings((current) => ({ ...current, strategyNotes: event.target.value }))}
               className="min-h-28 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-blue-500"
             />
           </div>
@@ -1773,7 +1882,7 @@ export default function App() {
             disabled={submitting === 'settings'}
             className="h-11 w-full cursor-pointer rounded-md border border-blue-500 bg-blue-600 font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60"
           >
-            {submitting === 'settings' ? 'Saving...' : 'Save Configuration'}
+            {submitting === 'settings' ? 'Saving...' : 'Save Strategy Configuration'}
           </button>
         </div>
       </div>
