@@ -57,6 +57,30 @@ type AuditLog = {
   createdAt: number;
 };
 
+type TradeLog = {
+  id: number;
+  tokenId: number;
+  tokenContractAddress: string | null;
+  tokenSymbol: string | null;
+  walletAddress: string;
+  action: 'BUY' | 'SELL';
+  requestedAmount: number;
+  executedAmount: number | null;
+  executedPrice: number | null;
+  txSignature: string | null;
+  status: 'PENDING' | 'SUCCESS' | 'FAILED';
+  errorMessage: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type RpcEndpoint = {
+  id: number;
+  network: string;
+  url: string;
+  createdAt: number;
+};
+
 type TradableToken = {
   id: number;
   network: string;
@@ -102,9 +126,11 @@ type EngineState = {
   settings: SettingsState;
   internalAccs: AccountRecord[];
   outsiderAccs: AccountRecord[];
-  logs: AuditLog[];
+  activityLogs: AuditLog[];
+  tradeLogs: TradeLog[];
   tradableTokens: TradableToken[];
   historicalSetups: HistoricalSetup[];
+  rpcEndpoints: RpcEndpoint[];
   stats: {
     managedAccounts: number;
     watchedAccounts: number;
@@ -501,6 +527,7 @@ function ComboInput({
   placeholder,
   labelText,
   statusText,
+  saveLabel = 'Save',
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -510,6 +537,7 @@ function ComboInput({
   placeholder: string;
   labelText?: string;
   statusText?: string;
+  saveLabel?: string;
 }) {
   const [isOpen, setIsOpen] = React.useState(false);
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -583,7 +611,7 @@ function ComboInput({
           onClick={onSave}
           className="cursor-pointer whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-600/20 px-4 text-sm font-medium text-blue-400 hover:bg-blue-600/30"
         >
-          Save
+          {saveLabel}
         </button>
       </div>
     </div>
@@ -712,8 +740,10 @@ export default function App() {
   const [accountSearchTerm, setAccountSearchTerm] = React.useState('');
   const [internalPage, setInternalPage] = React.useState(1);
   const [outsiderPage, setOutsiderPage] = React.useState(1);
-  const [logSearchTerm, setLogSearchTerm] = React.useState('');
-  const [logCurrentPage, setLogCurrentPage] = React.useState(1);
+  const [transactionLogSearchTerm, setTransactionLogSearchTerm] = React.useState('');
+  const [activityLogSearchTerm, setActivityLogSearchTerm] = React.useState('');
+  const [transactionLogCurrentPage, setTransactionLogCurrentPage] = React.useState(1);
+  const [activityLogCurrentPage, setActivityLogCurrentPage] = React.useState(1);
 
   const [credentials, setCredentials] = React.useState({ username: '', password: '' });
   const [bootstrap, setBootstrap] = React.useState({ username: '', password: '' });
@@ -730,7 +760,7 @@ export default function App() {
     strategyNotes: '',
     managedKeyCount: 0,
   });
-  const [tradableTokenForm, setTradableTokenForm] = React.useState({ contractAddress: '' });
+  const [rpcEndpointForm, setRpcEndpointForm] = React.useState({ url: '' });
   const [accountForm, setAccountForm] = React.useState({ label: '', address: '' });
 
   const [savedContractAddresses, setSavedContractAddresses] = React.useState<string[]>([]);
@@ -937,21 +967,30 @@ export default function App() {
           strategyNotes: settings.strategyNotes,
         }),
       });
-      setNotice('Configuration saved and historical snapshot created.');
+      setNotice('Configuration saved. The current trading token is tracked automatically and historical records stay intact.');
       await refresh();
     });
 
-  const handleAddTrackedToken = () =>
-    submitWithFeedback('token', async () => {
-      await api('/api/tradable-tokens', {
+  const handleAddRpcEndpoint = () =>
+    submitWithFeedback('rpc', async () => {
+      await api('/api/rpc-endpoints', {
         method: 'POST',
         body: JSON.stringify({
           network: 'solana',
-          contractAddress: tradableTokenForm.contractAddress,
+          url: rpcEndpointForm.url,
         }),
       });
-      setTradableTokenForm({ contractAddress: '' });
-      setNotice('Tracked token added successfully.');
+      setRpcEndpointForm({ url: '' });
+      setNotice('RPC endpoint added. Solana requests will fail over through the updated pool.');
+      await refresh();
+    });
+
+  const handleDeleteRpcEndpoint = (endpointId: number) =>
+    submitWithFeedback(`rpc-delete-${endpointId}`, async () => {
+      await api(`/api/rpc-endpoints/${endpointId}`, {
+        method: 'DELETE',
+      });
+      setNotice('RPC endpoint removed.');
       await refresh();
     });
 
@@ -1220,24 +1259,42 @@ export default function App() {
     outsiderPage * ITEMS_PER_PAGE,
   );
 
-  const filteredLogs = engineState.logs.filter(
-    (log) =>
-      log.target.toLowerCase().includes(logSearchTerm.toLowerCase()) ||
-      log.action.toLowerCase().includes(logSearchTerm.toLowerCase()) ||
-      log.details.toLowerCase().includes(logSearchTerm.toLowerCase()),
+  const filteredTransactionLogs = engineState.tradeLogs.filter((log) => {
+    const term = transactionLogSearchTerm.toLowerCase();
+    return (
+      (log.tokenContractAddress ?? '').toLowerCase().includes(term) ||
+      (log.tokenSymbol ?? '').toLowerCase().includes(term) ||
+      log.walletAddress.toLowerCase().includes(term) ||
+      log.action.toLowerCase().includes(term) ||
+      log.status.toLowerCase().includes(term) ||
+      (log.txSignature ?? '').toLowerCase().includes(term) ||
+      (log.errorMessage ?? '').toLowerCase().includes(term) ||
+      String(log.requestedAmount).includes(term)
+    );
+  });
+  const currentTransactionLogs = filteredTransactionLogs.slice(
+    (transactionLogCurrentPage - 1) * ITEMS_PER_PAGE,
+    transactionLogCurrentPage * ITEMS_PER_PAGE,
   );
-  const currentLogs = filteredLogs.slice(
-    (logCurrentPage - 1) * ITEMS_PER_PAGE,
-    logCurrentPage * ITEMS_PER_PAGE,
+
+  const filteredActivityLogs = engineState.activityLogs.filter(
+    (log) =>
+      log.target.toLowerCase().includes(activityLogSearchTerm.toLowerCase()) ||
+      log.action.toLowerCase().includes(activityLogSearchTerm.toLowerCase()) ||
+      log.details.toLowerCase().includes(activityLogSearchTerm.toLowerCase()),
+  );
+  const currentActivityLogs = filteredActivityLogs.slice(
+    (activityLogCurrentPage - 1) * ITEMS_PER_PAGE,
+    activityLogCurrentPage * ITEMS_PER_PAGE,
   );
 
   const managedWallets = engineState.internalAccs;
 
-  const renderLogs = () => (
+  const renderTransactionLogs = () => (
     <div className="flex flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
       <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/80 p-4">
         <h3 className="flex items-center gap-2 text-lg font-semibold">
-          <FileText size={18} /> Live Transaction Log
+          <FileText size={18} /> Transaction Log
           <span className="ml-4 flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] text-emerald-400">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"></span> LIVE
           </span>
@@ -1246,11 +1303,93 @@ export default function App() {
           <Search size={14} className="absolute left-3 top-2.5 text-slate-500" />
           <input
             type="text"
-            placeholder="Search logs..."
-            value={logSearchTerm}
+            placeholder="Search transaction logs..."
+            value={transactionLogSearchTerm}
             onChange={(event) => {
-              setLogSearchTerm(event.target.value);
-              setLogCurrentPage(1);
+              setTransactionLogSearchTerm(event.target.value);
+              setTransactionLogCurrentPage(1);
+            }}
+            className="w-64 rounded-md border border-slate-700 bg-slate-950 py-1.5 pl-8 pr-3 text-sm outline-none focus:border-blue-500"
+          />
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-h-[400px] w-full whitespace-nowrap text-left text-sm">
+          <thead className="border-b border-slate-800 bg-slate-950/50 text-slate-400">
+            <tr>
+              <th className="px-4 py-2 font-medium">Time</th>
+              <th className="px-4 py-2 font-medium">Token</th>
+              <th className="px-4 py-2 font-medium">Wallet</th>
+              <th className="px-4 py-2 font-medium">Action</th>
+              <th className="px-4 py-2 font-medium">Requested</th>
+              <th className="px-4 py-2 text-center font-medium">Status</th>
+              <th className="px-4 py-2 font-medium">Tx / Error</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-800">
+            {currentTransactionLogs.map((log) => (
+              <tr key={log.id} className="transition-colors hover:bg-slate-800/50">
+                <td className="px-4 py-1.5 text-xs text-slate-400">{formatDate(log.createdAt)}</td>
+                <td className="px-4 py-1.5">
+                  <div className="text-xs font-semibold text-slate-200">
+                    {log.tokenSymbol ?? 'Tracked Token'}
+                  </div>
+                  <div className="font-mono text-[11px] text-slate-500">
+                    {log.tokenContractAddress ? compactAddress(log.tokenContractAddress) : 'Unknown'}
+                  </div>
+                </td>
+                <td className="px-4 py-1.5 font-mono text-xs text-slate-500">
+                  {log.walletAddress === 'system' ? 'system' : compactAddress(log.walletAddress)}
+                </td>
+                <td className={`px-4 py-1.5 text-xs font-bold ${log.action === 'BUY' ? 'text-emerald-400' : 'text-amber-300'}`}>{log.action}</td>
+                <td className="px-4 py-1.5 text-xs text-slate-300">{formatNum(log.requestedAmount)}</td>
+                <td className="px-4 py-1.5 text-center">
+                  <span
+                    className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                      log.status === 'SUCCESS'
+                        ? 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+                        : log.status === 'FAILED'
+                          ? 'border border-rose-500/20 bg-rose-500/10 text-rose-400'
+                          : 'border border-amber-500/20 bg-amber-500/10 text-amber-300'
+                    }`}
+                  >
+                    <CheckSquare size={10} /> {log.status.toLowerCase()}
+                  </span>
+                </td>
+                <td className="max-w-[320px] px-4 py-1.5 text-xs text-slate-300">
+                  {log.txSignature ? compactAddress(log.txSignature) : log.errorMessage ?? '-'}
+                </td>
+              </tr>
+            ))}
+            {currentTransactionLogs.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="py-8 text-center text-sm text-slate-500">
+                  No transaction records yet.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+      <Pagination currentPage={transactionLogCurrentPage} totalItems={filteredTransactionLogs.length} itemsPerPage={ITEMS_PER_PAGE} onPageChange={setTransactionLogCurrentPage} />
+    </div>
+  );
+
+  const renderActivityLogs = () => (
+    <div className="flex flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
+      <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/80 p-4">
+        <h3 className="flex items-center gap-2 text-lg font-semibold">
+          <Activity size={18} /> Activity Log
+        </h3>
+        <div className="relative">
+          <Search size={14} className="absolute left-3 top-2.5 text-slate-500" />
+          <input
+            type="text"
+            placeholder="Search activity logs..."
+            value={activityLogSearchTerm}
+            onChange={(event) => {
+              setActivityLogSearchTerm(event.target.value);
+              setActivityLogCurrentPage(1);
             }}
             className="w-64 rounded-md border border-slate-700 bg-slate-950 py-1.5 pl-8 pr-3 text-sm outline-none focus:border-blue-500"
           />
@@ -1268,20 +1407,20 @@ export default function App() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800">
-            {currentLogs.map((log) => (
+            {currentActivityLogs.map((log) => (
               <tr key={log.id} className="transition-colors hover:bg-slate-800/50">
                 <td className="px-4 py-1.5 text-xs text-slate-400">{formatDate(log.createdAt)}</td>
                 <td className="px-4 py-1.5 font-mono text-xs text-slate-500">{compactAddress(log.target)}</td>
                 <td className="px-4 py-1.5 text-xs font-bold text-slate-200">{log.action}</td>
                 <td className="max-w-[500px] px-4 py-1.5 text-xs text-slate-300">{log.details}</td>
                 <td className="px-4 py-1.5 text-center">
-                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
+                  <span className="inline-flex items-center gap-1 rounded-full border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-blue-300">
                     <CheckSquare size={10} /> recorded
                   </span>
                 </td>
               </tr>
             ))}
-            {currentLogs.length === 0 ? (
+            {currentActivityLogs.length === 0 ? (
               <tr>
                 <td colSpan={5} className="py-8 text-center text-sm text-slate-500">
                   No activity recorded yet.
@@ -1291,7 +1430,7 @@ export default function App() {
           </tbody>
         </table>
       </div>
-      <Pagination currentPage={logCurrentPage} totalItems={filteredLogs.length} itemsPerPage={ITEMS_PER_PAGE} onPageChange={setLogCurrentPage} />
+      <Pagination currentPage={activityLogCurrentPage} totalItems={filteredActivityLogs.length} itemsPerPage={ITEMS_PER_PAGE} onPageChange={setActivityLogCurrentPage} />
     </div>
   );
 
@@ -1310,7 +1449,10 @@ export default function App() {
         <StatCard title="Tracked Contract" value={settings.contractAddress ? compactAddress(settings.contractAddress) : 'None'} copyable />
       </div>
 
-      <div className="mt-8">{renderLogs()}</div>
+      <div className="mt-8 grid grid-cols-1 gap-6 2xl:grid-cols-2">
+        {renderTransactionLogs()}
+        {renderActivityLogs()}
+      </div>
     </div>
   );
 
@@ -1403,17 +1545,127 @@ export default function App() {
             onSave={saveContractAddress}
             onDelete={deleteSavedContractAddress}
             savedItems={savedContractAddresses}
-            placeholder="Primary trading contract address"
-            labelText="Trading Contract Address"
+            placeholder="Solana token mint address"
+            labelText="Trading Token (Solana + Contract Address)"
             statusText={`${engineState.tradableTokens.length} tracked token(s)`}
+            saveLabel="Save Shortcut"
           />
 
-          <div>
-            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
-              Solana RPC Network
-            </label>
-            <div className="flex h-10 items-center rounded-md border border-slate-700 bg-slate-950 px-3 font-mono text-sm text-blue-400">
-              Mainnet RPC Pool Active
+          <p className="rounded-md border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs leading-relaxed text-slate-400">
+            Saving the configuration with a new contract address automatically adds that token to the tracked registry.
+            Updating the active trading token never deletes historical transaction records.
+          </p>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
+                  Tracked Token Registry
+                </label>
+                <p className="text-xs text-slate-500">
+                  Existing tokens remain available for history and balance lookups even after you switch the active contract.
+                </p>
+              </div>
+              <span className="rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-400">
+                {engineState.tradableTokens.length} tracked
+              </span>
+            </div>
+
+            <div className="mt-3 space-y-2">
+              {engineState.tradableTokens.length > 0 ? (
+                engineState.tradableTokens.map((token) => (
+                  <div key={token.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-semibold text-slate-200">
+                          {token.symbol ?? token.name ?? 'Tracked Token'}
+                        </span>
+                        <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] uppercase tracking-wider text-slate-400">
+                          {token.network}
+                        </span>
+                        {settings.contractAddress === token.contractAddress ? (
+                          <span className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-blue-300">
+                            active
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="truncate font-mono text-[11px] text-slate-500">
+                        {token.contractAddress}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setSettings((current) => ({ ...current, contractAddress: token.contractAddress }))}
+                      className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
+                    >
+                      Use
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-md border border-dashed border-slate-700 px-3 py-3 text-xs text-slate-500">
+                  Save a contract address once to create the first tracked token automatically.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
+                  Solana RPC Network
+                </label>
+                <p className="text-xs text-slate-500">
+                  Solana requests try these custom endpoints first, then fall back to the worker environment and default mainnet RPC.
+                </p>
+              </div>
+              <span className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-blue-300">
+                {engineState.rpcEndpoints.length} custom RPC(s)
+              </span>
+            </div>
+
+            <div className="mt-3 flex gap-2">
+              <input
+                type="text"
+                value={rpcEndpointForm.url}
+                onChange={(event) => setRpcEndpointForm({ url: event.target.value })}
+                placeholder="https://solana-mainnet.rpc.example"
+                className="h-10 flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 font-mono text-sm outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={handleAddRpcEndpoint}
+                disabled={submitting === 'rpc'}
+                className="flex h-10 items-center gap-2 rounded-md bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+              >
+                <Plus size={14} /> Add RPC
+              </button>
+            </div>
+
+            <div className="mt-3 space-y-2">
+              {engineState.rpcEndpoints.length > 0 ? (
+                engineState.rpcEndpoints.map((endpoint) => (
+                  <div key={endpoint.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                        {endpoint.network}
+                      </div>
+                      <div className="truncate font-mono text-[11px] text-slate-500">{endpoint.url}</div>
+                    </div>
+                    <button
+                      onClick={() => void handleDeleteRpcEndpoint(endpoint.id)}
+                      disabled={submitting === `rpc-delete-${endpoint.id}`}
+                      className="rounded-md border border-rose-500/20 bg-rose-500/10 p-2 text-rose-400 hover:bg-rose-500/20 disabled:opacity-60"
+                      title="Remove RPC endpoint"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-md border border-dashed border-slate-700 px-3 py-3 text-xs text-slate-500">
+                  No custom RPC endpoints yet. The worker will fall back to the environment/default mainnet RPC endpoint.
+                </div>
+              )}
             </div>
           </div>
 
@@ -1456,28 +1708,6 @@ export default function App() {
               onChange={(event) => setSettings((current) => ({ ...current, strategyNotes: event.target.value }))}
               className="min-h-28 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-blue-500"
             />
-          </div>
-
-          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
-              Add Tracked Token (Network + Contract Address)
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={tradableTokenForm.contractAddress}
-                onChange={(event) => setTradableTokenForm({ contractAddress: event.target.value })}
-                placeholder="Token mint address"
-                className="h-10 flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 font-mono text-sm outline-none focus:border-blue-500"
-              />
-              <button
-                onClick={handleAddTrackedToken}
-                disabled={submitting === 'token'}
-                className="flex h-10 items-center gap-2 rounded-md bg-emerald-600 px-4 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
-              >
-                <Plus size={14} /> Add
-              </button>
-            </div>
           </div>
         </div>
 
@@ -1541,7 +1771,7 @@ export default function App() {
     return (
       <div className="flex flex-col gap-4 space-y-6">
         {setups.map((setup, index) => {
-          const setupLogs = getLogsForSetup(setups, engineState.logs, index);
+          const setupLogs = getLogsForSetup(setups, engineState.activityLogs, index);
           return (
             <div key={setup.id} className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
               <div className="flex items-center justify-between border-b border-slate-800 bg-slate-800/50 p-4">

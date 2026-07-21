@@ -87,6 +87,30 @@ interface TradableToken {
   isActive: boolean;
 }
 
+interface TradeLogRecord {
+  id: number;
+  tokenId: number;
+  tokenContractAddress: string | null;
+  tokenSymbol: string | null;
+  walletAddress: string;
+  action: 'BUY' | 'SELL';
+  requestedAmount: number;
+  executedAmount: number | null;
+  executedPrice: number | null;
+  txSignature: string | null;
+  status: 'PENDING' | 'SUCCESS' | 'FAILED';
+  errorMessage: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface RpcEndpoint {
+  id: number;
+  network: string;
+  url: string;
+  createdAt: number;
+}
+
 interface HistoricalSetupRecord {
   id: number;
   tokenSymbol: string | null;
@@ -128,6 +152,24 @@ interface ManagedWalletImportRequest {
 interface TradableTokenCreateRequest {
   network: string;
   contractAddress: string;
+}
+
+interface RpcEndpointCreateRequest {
+  network: string;
+  url: string;
+}
+
+interface TradeLogCreateRequest {
+  tokenId: number;
+  setupId: number | null;
+  walletAddress: string;
+  action: 'BUY' | 'SELL';
+  requestedAmount: number;
+  executedAmount?: number | null;
+  executedPrice?: number | null;
+  txSignature?: string | null;
+  status: 'PENDING' | 'SUCCESS' | 'FAILED';
+  errorMessage?: string | null;
 }
 
 interface TrackedTokenDescriptor {
@@ -456,6 +498,35 @@ function validateContractAddress(value: string): void {
   normalizePubkey(value);
 }
 
+function normalizeRpcUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new ApiError(400, 'RPC URL is required');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new ApiError(400, 'RPC URL must be a valid http or https URL');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new ApiError(400, 'RPC URL must use http or https');
+  }
+  return parsed.toString();
+}
+
+function dedupeStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    deduped.push(trimmed);
+  }
+  return deduped;
+}
+
 function formatTokenAmount(rawAmount: bigint, decimals: number): string {
   if (decimals <= 0) return rawAmount.toString();
   const base = 10n ** BigInt(decimals);
@@ -625,6 +696,25 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     created_at INTEGER NOT NULL,
     UNIQUE(network, contract_address)
   )`,
+  `CREATE TABLE IF NOT EXISTS trade_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id INTEGER NOT NULL,
+    signal_id INTEGER,
+    setup_id INTEGER,
+    wallet_address TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('BUY', 'SELL')),
+    requested_amount REAL NOT NULL,
+    executed_amount REAL,
+    executed_price REAL,
+    tx_signature TEXT,
+    status TEXT NOT NULL DEFAULT 'PENDING'
+      CHECK(status IN ('PENDING', 'SUCCESS', 'FAILED')),
+    error_message TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id),
+    FOREIGN KEY(setup_id) REFERENCES historic_setups(id)
+  )`,
   `CREATE TABLE IF NOT EXISTS historic_setups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -642,6 +732,18 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY(token_id) REFERENCES tradable_tokens(id)
   )`,
+  `CREATE TABLE IF NOT EXISTS rpc_endpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    network TEXT NOT NULL DEFAULT 'solana',
+    url TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(user_id, network, url),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`,
+  'CREATE INDEX IF NOT EXISTS idx_trade_logs_token_created ON trade_logs(token_id, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_trade_logs_wallet_created ON trade_logs(wallet_address, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_user_network_created ON rpc_endpoints(user_id, network, created_at DESC)',
 ];
 
 interface CredentialsBody {
@@ -766,6 +868,22 @@ function parseTradableTokenCreateRequest(
     throw new ApiError(400, 'Network and contract address are required');
   }
   return { network, contractAddress };
+}
+
+function parseRpcEndpointCreateRequest(
+  body: unknown,
+): RpcEndpointCreateRequest {
+  if (!body || typeof body !== 'object') {
+    throw new ApiError(400, 'Network and RPC URL are required');
+  }
+  const { network, url } = body as {
+    network?: unknown;
+    url?: unknown;
+  };
+  if (typeof network !== 'string' || typeof url !== 'string') {
+    throw new ApiError(400, 'Network and RPC URL are required');
+  }
+  return { network, url };
 }
 
 async function dbSetupRequired(db: D1Database): Promise<boolean> {
@@ -913,6 +1031,9 @@ async function dbSaveSettings(
   update: SettingsUpdateRequest,
 ): Promise<void> {
   validateContractAddress(update.contractAddress);
+  const normalizedContractAddress = update.contractAddress.trim()
+    ? normalizePubkey(update.contractAddress)
+    : '';
   if (update.volatilityTarget < 0 || update.volatilityTarget > 100) {
     throw new ApiError(400, 'Volatility target must be between 0 and 100');
   }
@@ -931,7 +1052,7 @@ async function dbSaveSettings(
   }
 
   const pairs: [string, string][] = [
-    ['contractAddress', update.contractAddress],
+    ['contractAddress', normalizedContractAddress],
     ['volatilityTarget', String(update.volatilityTarget)],
     ['pullbackTarget', String(update.pullbackTarget)],
     ['volumeTarget', String(update.volumeTarget)],
@@ -1184,6 +1305,218 @@ async function dbListAuditLogs(
   }));
 }
 
+async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]> {
+  await dbEnsureTradeDomainSchema(db);
+  const rows = await db
+    .prepare(
+      `SELECT
+         tl.id,
+         tl.token_id,
+         tl.wallet_address,
+         tl.action,
+         tl.requested_amount,
+         tl.executed_amount,
+         tl.executed_price,
+         tl.tx_signature,
+         tl.status,
+         tl.error_message,
+         tl.created_at,
+         tl.updated_at,
+         tt.contract_address,
+         tt.symbol
+       FROM trade_logs tl
+       LEFT JOIN tradable_tokens tt ON tt.id = tl.token_id
+       ORDER BY tl.created_at DESC, tl.id DESC
+       LIMIT 50`,
+    )
+    .all<{
+      id: number;
+      token_id: number;
+      wallet_address: string;
+      action: 'BUY' | 'SELL';
+      requested_amount: number;
+      executed_amount: number | null;
+      executed_price: number | null;
+      tx_signature: string | null;
+      status: 'PENDING' | 'SUCCESS' | 'FAILED';
+      error_message: string | null;
+      created_at: number;
+      updated_at: number;
+      contract_address: string | null;
+      symbol: string | null;
+    }>();
+  return rows.results.map((row) => ({
+    id: row.id,
+    tokenId: row.token_id,
+    tokenContractAddress: row.contract_address,
+    tokenSymbol: row.symbol,
+    walletAddress: row.wallet_address,
+    action: row.action,
+    requestedAmount: row.requested_amount,
+    executedAmount: row.executed_amount,
+    executedPrice: row.executed_price,
+    txSignature: row.tx_signature,
+    status: row.status,
+    errorMessage: row.error_message,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+async function dbCreateTradeLog(
+  db: D1Database,
+  input: TradeLogCreateRequest,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  const timestamp = nowTs();
+  await db
+    .prepare(
+      `INSERT INTO trade_logs (
+        token_id,
+        signal_id,
+        setup_id,
+        wallet_address,
+        action,
+        requested_amount,
+        executed_amount,
+        executed_price,
+        tx_signature,
+        status,
+        error_message,
+        created_at,
+        updated_at
+      ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+    )
+    .bind(
+      input.tokenId,
+      input.setupId,
+      input.walletAddress,
+      input.action,
+      input.requestedAmount,
+      input.executedAmount ?? null,
+      input.executedPrice ?? null,
+      input.txSignature ?? null,
+      input.status,
+      input.errorMessage ?? null,
+      timestamp,
+      timestamp,
+    )
+    .run();
+}
+
+async function dbListRpcEndpoints(
+  db: D1Database,
+  userId: number,
+  network = 'solana',
+): Promise<RpcEndpoint[]> {
+  await dbEnsureTradeDomainSchema(db);
+  const rows = await db
+    .prepare(
+      'SELECT id, network, url, created_at FROM rpc_endpoints WHERE user_id = ?1 AND network = ?2 ORDER BY created_at DESC, id DESC',
+    )
+    .bind(userId, network)
+    .all<{
+      id: number;
+      network: string;
+      url: string;
+      created_at: number;
+    }>();
+  return rows.results.map((row) => ({
+    id: row.id,
+    network: row.network,
+    url: row.url,
+    createdAt: row.created_at,
+  }));
+}
+
+async function dbResolveSolanaRpcUrls(
+  db: D1Database,
+  userId: number,
+  envRpcUrl?: string,
+): Promise<string[]> {
+  const endpoints = await dbListRpcEndpoints(db, userId, 'solana');
+  return dedupeStrings([
+    ...endpoints.map((endpoint) => endpoint.url),
+    envRpcUrl ?? '',
+    DEFAULT_SOLANA_RPC_URL,
+  ]);
+}
+
+async function dbAddRpcEndpoint(
+  db: D1Database,
+  userId: number,
+  input: RpcEndpointCreateRequest,
+): Promise<RpcEndpoint> {
+  await dbEnsureTradeDomainSchema(db);
+  const network = input.network.trim().toLowerCase();
+  if (network !== 'solana') {
+    throw new ApiError(400, 'Only the solana network is supported right now');
+  }
+  const url = normalizeRpcUrl(input.url);
+  const createdAt = nowTs();
+  try {
+    await db
+      .prepare(
+        'INSERT INTO rpc_endpoints (user_id, network, url, created_at) VALUES (?1, ?2, ?3, ?4)',
+      )
+      .bind(userId, network, url, createdAt)
+      .run();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('UNIQUE constraint failed')) {
+      throw new ApiError(409, 'This RPC endpoint has already been added');
+    }
+    throw err;
+  }
+  const row = await db
+    .prepare(
+      'SELECT id, network, url, created_at FROM rpc_endpoints WHERE user_id = ?1 AND network = ?2 AND url = ?3',
+    )
+    .bind(userId, network, url)
+    .first<{
+      id: number;
+      network: string;
+      url: string;
+      created_at: number;
+    }>();
+  if (!row) throw new ApiError(500, 'Failed to load the saved RPC endpoint');
+  return {
+    id: row.id,
+    network: row.network,
+    url: row.url,
+    createdAt: row.created_at,
+  };
+}
+
+async function dbDeleteRpcEndpoint(
+  db: D1Database,
+  userId: number,
+  endpointId: number,
+): Promise<RpcEndpoint> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      'SELECT id, network, url, created_at FROM rpc_endpoints WHERE id = ?1 AND user_id = ?2',
+    )
+    .bind(endpointId, userId)
+    .first<{
+      id: number;
+      network: string;
+      url: string;
+      created_at: number;
+    }>();
+  if (!row) {
+    throw new ApiError(404, 'RPC endpoint not found');
+  }
+  await db.prepare('DELETE FROM rpc_endpoints WHERE id = ?1').bind(endpointId).run();
+  return {
+    id: row.id,
+    network: row.network,
+    url: row.url,
+    createdAt: row.created_at,
+  };
+}
+
 async function dbListTradableTokens(db: D1Database): Promise<TradableToken[]> {
   await dbEnsureTradeDomainSchema(db);
   const rows = await db
@@ -1222,20 +1555,23 @@ async function dbCreateTradableToken(
   }
   const contractAddress = normalizePubkey(input.contractAddress);
   const createdAt = nowTs();
-  try {
-    await db
-      .prepare(
-        'INSERT INTO tradable_tokens (network, contract_address, symbol, name, decimals, is_active, created_at) VALUES (?1, ?2, NULL, NULL, ?3, 1, ?4)',
-      )
-      .bind(network, contractAddress, decimals, createdAt)
-      .run();
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('UNIQUE constraint failed')) {
-      throw new ApiError(409, 'This token has already been added');
-    }
-    throw err;
-  }
+  await db
+    .prepare(
+      `INSERT INTO tradable_tokens (
+         network,
+         contract_address,
+         symbol,
+         name,
+         decimals,
+         is_active,
+         created_at
+       ) VALUES (?1, ?2, NULL, NULL, ?3, 1, ?4)
+       ON CONFLICT(network, contract_address) DO UPDATE SET
+         is_active = 1,
+         decimals = COALESCE(excluded.decimals, tradable_tokens.decimals)`,
+    )
+    .bind(network, contractAddress, decimals, createdAt)
+    .run();
   const row = await db
     .prepare(
       'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2',
@@ -1319,6 +1655,20 @@ async function dbCreateHistoricalSetupSnapshot(
     .run();
 }
 
+async function dbGetLatestHistoricalSetupId(
+  db: D1Database,
+  userId: number,
+): Promise<number | null> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      'SELECT id FROM historic_setups WHERE user_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 1',
+    )
+    .bind(userId)
+    .first<{ id: number }>();
+  return row?.id ?? null;
+}
+
 async function dbListHistoricalSetups(
   db: D1Database,
   userId: number,
@@ -1388,40 +1738,57 @@ async function dbUserOwnsAccount(
 }
 
 async function solanaRpc<T>(
-  rpcUrl: string,
+  rpcUrls: string | string[],
   method: string,
   params: unknown[],
 ): Promise<T> {
-  const response = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: method, method, params }),
-  });
-  if (!response.ok) {
-    throw new ApiError(502, `Solana RPC request failed with ${response.status}`);
+  const pool = dedupeStrings(
+    (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls]).map((url) => url.trim()),
+  );
+  let lastErrorMessage = 'Unknown Solana RPC failure';
+
+  for (const rpcUrl of pool) {
+    try {
+      const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: method, method, params }),
+      });
+      if (!response.ok) {
+        throw new ApiError(502, `Solana RPC request failed with ${response.status}`);
+      }
+      const body = await response.json<{
+        result?: T;
+        error?: { code?: number; message?: string };
+      }>();
+      if (body.error) {
+        throw new ApiError(
+          502,
+          `Solana RPC error: ${body.error.message ?? 'unknown error'}`,
+        );
+      }
+      if (body.result == null) {
+        throw new ApiError(502, 'Solana RPC returned an empty result');
+      }
+      return body.result;
+    } catch (err: unknown) {
+      lastErrorMessage = err instanceof Error ? err.message : String(err);
+      console.warn(`Solana RPC attempt failed for ${rpcUrl}: ${lastErrorMessage}`);
+    }
   }
-  const body = await response.json<{
-    result?: T;
-    error?: { code?: number; message?: string };
-  }>();
-  if (body.error) {
-    throw new ApiError(
-      502,
-      `Solana RPC error: ${body.error.message ?? 'unknown error'}`,
-    );
-  }
-  if (body.result == null) {
-    throw new ApiError(502, 'Solana RPC returned an empty result');
-  }
-  return body.result;
+
+  throw new ApiError(
+    502,
+    `All configured Solana RPC endpoints failed for ${method}. Last error: ${lastErrorMessage}`,
+  );
 }
 
 async function fetchSolanaMintDecimals(
-  rpcUrl: string,
+  rpcUrls: string | string[],
   mint: string,
 ): Promise<number | null> {
   const result = await solanaRpc<{ value: { decimals: number } }>(
-    rpcUrl,
+    rpcUrls,
     'getTokenSupply',
     [mint],
   );
@@ -1429,7 +1796,7 @@ async function fetchSolanaMintDecimals(
 }
 
 async function fetchSolanaTokenBalance(
-  rpcUrl: string,
+  rpcUrls: string | string[],
   owner: string,
   token: TrackedTokenDescriptor,
 ): Promise<WalletBalanceToken> {
@@ -1448,7 +1815,7 @@ async function fetchSolanaTokenBalance(
         };
       };
     }>;
-  }>(rpcUrl, 'getTokenAccountsByOwner', [owner, { mint: token.mint }, { encoding: 'jsonParsed' }]);
+  }>(rpcUrls, 'getTokenAccountsByOwner', [owner, { mint: token.mint }, { encoding: 'jsonParsed' }]);
 
   let total = 0n;
   let decimals = token.decimals;
@@ -1510,7 +1877,7 @@ async function loadWalletBalance(
   address: string,
   settings: SettingsState,
   tradableTokens: TradableToken[],
-  rpcUrl: string,
+  rpcUrls: string | string[],
 ): Promise<WalletBalanceResponse> {
   const trackedTokens = buildTrackedTokens(settings, tradableTokens);
   const cacheKey = walletBalanceCacheKey(address, trackedTokens);
@@ -1518,12 +1885,12 @@ async function loadWalletBalance(
   if (cached) return cached;
 
   const lamportsResult = await solanaRpc<{ value: number }>(
-    rpcUrl,
+    rpcUrls,
     'getBalance',
     [address],
   );
   const sol = formatTokenAmount(BigInt(lamportsResult.value), 9);
-  const usdc = await fetchSolanaTokenBalance(rpcUrl, address, {
+  const usdc = await fetchSolanaTokenBalance(rpcUrls, address, {
     mint: SOLANA_USDC_MINT,
     symbol: 'USDC',
     network: 'solana',
@@ -1533,8 +1900,8 @@ async function loadWalletBalance(
   const tokenResults = await Promise.allSettled(
     trackedTokens.map(async (token) => {
       const decimals =
-        token.decimals ?? (await fetchSolanaMintDecimals(rpcUrl, token.mint));
-      return fetchSolanaTokenBalance(rpcUrl, address, {
+        token.decimals ?? (await fetchSolanaMintDecimals(rpcUrls, token.mint));
+      return fetchSolanaTokenBalance(rpcUrls, address, {
         ...token,
         decimals,
       });
@@ -1710,26 +2077,33 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     settings,
     internalAccs,
     outsiderAccs,
-    logs,
+    activityLogs,
+    tradeLogs,
     tradableTokens,
     historicalSetups,
+    rpcEndpoints,
   ] =
     await Promise.all([
       dbLoadSettings(env.TRADINGBOT_DB, user.id),
       dbListAccounts(env.TRADINGBOT_DB, user.id, 'managed'),
       dbListAccounts(env.TRADINGBOT_DB, user.id, 'watch'),
       dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
+      dbListTradeLogs(env.TRADINGBOT_DB),
       dbListTradableTokens(env.TRADINGBOT_DB),
       dbListHistoricalSetups(env.TRADINGBOT_DB, user.id),
+      dbListRpcEndpoints(env.TRADINGBOT_DB, user.id),
     ]);
   return jsonResponse({
     auth: { username: user.username, role: user.role },
     settings,
     internalAccs,
     outsiderAccs,
-    logs,
+    logs: activityLogs,
+    activityLogs,
+    tradeLogs,
     tradableTokens,
     historicalSetups,
+    rpcEndpoints,
     stats: {
       managedAccounts: internalAccs.length,
       watchedAccounts: outsiderAccs.length,
@@ -1750,7 +2124,29 @@ async function handleSaveSettings(
 ): Promise<Response> {
   const user = await requireAdmin(request, env);
   const body = await parseJsonBody<SettingsUpdateRequest>(request);
-  await dbSaveSettings(env.TRADINGBOT_DB, user.id, body);
+  const normalizedContractAddress = body.contractAddress.trim()
+    ? normalizePubkey(body.contractAddress)
+    : '';
+  if (normalizedContractAddress) {
+    const rpcUrls = await dbResolveSolanaRpcUrls(
+      env.TRADINGBOT_DB,
+      user.id,
+      env.SOLANA_RPC_URL,
+    );
+    const decimals = await fetchSolanaMintDecimals(
+      rpcUrls,
+      normalizedContractAddress,
+    );
+    await dbCreateTradableToken(
+      env.TRADINGBOT_DB,
+      { network: 'solana', contractAddress: normalizedContractAddress },
+      decimals,
+    );
+  }
+  await dbSaveSettings(env.TRADINGBOT_DB, user.id, {
+    ...body,
+    contractAddress: normalizedContractAddress,
+  });
   const updated = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
   await dbCreateHistoricalSetupSnapshot(
     env.TRADINGBOT_DB,
@@ -1832,8 +2228,13 @@ async function handleAddTradableToken(
     await parseJsonBody<unknown>(request),
   );
   const normalizedAddress = normalizePubkey(body.contractAddress);
+  const rpcUrls = await dbResolveSolanaRpcUrls(
+    env.TRADINGBOT_DB,
+    user.id,
+    env.SOLANA_RPC_URL,
+  );
   const decimals = await fetchSolanaMintDecimals(
-    env.SOLANA_RPC_URL ?? DEFAULT_SOLANA_RPC_URL,
+    rpcUrls,
     normalizedAddress,
   );
   const token = await dbCreateTradableToken(
@@ -1849,6 +2250,53 @@ async function handleAddTradableToken(
     `Added tradable token on ${token.network}`,
   );
   return jsonResponse({ token }, 201);
+}
+
+// POST /api/rpc-endpoints
+async function handleAddRpcEndpoint(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const body = parseRpcEndpointCreateRequest(
+    await parseJsonBody<unknown>(request),
+  );
+  const endpoint = await dbAddRpcEndpoint(env.TRADINGBOT_DB, user.id, body);
+  await dbAddAuditLog(
+    env.TRADINGBOT_DB,
+    user.id,
+    'rpc.endpoint_added',
+    endpoint.url,
+    `Added ${endpoint.network} RPC endpoint`,
+  );
+  return jsonResponse({ endpoint }, 201);
+}
+
+// DELETE /api/rpc-endpoints/{id}
+async function handleDeleteRpcEndpoint(
+  request: Request,
+  url: URL,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const idText = url.pathname.split('/').pop();
+  const endpointId = Number.parseInt(idText ?? '', 10);
+  if (!Number.isInteger(endpointId) || endpointId <= 0) {
+    throw new ApiError(400, 'RPC endpoint id is invalid');
+  }
+  const endpoint = await dbDeleteRpcEndpoint(
+    env.TRADINGBOT_DB,
+    user.id,
+    endpointId,
+  );
+  await dbAddAuditLog(
+    env.TRADINGBOT_DB,
+    user.id,
+    'rpc.endpoint_deleted',
+    endpoint.url,
+    `Removed ${endpoint.network} RPC endpoint`,
+  );
+  return jsonResponse({ success: true });
 }
 
 // POST /api/accounts/import
@@ -1877,9 +2325,44 @@ async function handleImportAccount(
 // POST /api/trade
 async function handleTrade(request: Request, env: Env): Promise<Response> {
   const user = await requireAdmin(request, env);
-  const body = await request.json<{ symbol?: string; action?: string }>();
+  const body = await request.json<{
+    symbol?: string;
+    action?: string;
+    contractAddress?: string;
+    walletAddress?: string;
+    requestedAmount?: number;
+  }>();
   const symbol = body.symbol ?? 'unknown';
   const action = body.action ?? 'unspecified';
+  const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+  const targetAddress =
+    typeof body.contractAddress === 'string' && body.contractAddress.trim().length > 0
+      ? body.contractAddress
+      : settings.contractAddress;
+  if (targetAddress.trim()) {
+    const tokenId = await dbResolveTradableTokenId(
+      env.TRADINGBOT_DB,
+      targetAddress,
+    );
+    if (tokenId) {
+      await dbCreateTradeLog(env.TRADINGBOT_DB, {
+        tokenId,
+        setupId: await dbGetLatestHistoricalSetupId(env.TRADINGBOT_DB, user.id),
+        walletAddress:
+          typeof body.walletAddress === 'string' && body.walletAddress.trim().length > 0
+            ? body.walletAddress.trim()
+            : 'system',
+        action: action.toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
+        requestedAmount:
+          typeof body.requestedAmount === 'number' && Number.isFinite(body.requestedAmount)
+            ? body.requestedAmount
+            : 0,
+        status: 'FAILED',
+        errorMessage:
+          'Trade execution is intentionally not implemented in this Worker yet.',
+      });
+    }
+  }
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
@@ -1959,11 +2442,16 @@ async function handleGetWalletBalance(
     dbLoadSettings(env.TRADINGBOT_DB, user.id),
     dbListTradableTokens(env.TRADINGBOT_DB),
   ]);
+  const rpcUrls = await dbResolveSolanaRpcUrls(
+    env.TRADINGBOT_DB,
+    user.id,
+    env.SOLANA_RPC_URL,
+  );
   const balance = await loadWalletBalance(
     address,
     settings,
     tradableTokens,
-    env.SOLANA_RPC_URL ?? DEFAULT_SOLANA_RPC_URL,
+    rpcUrls,
   );
   return jsonResponse(balance);
 }
@@ -2048,6 +2536,8 @@ async function handleApi(
       return await handleSaveSettings(request, env);
     if (method === 'POST' && pathname === '/api/tradable-tokens')
       return await handleAddTradableToken(request, env);
+    if (method === 'POST' && pathname === '/api/rpc-endpoints')
+      return await handleAddRpcEndpoint(request, env);
     if (method === 'POST' && pathname === '/api/private-keys/import')
       return await handleImportManagedWallet(request, env);
     if (method === 'POST' && pathname === '/api/admin/private-keys')
@@ -2060,6 +2550,8 @@ async function handleApi(
       return await handleAdminChangePassword(request, env);
     if (method === 'GET' && /^\/api\/wallets\/[^/]+\/balance$/.test(pathname))
       return await handleGetWalletBalance(request, url, env);
+    if (method === 'DELETE' && /^\/api\/rpc-endpoints\/\d+$/.test(pathname))
+      return await handleDeleteRpcEndpoint(request, url, env);
     if (method === 'DELETE' && pathname.startsWith('/api/admin/private-keys/'))
       return await handleAdminDeletePrivateKey(request, url, env);
     return jsonResponse({ error: 'Not found' }, 404);
