@@ -91,8 +91,10 @@ type TokenMarketSnapshot = {
   fdv: number | null;
   volume24h: number | null;
   totalTransactions24h: number | null;
+  outsidersOverOneUsd: number | null;
   dexId: string | null;
   pairAddress: string | null;
+  fetchedAt: number;
 };
 
 type TradableToken = {
@@ -218,6 +220,20 @@ const formatLivePrice = (value: number | null | undefined) => {
 
 function formatOptionalUsd(value: number | null | undefined): string {
   return value == null ? 'Unavailable' : formatUSD(value);
+}
+
+function serializeSettings(settings: SettingsState) {
+  return {
+    contractAddress: settings.contractAddress,
+    volatilityTarget: Number(settings.volatilityTarget),
+    pullbackTarget: Number(settings.pullbackTarget),
+    volumeTarget: Number(settings.volumeTarget),
+    netBuyinTarget: Number(settings.netBuyinTarget),
+    timeRangeTarget: settings.timeRangeTarget,
+    maxTransactions: Number(settings.maxTransactions),
+    maxSlippage: Number(settings.maxSlippage),
+    strategyNotes: settings.strategyNotes,
+  };
 }
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -851,9 +867,21 @@ export default function App() {
       await refresh();
     });
 
-  const handleRefresh = () => {
-    void refresh();
-  };
+  const handleRefresh = () =>
+    void submitWithFeedback('force-refresh', async () => {
+      if (auth?.authenticated && settings.contractAddress.trim()) {
+        await api<{ marketSnapshot: TokenMarketSnapshot | null }>(
+          '/api/market-snapshot/refresh',
+          { method: 'POST' },
+        );
+        setNotice('Force sync completed with a live token refresh.');
+      } else {
+        setNotice(
+          'Application state refreshed. Set an active trading token to force a live market fetch.',
+        );
+      }
+      await refresh();
+    });
 
   const handleStartTrading = () => {
     setNotice('Trade execution is intentionally disabled in the current backend release.');
@@ -863,17 +891,7 @@ export default function App() {
     submitWithFeedback('settings', async () => {
       await api('/api/settings', {
         method: 'POST',
-        body: JSON.stringify({
-          contractAddress: settings.contractAddress,
-          volatilityTarget: Number(settings.volatilityTarget),
-          pullbackTarget: Number(settings.pullbackTarget),
-          volumeTarget: Number(settings.volumeTarget),
-          netBuyinTarget: Number(settings.netBuyinTarget),
-          timeRangeTarget: settings.timeRangeTarget,
-          maxTransactions: Number(settings.maxTransactions),
-          maxSlippage: Number(settings.maxSlippage),
-          strategyNotes: settings.strategyNotes,
-        }),
+        body: JSON.stringify(serializeSettings(settings)),
       });
       setNotice('Configuration saved. The current trading token is tracked automatically and historical records stay intact.');
       await refresh();
@@ -904,15 +922,40 @@ export default function App() {
 
   const handleAddTrackedToken = () =>
     submitWithFeedback('token', async () => {
-      await api('/api/tradable-tokens', {
+      const hadActiveContract = settings.contractAddress.trim().length > 0;
+      const response = await api<{
+        token: TradableToken;
+        marketSnapshot: TokenMarketSnapshot | null;
+      }>('/api/tradable-tokens', {
         method: 'POST',
         body: JSON.stringify({
           network: tradableTokenForm.network,
           contractAddress: tradableTokenForm.contractAddress,
         }),
       });
+
+      if (!hadActiveContract) {
+        const nextSettings: SettingsState = {
+          ...settings,
+          contractAddress: response.token.contractAddress,
+        };
+        await api('/api/settings', {
+          method: 'POST',
+          body: JSON.stringify(serializeSettings(nextSettings)),
+        });
+        setSettings(nextSettings);
+      }
+
       setTradableTokenForm((current) => ({ ...current, contractAddress: '' }));
-      setNotice('Tracked token added successfully.');
+      setNotice(
+        response.marketSnapshot
+          ? hadActiveContract
+            ? 'Tracked token added and initialized with live market data.'
+            : 'Tracked token added, initialized, and set as the active trading contract.'
+          : hadActiveContract
+            ? 'Tracked token added. Live market data will appear after the next successful refresh.'
+            : 'Tracked token added and set as the active trading contract. Live market data will appear after the next successful refresh.',
+      );
       await refresh();
     });
 
@@ -1225,16 +1268,6 @@ export default function App() {
         0,
       )
     : 0;
-  const totalOutsidersOverOneUsd =
-    activeTokenContractAddress && engineState.marketSnapshot?.priceUsd != null
-      ? engineState.outsiderAccs.filter((account) => {
-          const tokenAmount = findWalletTokenAmount(
-            walletBalances[account.address],
-            activeTokenContractAddress,
-          );
-          return tokenAmount * engineState.marketSnapshot!.priceUsd! > 1;
-        }).length
-      : 0;
 
   const managedWallets = engineState.internalAccs;
 
@@ -1426,8 +1459,14 @@ export default function App() {
         />
         <StatCard
           title="Total Outsiders (>$1)"
-          value={engineState.marketSnapshot?.priceUsd != null ? String(totalOutsidersOverOneUsd) : 'Unavailable'}
-          subtitle={engineState.marketSnapshot?.priceUsd != null ? `At ${formatLivePrice(engineState.marketSnapshot.priceUsd)}` : 'Live price unavailable'}
+          value={engineState.marketSnapshot?.outsidersOverOneUsd != null ? String(engineState.marketSnapshot.outsidersOverOneUsd) : 'Unavailable'}
+          subtitle={
+            engineState.marketSnapshot?.outsidersOverOneUsd != null
+              ? managedWallets.length === 0
+                ? 'No internal wallets are configured, so all holders count as outsiders.'
+                : `Excludes ${managedWallets.length} internal wallet(s)`
+              : 'Holder scan unavailable'
+          }
         />
         <StatCard
           title="Number of Transaction and Volumes"

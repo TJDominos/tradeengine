@@ -32,6 +32,9 @@ The product is **Solana-first** and **token-onboarding-first**. There is no pre-
 - Stores admin users, sessions, settings, imported accounts, and encrypted managed private keys in D1.
 - Requires authenticated login before any configuration, private-key import, or account import action is allowed.
 - Exposes configured tradable tokens (added via network + contract address) via the `/api/state` endpoint and admin UI.
+- Fetches and persists token market snapshots in D1, including price, FDV, liquidity, volume, transaction count, and outsider holder count.
+- Automatically initializes token market data when the active trading token is saved or explicitly added from the setup UI.
+- Accepts Alchemy Notify webhook events for the active trading token so on-chain activity is stored as signals and can trigger downstream strategy evaluation.
 - Returns `501 Not Implemented` for trade execution until a real executor exists.
 
 ## D1 database binding
@@ -70,6 +73,8 @@ Migrations are located in `migrations/`:
 |------|-------------|
 | `0001_init.sql` | Core tables: users, sessions, settings, accounts, audit_logs |
 | `0002_trade_domain.sql` | Trade tables: tradable_tokens (network + contract address), trade_logs, signals, positions, historic_setups |
+| `0003_rpc_endpoints.sql` | User-scoped Solana HTTP RPC failover pool |
+| `0004_token_market_snapshots.sql` | Historical token market snapshots and related indexes |
 
 > **Note:** `0002_trade_domain.sql` creates the `tradable_tokens` table. Tokens are added at runtime by providing a network and contract address; no rows are seeded by the migration.
 
@@ -80,6 +85,13 @@ The following secret **must** be set before private-key import will work:
 | Secret | Description |
 |--------|-------------|
 | `PRIVATE_KEY_ENCRYPTION_KEY` | 32-byte value encoded as base64 or hex. Used to AES-256-GCM encrypt managed private keys at rest. |
+
+Optional environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `SOLANA_RPC_URL` | Preferred Solana HTTP RPC endpoint for metadata, balances, and transaction enrichment. |
+| `ALCHEMY_WEBHOOK_SECRET` | Shared secret required by `/api/webhooks/alchemy/notify`. Configure the same value in the webhook URL or send it as a bearer token. |
 
 Set it with Wrangler:
 
@@ -132,9 +144,23 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 | POST | `/api/auth/logout` | No | Delete session |
 | GET | `/api/state` | Yes | Full engine state (includes configured tradable tokens) |
 | POST | `/api/settings` | Admin | Save trading settings |
+| POST | `/api/market-snapshot/refresh` | Admin | Force a live market fetch for the active trading token and store a new historical snapshot |
+| POST | `/api/webhooks/alchemy/notify` | No | Ingest an Alchemy Notify webhook, persist `signals`, and trigger strategy evaluation for matching active tokens |
 | POST | `/api/private-keys/import` | Admin | Import + encrypt a managed private key |
 | POST | `/api/accounts/import` | Admin | Import a watch-only account |
 | POST | `/api/trade` | Admin | Trade (returns 501 – not implemented) |
+
+### Alchemy Notify webhook setup
+
+Use an Alchemy Notify webhook URL in this shape:
+
+```text
+https://<your-worker-domain>/api/webhooks/alchemy/notify?secret=<ALCHEMY_WEBHOOK_SECRET>&contractAddress=<solana-token-mint>
+```
+
+- `secret` must match the Worker environment variable `ALCHEMY_WEBHOOK_SECRET`.
+- `contractAddress` is recommended because webhook payloads vary by product and chain. If the payload does not include a parsable Solana mint, this query parameter lets the Worker route the event to users whose active trading token matches that mint.
+- The endpoint stores the raw event in `signals`, refreshes market snapshots, and records a `strategy.triggered` audit log entry.
 
 ## Data model summary
 
@@ -148,18 +174,20 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 | `accounts` | Managed (signing) and watch-only wallets |
 | `audit_logs` | Immutable action log |
 | `tradable_tokens` | Tokens configured via network + contract address; metadata fetched on-chain |
+| `token_market_snapshots` | Historical token market snapshots with fetch time and outsider counts |
+| `signals` | On-chain token activity events captured from Alchemy Notify webhooks |
 | `trade_logs` | Every proposed/executed trade with token reference |
-| `signals` | Incoming webhook events (Helius, etc.) with dedup |
 | `positions` | Current holdings per wallet and token |
 | `historic_setups` | Saved strategy snapshots, optionally scoped to a token |
 
 ### Is the current model sufficient for a Solana token-onboarding MVP?
 
-**Yes** — the trade domain tables introduced in `0002_trade_domain.sql` are sufficient:
+**Yes** — the trade domain tables plus the snapshot history migration are sufficient:
 
 - `tradable_tokens` stores each token configured by the admin (network + contract address + fetched metadata).
 - `trade_logs` records every order with amounts, price, tx hash, and status; each log references a `token_id`.
-- `signals` gives deduplication-safe storage for Helius webhook events (`external_id NOT NULL` ensures the `UNIQUE(source, external_id)` constraint is reliable).
+- `signals` gives deduplication-safe storage for Alchemy Notify or other webhook events (`external_id NOT NULL` ensures the `UNIQUE(source, external_id)` constraint is reliable).
+- `token_market_snapshots` preserves incremental dashboard data points over time for both manual refreshes and event-driven refreshes.
 - `positions` tracks per-wallet holdings for each configured token.
 - `historic_setups` snapshots strategy parameters at each save so you can correlate outcomes.
 

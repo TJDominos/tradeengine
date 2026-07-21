@@ -14,6 +14,8 @@ export interface Env {
   PRIVATE_KEY_ENCRYPTION_KEY?: string;
   /** Optional Solana RPC URL. Falls back to the public mainnet endpoint. */
   SOLANA_RPC_URL?: string;
+  /** Shared secret used to protect the inbound Alchemy Notify webhook endpoint. */
+  ALCHEMY_WEBHOOK_SECRET?: string;
 }
 
 // ─── constants ───────────────────────────────────────────────────────────────
@@ -24,6 +26,10 @@ const PBKDF2_ITERATIONS = 100_000; // Max supported by Cloudflare Workers
 const DEFAULT_SOLANA_DERIVATION_PATH = "m/44'/501'/0'/0'";
 const DEFAULT_SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com';
 const SOLANA_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const SOLANA_SPL_TOKEN_PROGRAM_ID =
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+const SOLANA_TOKEN_2022_PROGRAM_ID =
+  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 const WALLET_BALANCE_CACHE_TTL_MS = 30_000;
 const TOKEN_MARKET_CACHE_TTL_MS = 30_000;
 const BASE58_ALPHABET =
@@ -127,8 +133,51 @@ interface TokenMarketSnapshot {
   fdv: number | null;
   volume24h: number | null;
   totalTransactions24h: number | null;
+  outsidersOverOneUsd: number | null;
   dexId: string | null;
   pairAddress: string | null;
+  fetchedAt: number;
+}
+
+interface SignalRecord {
+  id: number;
+  source: string;
+  externalId: string;
+  eventType: string;
+  walletAddress: string | null;
+  txSignature: string | null;
+  payload: string;
+  processed: boolean;
+  processedAt: number | null;
+  errorMessage: string | null;
+  retryCount: number;
+  createdAt: number;
+}
+
+interface SignalCreateRequest {
+  source: string;
+  externalId: string;
+  eventType: string;
+  walletAddress: string | null;
+  txSignature: string | null;
+  payload: string;
+}
+
+interface AlchemyWebhookPayload {
+  webhookId?: unknown;
+  id?: unknown;
+  createdAt?: unknown;
+  type?: unknown;
+  event?: unknown;
+}
+
+interface DerivedChainSignal {
+  externalId: string;
+  eventType: string;
+  walletAddress: string | null;
+  txSignature: string | null;
+  contractAddresses: string[];
+  payload: string;
 }
 
 interface HistoricalSetupRecord {
@@ -547,6 +596,42 @@ function dedupeStrings(values: string[]): string[] {
   return deduped;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readNonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function tryNormalizeSolanaPubkey(value: unknown): string | null {
+  const text = readNonEmptyString(value);
+  if (!text) {
+    return null;
+  }
+  try {
+    return normalizePubkey(text);
+  } catch {
+    return null;
+  }
+}
+
+function uniqueSolanaPubkeys(values: unknown[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const pubkey = tryNormalizeSolanaPubkey(value);
+    if (!pubkey || seen.has(pubkey)) {
+      continue;
+    }
+    seen.add(pubkey);
+    result.push(pubkey);
+  }
+  return result;
+}
+
 function formatTokenAmount(rawAmount: bigint, decimals: number): string {
   if (decimals <= 0) return rawAmount.toString();
   const base = 10n ** BigInt(decimals);
@@ -753,6 +838,39 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     created_at INTEGER NOT NULL,
     UNIQUE(network, contract_address)
   )`,
+  `CREATE TABLE IF NOT EXISTS token_market_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id INTEGER NOT NULL,
+    network TEXT NOT NULL DEFAULT 'solana',
+    contract_address TEXT NOT NULL,
+    token_name TEXT,
+    token_symbol TEXT,
+    price_usd REAL,
+    liquidity_usd REAL,
+    fdv REAL,
+    volume_24h REAL,
+    total_transactions_24h INTEGER,
+    outsiders_over_one_usd INTEGER,
+    dex_id TEXT,
+    pair_address TEXT,
+    fetched_at INTEGER NOT NULL,
+    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    wallet_address TEXT,
+    tx_signature TEXT,
+    payload TEXT NOT NULL,
+    processed INTEGER NOT NULL DEFAULT 0,
+    processed_at INTEGER,
+    error_message TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    UNIQUE(source, external_id)
+  )`,
   `CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     wallet_address TEXT NOT NULL,
@@ -810,6 +928,10 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
   )`,
   'CREATE INDEX IF NOT EXISTS idx_positions_wallet ON positions(wallet_address)',
+  'CREATE INDEX IF NOT EXISTS idx_signals_processed_created ON signals(processed, created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source)',
+  'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_token_fetched ON token_market_snapshots(token_id, fetched_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_contract_fetched ON token_market_snapshots(network, contract_address, fetched_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_token_created ON trade_logs(token_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_wallet_created ON trade_logs(wallet_address, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_user_network_created ON rpc_endpoints(user_id, network, created_at DESC)',
@@ -1234,6 +1356,19 @@ async function dbListAccounts(
     type: row.type,
     createdAt: row.created_at,
   }));
+}
+
+async function dbListManagedAccountAddresses(
+  db: D1Database,
+  userId: number,
+): Promise<string[]> {
+  const rows = await db
+    .prepare(
+      "SELECT wallet_address FROM accounts WHERE user_id = ?1 AND type = 'managed' ORDER BY created_at DESC, id DESC",
+    )
+    .bind(userId)
+    .all<{ wallet_address: string }>();
+  return rows.results.map((row) => row.wallet_address);
 }
 
 async function dbImportWatchAccount(
@@ -1667,6 +1802,23 @@ async function dbCreateTradableToken(
   };
 }
 
+async function dbUpdateTradableTokenMetadata(
+  db: D1Database,
+  tokenId: number,
+  snapshot: TokenMarketSnapshot,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  await db
+    .prepare(
+      `UPDATE tradable_tokens
+       SET symbol = COALESCE(?2, symbol),
+           name = COALESCE(?3, name)
+       WHERE id = ?1`,
+    )
+    .bind(tokenId, snapshot.tokenSymbol, snapshot.tokenName)
+    .run();
+}
+
 async function dbResolveTradableTokenId(
   db: D1Database,
   contractAddress: string,
@@ -1679,6 +1831,255 @@ async function dbResolveTradableTokenId(
     .bind('solana', normalizePubkey(contractAddress))
     .first<{ id: number }>();
   return row?.id ?? null;
+}
+
+async function dbGetLatestTokenMarketSnapshot(
+  db: D1Database,
+  tokenId: number,
+): Promise<TokenMarketSnapshot | null> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT
+         network,
+         contract_address,
+         token_name,
+         token_symbol,
+         price_usd,
+         liquidity_usd,
+         fdv,
+         volume_24h,
+         total_transactions_24h,
+         outsiders_over_one_usd,
+         dex_id,
+         pair_address,
+         fetched_at
+       FROM token_market_snapshots
+       WHERE token_id = ?1
+       ORDER BY fetched_at DESC, id DESC
+       LIMIT 1`,
+    )
+    .bind(tokenId)
+    .first<{
+      network: string;
+      contract_address: string;
+      token_name: string | null;
+      token_symbol: string | null;
+      price_usd: number | null;
+      liquidity_usd: number | null;
+      fdv: number | null;
+      volume_24h: number | null;
+      total_transactions_24h: number | null;
+      outsiders_over_one_usd: number | null;
+      dex_id: string | null;
+      pair_address: string | null;
+      fetched_at: number;
+    }>();
+  if (!row) {
+    return null;
+  }
+  return {
+    network: row.network,
+    contractAddress: row.contract_address,
+    tokenName: row.token_name,
+    tokenSymbol: row.token_symbol,
+    priceUsd: row.price_usd,
+    liquidityUsd: row.liquidity_usd,
+    fdv: row.fdv,
+    volume24h: row.volume_24h,
+    totalTransactions24h: row.total_transactions_24h,
+    outsidersOverOneUsd: row.outsiders_over_one_usd,
+    dexId: row.dex_id,
+    pairAddress: row.pair_address,
+    fetchedAt: row.fetched_at,
+  };
+}
+
+async function dbInsertTokenMarketSnapshot(
+  db: D1Database,
+  tokenId: number,
+  snapshot: TokenMarketSnapshot,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  await db
+    .prepare(
+      `INSERT INTO token_market_snapshots (
+        token_id,
+        network,
+        contract_address,
+        token_name,
+        token_symbol,
+        price_usd,
+        liquidity_usd,
+        fdv,
+        volume_24h,
+        total_transactions_24h,
+        outsiders_over_one_usd,
+        dex_id,
+        pair_address,
+        fetched_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+    )
+    .bind(
+      tokenId,
+      snapshot.network,
+      snapshot.contractAddress,
+      snapshot.tokenName,
+      snapshot.tokenSymbol,
+      snapshot.priceUsd,
+      snapshot.liquidityUsd,
+      snapshot.fdv,
+      snapshot.volume24h,
+      snapshot.totalTransactions24h,
+      snapshot.outsidersOverOneUsd,
+      snapshot.dexId,
+      snapshot.pairAddress,
+      snapshot.fetchedAt,
+    )
+    .run();
+}
+
+async function dbCreateSignal(
+  db: D1Database,
+  input: SignalCreateRequest,
+): Promise<{ signal: SignalRecord; inserted: boolean }> {
+  await dbEnsureTradeDomainSchema(db);
+  const existing = await db
+    .prepare(
+      `SELECT
+         id,
+         source,
+         external_id,
+         event_type,
+         wallet_address,
+         tx_signature,
+         payload,
+         processed,
+         processed_at,
+         error_message,
+         retry_count,
+         created_at
+       FROM signals
+       WHERE source = ?1 AND external_id = ?2
+       LIMIT 1`,
+    )
+    .bind(input.source, input.externalId)
+    .first<{
+      id: number;
+      source: string;
+      external_id: string;
+      event_type: string;
+      wallet_address: string | null;
+      tx_signature: string | null;
+      payload: string;
+      processed: number;
+      processed_at: number | null;
+      error_message: string | null;
+      retry_count: number;
+      created_at: number;
+    }>();
+
+  if (existing) {
+    return {
+      inserted: false,
+      signal: {
+        id: existing.id,
+        source: existing.source,
+        externalId: existing.external_id,
+        eventType: existing.event_type,
+        walletAddress: existing.wallet_address,
+        txSignature: existing.tx_signature,
+        payload: existing.payload,
+        processed: existing.processed === 1,
+        processedAt: existing.processed_at,
+        errorMessage: existing.error_message,
+        retryCount: existing.retry_count,
+        createdAt: existing.created_at,
+      },
+    };
+  }
+
+  const createdAt = nowTs();
+  await db
+    .prepare(
+      `INSERT INTO signals (
+        source,
+        external_id,
+        event_type,
+        wallet_address,
+        tx_signature,
+        payload,
+        processed,
+        processed_at,
+        error_message,
+        retry_count,
+        created_at
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, NULL, 0, ?7)`,
+    )
+    .bind(
+      input.source,
+      input.externalId,
+      input.eventType,
+      input.walletAddress,
+      input.txSignature,
+      input.payload,
+      createdAt,
+    )
+    .run();
+
+  return {
+    inserted: true,
+    signal: {
+      id: 0,
+      source: input.source,
+      externalId: input.externalId,
+      eventType: input.eventType,
+      walletAddress: input.walletAddress,
+      txSignature: input.txSignature,
+      payload: input.payload,
+      processed: false,
+      processedAt: null,
+      errorMessage: null,
+      retryCount: 0,
+      createdAt,
+    },
+  };
+}
+
+async function dbMarkSignalProcessed(
+  db: D1Database,
+  source: string,
+  externalId: string,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  await db
+    .prepare(
+      `UPDATE signals
+       SET processed = 1,
+           processed_at = ?3,
+           error_message = NULL
+       WHERE source = ?1 AND external_id = ?2`,
+    )
+    .bind(source, externalId, nowTs())
+    .run();
+}
+
+async function dbMarkSignalFailed(
+  db: D1Database,
+  source: string,
+  externalId: string,
+  errorMessage: string,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  await db
+    .prepare(
+      `UPDATE signals
+       SET error_message = ?3,
+           retry_count = retry_count + 1
+       WHERE source = ?1 AND external_id = ?2`,
+    )
+    .bind(source, externalId, errorMessage)
+    .run();
 }
 
 async function dbCreateHistoricalSetupSnapshot(
@@ -1842,7 +2243,7 @@ async function dbUserOwnsAccount(
   return !!row;
 }
 
-async function fetchTokenMarketSnapshot(
+async function fetchDexScreenerTokenMarketSnapshot(
   network: string,
   contractAddress: string,
 ): Promise<TokenMarketSnapshot | null> {
@@ -1852,10 +2253,6 @@ async function fetchTokenMarketSnapshot(
   }
 
   const normalizedAddress = normalizePubkey(contractAddress);
-  const cacheKey = tokenMarketCacheKey(normalizedNetwork, normalizedAddress);
-  const cached = readTokenMarketCache(cacheKey);
-  if (cached) return cached;
-
   const response = await fetch(
     `https://api.dexscreener.com/latest/dex/tokens/${normalizedAddress}`,
     {
@@ -1927,9 +2324,206 @@ async function fetchTokenMarketSnapshot(
     fdv: toFiniteNumber(bestPair.fdv),
     volume24h: toFiniteNumber(bestPair.volume?.h24),
     totalTransactions24h,
+    outsidersOverOneUsd: null,
     dexId: bestPair.dexId ?? null,
     pairAddress: bestPair.pairAddress ?? null,
+    fetchedAt: nowTs(),
   };
+
+  return snapshot;
+}
+
+async function fetchSolanaOutsiderHolderCountOverOneUsd(
+  rpcUrls: string | string[],
+  mint: string,
+  managedAccountAddresses: string[],
+  priceUsd: number | null,
+): Promise<number | null> {
+  if (priceUsd == null || !Number.isFinite(priceUsd) || priceUsd <= 0) {
+    return null;
+  }
+
+  const filters = [{ dataSize: 165 }, { memcmp: { offset: 0, bytes: mint } }];
+  const managedSet = new Set(
+    managedAccountAddresses.map((address) => normalizePubkey(address)),
+  );
+  const programResults = await Promise.allSettled(
+    [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID].map((programId) =>
+      solanaRpc<
+        Array<{
+          account: {
+            data: {
+              parsed?: {
+                info?: {
+                  owner?: string;
+                  tokenAmount?: {
+                    amount?: string;
+                    decimals?: number;
+                  };
+                };
+              };
+            };
+          };
+        }>
+      >(rpcUrls, 'getProgramAccounts', [
+        programId,
+        { filters, encoding: 'jsonParsed' },
+      ]),
+    ),
+  );
+
+  let decimals: number | null = null;
+  let successfulQueryCount = 0;
+  const holderBalances = new Map<string, bigint>();
+
+  for (const programResult of programResults) {
+    if (programResult.status !== 'fulfilled') {
+      continue;
+    }
+    successfulQueryCount += 1;
+    for (const account of programResult.value) {
+      const owner = account.account.data.parsed?.info?.owner;
+      const tokenAmount = account.account.data.parsed?.info?.tokenAmount;
+      if (!owner || !tokenAmount?.amount) {
+        continue;
+      }
+
+      const normalizedOwner = normalizePubkey(owner);
+      if (managedSet.has(normalizedOwner)) {
+        continue;
+      }
+
+      holderBalances.set(
+        normalizedOwner,
+        (holderBalances.get(normalizedOwner) ?? 0n) + BigInt(tokenAmount.amount),
+      );
+      if (typeof tokenAmount.decimals === 'number') {
+        decimals = tokenAmount.decimals;
+      }
+    }
+  }
+
+  if (successfulQueryCount === 0) {
+    const rejectedResult = programResults.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    throw rejectedResult?.reason instanceof Error
+      ? rejectedResult.reason
+      : new ApiError(502, 'Failed to load token holder accounts from Solana RPC');
+  }
+
+  if (decimals == null) {
+    decimals = await fetchSolanaMintDecimals(rpcUrls, mint);
+  }
+  if (decimals == null) {
+    return null;
+  }
+
+  let outsiderCount = 0;
+  for (const rawAmount of holderBalances.values()) {
+    const tokenAmount = Number.parseFloat(formatTokenAmount(rawAmount, decimals));
+    if (Number.isFinite(tokenAmount) && tokenAmount * priceUsd > 1) {
+      outsiderCount += 1;
+    }
+  }
+
+  return outsiderCount;
+}
+
+async function syncTokenMarketSnapshotForUser(
+  db: D1Database,
+  userId: number,
+  network: string,
+  contractAddress: string,
+  rpcUrls: string | string[],
+  options?: {
+    force?: boolean;
+    managedAccountAddresses?: string[];
+    fallbackToStoredOnError?: boolean;
+  },
+): Promise<TokenMarketSnapshot | null> {
+  const normalizedNetwork = network.trim().toLowerCase();
+  if (normalizedNetwork !== 'solana') {
+    return null;
+  }
+
+  const normalizedAddress = normalizePubkey(contractAddress);
+  const cacheKey = tokenMarketCacheKey(normalizedNetwork, normalizedAddress);
+  const tokenId = await dbResolveTradableTokenId(db, normalizedAddress);
+  const latestStoredSnapshot = tokenId
+    ? await dbGetLatestTokenMarketSnapshot(db, tokenId)
+    : null;
+
+  if (!options?.force) {
+    const cachedSnapshot = readTokenMarketCache(cacheKey);
+    if (cachedSnapshot) {
+      return cachedSnapshot;
+    }
+
+    const latestSnapshotAgeSeconds = latestStoredSnapshot
+      ? nowTs() - latestStoredSnapshot.fetchedAt
+      : null;
+    if (
+      latestStoredSnapshot &&
+      latestSnapshotAgeSeconds != null &&
+      latestSnapshotAgeSeconds <= Math.ceil(TOKEN_MARKET_CACHE_TTL_MS / 1000)
+    ) {
+      writeTokenMarketCache(cacheKey, latestStoredSnapshot);
+      return latestStoredSnapshot;
+    }
+  }
+
+  let liveSnapshot: TokenMarketSnapshot | null = null;
+  try {
+    liveSnapshot = await fetchDexScreenerTokenMarketSnapshot(
+      normalizedNetwork,
+      normalizedAddress,
+    );
+  } catch (err: unknown) {
+    if ((options?.fallbackToStoredOnError ?? true) && latestStoredSnapshot) {
+      writeTokenMarketCache(cacheKey, latestStoredSnapshot);
+      return latestStoredSnapshot;
+    }
+    throw err;
+  }
+
+  if (!liveSnapshot) {
+    if ((options?.fallbackToStoredOnError ?? true) && latestStoredSnapshot) {
+      writeTokenMarketCache(cacheKey, latestStoredSnapshot);
+      return latestStoredSnapshot;
+    }
+    return null;
+  }
+
+  let outsidersOverOneUsd: number | null = null;
+  try {
+    const managedAccountAddresses =
+      options?.managedAccountAddresses ??
+      (await dbListManagedAccountAddresses(db, userId));
+    outsidersOverOneUsd = await fetchSolanaOutsiderHolderCountOverOneUsd(
+      rpcUrls,
+      normalizedAddress,
+      managedAccountAddresses,
+      liveSnapshot.priceUsd,
+    );
+  } catch (err: unknown) {
+    console.warn(
+      `Failed to compute outsider holder count for ${normalizedAddress}:`,
+      err,
+    );
+  }
+
+  const snapshot: TokenMarketSnapshot = {
+    ...liveSnapshot,
+    outsidersOverOneUsd,
+  };
+
+  if (tokenId) {
+    await Promise.all([
+      dbUpdateTradableTokenMetadata(db, tokenId, snapshot),
+      dbInsertTokenMarketSnapshot(db, tokenId, snapshot),
+    ]);
+  }
 
   writeTokenMarketCache(cacheKey, snapshot);
   return snapshot;
@@ -2143,6 +2737,337 @@ async function requireAdmin(request: Request, env: Env): Promise<SessionUser> {
   return user;
 }
 
+async function dbListUserIdsByActiveContractAddress(
+  db: D1Database,
+  contractAddress: string,
+): Promise<number[]> {
+  await dbEnsureSchema(db);
+  const rows = await db
+    .prepare(
+      `SELECT DISTINCT user_id
+       FROM settings
+       WHERE key = ?1 AND value = ?2
+       ORDER BY user_id ASC`,
+    )
+    .bind('contractAddress', normalizePubkey(contractAddress))
+    .all<{ user_id: number }>();
+  return rows.results.map((row) => row.user_id);
+}
+
+function readBearerToken(request: Request): string | null {
+  const authorization = request.headers.get('Authorization')?.trim();
+  if (!authorization) {
+    return null;
+  }
+  const prefix = 'Bearer ';
+  return authorization.startsWith(prefix)
+    ? authorization.slice(prefix.length).trim()
+    : null;
+}
+
+function assertAlchemyWebhookAuthorized(
+  request: Request,
+  url: URL,
+  env: Env,
+): void {
+  const configuredSecret = env.ALCHEMY_WEBHOOK_SECRET?.trim();
+  if (!configuredSecret) {
+    throw new ApiError(503, 'ALCHEMY_WEBHOOK_SECRET is not configured');
+  }
+
+  const providedSecret =
+    url.searchParams.get('secret')?.trim() ||
+    request.headers.get('X-Webhook-Secret')?.trim() ||
+    readBearerToken(request);
+  if (providedSecret !== configuredSecret) {
+    throw new ApiError(401, 'Alchemy webhook secret is invalid');
+  }
+}
+
+function deriveAlchemySignalsFromPayload(
+  payload: AlchemyWebhookPayload,
+  defaultContractAddress: string | null,
+): DerivedChainSignal[] {
+  const webhookId = readNonEmptyString(payload.webhookId);
+  const eventId = readNonEmptyString(payload.id) ?? `alchemy-${nowTs()}`;
+  const payloadType = readNonEmptyString(payload.type) ?? 'ALCHEMY_NOTIFY';
+  const event = isRecord(payload.event) ? payload.event : null;
+  const fallbackContracts = defaultContractAddress ? [defaultContractAddress] : [];
+
+  if (event && Array.isArray(event.activity)) {
+    const activitySignals = event.activity.flatMap((item, index) => {
+      if (!isRecord(item)) {
+        return [];
+      }
+      const rawContract = isRecord(item.rawContract) ? item.rawContract : null;
+      const log = isRecord(item.log) ? item.log : null;
+      const txSignature =
+        readNonEmptyString(item.hash) ??
+        readNonEmptyString(log?.transactionHash) ??
+        null;
+      const contractAddresses = uniqueSolanaPubkeys([
+        ...fallbackContracts,
+        rawContract?.address,
+        item.contractAddress,
+        item.tokenAddress,
+        item.mint,
+        log?.address,
+      ]);
+      return [
+        {
+          externalId: `${eventId}:${txSignature ?? index}:${index}`,
+          eventType: `${payloadType}:${readNonEmptyString(item.category) ?? 'activity'}`,
+          walletAddress:
+            tryNormalizeSolanaPubkey(item.fromAddress) ??
+            tryNormalizeSolanaPubkey(item.toAddress),
+          txSignature,
+          contractAddresses,
+          payload: JSON.stringify({
+            webhookId,
+            eventId,
+            type: payloadType,
+            activity: item,
+          }),
+        } satisfies DerivedChainSignal,
+      ];
+    });
+    if (activitySignals.length > 0) {
+      return activitySignals;
+    }
+  }
+
+  const data = event && isRecord(event.data) ? event.data : null;
+  const block = data && isRecord(data.block) ? data.block : null;
+  if (block && Array.isArray(block.logs)) {
+    const logSignals = block.logs.flatMap((item, index) => {
+      if (!isRecord(item)) {
+        return [];
+      }
+      const transaction = isRecord(item.transaction) ? item.transaction : null;
+      const from = transaction && isRecord(transaction.from) ? transaction.from : null;
+      const to = transaction && isRecord(transaction.to) ? transaction.to : null;
+      const account = isRecord(item.account) ? item.account : null;
+      const txSignature =
+        readNonEmptyString(transaction?.hash) ??
+        readNonEmptyString(item.transactionHash) ??
+        null;
+      const contractAddresses = uniqueSolanaPubkeys([
+        ...fallbackContracts,
+        account?.address,
+        item.address,
+        item.contractAddress,
+        item.tokenAddress,
+        item.mint,
+      ]);
+      return [
+        {
+          externalId: `${eventId}:${txSignature ?? index}:${index}`,
+          eventType: `${payloadType}:log`,
+          walletAddress:
+            tryNormalizeSolanaPubkey(from?.address) ??
+            tryNormalizeSolanaPubkey(to?.address),
+          txSignature,
+          contractAddresses,
+          payload: JSON.stringify({
+            webhookId,
+            eventId,
+            type: payloadType,
+            log: item,
+          }),
+        } satisfies DerivedChainSignal,
+      ];
+    });
+    if (logSignals.length > 0) {
+      return logSignals;
+    }
+  }
+
+  return [
+    {
+      externalId: eventId,
+      eventType: payloadType,
+      walletAddress: null,
+      txSignature: null,
+      contractAddresses: uniqueSolanaPubkeys([
+        ...fallbackContracts,
+        event?.contractAddress,
+        event?.address,
+        event?.tokenAddress,
+        event?.mint,
+      ]),
+      payload: JSON.stringify(payload),
+    },
+  ];
+}
+
+async function processTokenActivitySignal(
+  env: Env,
+  input: {
+    userId: number;
+    contractAddress: string;
+    source: string;
+    externalId: string;
+    eventType: string;
+    walletAddress: string | null;
+    txSignature: string | null;
+    payload: string;
+    providerLabel: string;
+  },
+): Promise<boolean> {
+  const normalizedContractAddress = normalizePubkey(input.contractAddress);
+  const { inserted } = await dbCreateSignal(env.TRADINGBOT_DB, {
+    source: input.source,
+    externalId: input.externalId,
+    eventType: input.eventType,
+    walletAddress: input.walletAddress,
+    txSignature: input.txSignature,
+    payload: input.payload,
+  });
+
+  if (!inserted) {
+    return false;
+  }
+
+  try {
+    const rpcUrls = await dbResolveSolanaRpcUrls(
+      env.TRADINGBOT_DB,
+      input.userId,
+      env.SOLANA_RPC_URL,
+    );
+    let marketSnapshot: TokenMarketSnapshot | null = null;
+    try {
+      marketSnapshot = await syncTokenMarketSnapshotForUser(
+        env.TRADINGBOT_DB,
+        input.userId,
+        'solana',
+        normalizedContractAddress,
+        rpcUrls,
+        {
+          force: true,
+        },
+      );
+    } catch (err: unknown) {
+      console.warn(
+        `Failed to refresh market snapshot from ${input.providerLabel} event for ${normalizedContractAddress}:`,
+        err,
+      );
+    }
+
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      input.userId,
+      'strategy.triggered',
+      input.txSignature ?? input.externalId,
+      marketSnapshot
+        ? `Received an ${input.providerLabel} ${input.eventType} event for ${normalizedContractAddress}. Recorded a fresh market snapshot and triggered strategy evaluation. Automated trade execution remains disabled in this release.`
+        : `Received an ${input.providerLabel} ${input.eventType} event for ${normalizedContractAddress}. Triggered strategy evaluation. Automated trade execution remains disabled in this release.`,
+    );
+    await dbMarkSignalProcessed(
+      env.TRADINGBOT_DB,
+      input.source,
+      input.externalId,
+    );
+    return true;
+  } catch (err: unknown) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    await dbMarkSignalFailed(
+      env.TRADINGBOT_DB,
+      input.source,
+      input.externalId,
+      errorMessage,
+    );
+    throw err;
+  }
+}
+
+async function handleAlchemyNotifyWebhook(
+  request: Request,
+  url: URL,
+  env: Env,
+): Promise<Response> {
+  assertAlchemyWebhookAuthorized(request, url, env);
+  const payload = await parseJsonBody<AlchemyWebhookPayload>(request);
+  const contractFromQuery = tryNormalizeSolanaPubkey(
+    url.searchParams.get('contractAddress'),
+  );
+  const derivedSignals = deriveAlchemySignalsFromPayload(
+    payload,
+    contractFromQuery,
+  );
+  const webhookId = readNonEmptyString(payload.webhookId) ?? 'shared';
+  const targetCache = new Map<string, number[]>();
+
+  let processed = 0;
+  let duplicates = 0;
+  let ignored = 0;
+  let routedTargets = 0;
+
+  for (const signal of derivedSignals) {
+    const contractAddresses = signal.contractAddresses.length > 0
+      ? signal.contractAddresses
+      : contractFromQuery
+        ? [contractFromQuery]
+        : [];
+    if (contractAddresses.length === 0) {
+      ignored += 1;
+      continue;
+    }
+
+    const handledTargets = new Set<string>();
+    for (const contractAddress of contractAddresses) {
+      let userIds = targetCache.get(contractAddress);
+      if (!userIds) {
+        userIds = await dbListUserIdsByActiveContractAddress(
+          env.TRADINGBOT_DB,
+          contractAddress,
+        );
+        targetCache.set(contractAddress, userIds);
+      }
+
+      for (const userId of userIds) {
+        const targetKey = `${userId}:${contractAddress}`;
+        if (handledTargets.has(targetKey)) {
+          continue;
+        }
+        handledTargets.add(targetKey);
+        routedTargets += 1;
+        const inserted = await processTokenActivitySignal(env, {
+          userId,
+          contractAddress,
+          source: `alchemy_notify:${webhookId}:user:${userId}`,
+          externalId: `${signal.externalId}:${contractAddress}`,
+          eventType: signal.eventType,
+          walletAddress: signal.walletAddress,
+          txSignature: signal.txSignature,
+          payload: signal.payload,
+          providerLabel: 'Alchemy Notify',
+        });
+        if (inserted) {
+          processed += 1;
+        } else {
+          duplicates += 1;
+        }
+      }
+    }
+
+    if (handledTargets.size === 0) {
+      ignored += 1;
+    }
+  }
+
+  return jsonResponse(
+    {
+      ok: true,
+      received: derivedSignals.length,
+      routedTargets,
+      processed,
+      duplicates,
+      ignored,
+    },
+    202,
+  );
+}
+
 // ─── route handlers ───────────────────────────────────────────────────────────
 
 // GET /api/health
@@ -2272,7 +3197,7 @@ async function handleLogout(request: Request, env: Env): Promise<Response> {
 async function handleGetState(request: Request, env: Env): Promise<Response> {
   const user = await requireUser(request, env);
   const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-  const [
+  let [
     internalAccs,
     outsiderAccs,
     activityLogs,
@@ -2291,13 +3216,28 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
       dbListRpcEndpoints(env.TRADINGBOT_DB, user.id),
     ]);
 
+  const rpcUrls = dedupeStrings([
+    ...rpcEndpoints.map((endpoint) => endpoint.url),
+    env.SOLANA_RPC_URL ?? '',
+    DEFAULT_SOLANA_RPC_URL,
+  ]);
+
   let marketSnapshot: TokenMarketSnapshot | null = null;
   if (settings.contractAddress.trim()) {
     try {
-      marketSnapshot = await fetchTokenMarketSnapshot(
+      marketSnapshot = await syncTokenMarketSnapshotForUser(
+        env.TRADINGBOT_DB,
+        user.id,
         'solana',
         settings.contractAddress,
+        rpcUrls,
+        {
+          managedAccountAddresses: internalAccs.map((account) => account.address),
+        },
       );
+      if (marketSnapshot) {
+        tradableTokens = await dbListTradableTokens(env.TRADINGBOT_DB);
+      }
     } catch (err: unknown) {
       console.warn(
         `Failed to load token market snapshot for ${settings.contractAddress}:`,
@@ -2351,8 +3291,9 @@ async function handleSaveSettings(
   const normalizedContractAddress = body.contractAddress.trim()
     ? normalizePubkey(body.contractAddress)
     : '';
+  let rpcUrls: string[] | null = null;
   if (normalizedContractAddress) {
-    const rpcUrls = await dbResolveSolanaRpcUrls(
+    rpcUrls = await dbResolveSolanaRpcUrls(
       env.TRADINGBOT_DB,
       user.id,
       env.SOLANA_RPC_URL,
@@ -2384,6 +3325,24 @@ async function handleSaveSettings(
     'settings',
     'Trading settings were updated',
   );
+
+  if (normalizedContractAddress && rpcUrls) {
+    try {
+      await syncTokenMarketSnapshotForUser(
+        env.TRADINGBOT_DB,
+        user.id,
+        'solana',
+        normalizedContractAddress,
+        rpcUrls,
+      );
+    } catch (err: unknown) {
+      console.warn(
+        `Failed to initialize market snapshot after saving settings for ${normalizedContractAddress}:`,
+        err,
+      );
+    }
+  }
+
   return jsonResponse(updated);
 }
 
@@ -2466,14 +3425,84 @@ async function handleAddTradableToken(
     { network: body.network, contractAddress: normalizedAddress },
     decimals,
   );
+  let marketSnapshot: TokenMarketSnapshot | null = null;
+  try {
+    marketSnapshot = await syncTokenMarketSnapshotForUser(
+      env.TRADINGBOT_DB,
+      user.id,
+      body.network,
+      normalizedAddress,
+      rpcUrls,
+      {
+        force: true,
+      },
+    );
+  } catch (err: unknown) {
+    console.warn(
+      `Failed to initialize live market data for ${normalizedAddress}:`,
+      err,
+    );
+  }
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
     'token.added',
     token.contractAddress,
-    `Added tradable token on ${token.network}`,
+    marketSnapshot
+      ? `Added tradable token on ${token.network} and recorded the initial market snapshot.`
+      : `Added tradable token on ${token.network}. Live market initialization will retry on the next refresh.`,
   );
-  return jsonResponse({ token }, 201);
+  return jsonResponse({ token, marketSnapshot }, 201);
+}
+
+// POST /api/market-snapshot/refresh
+async function handleForceRefreshMarketSnapshot(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+  const contractAddress = settings.contractAddress.trim();
+  if (!contractAddress) {
+    throw new ApiError(
+      400,
+      'Set an active trading token before forcing a live market refresh',
+    );
+  }
+
+  const rpcUrls = await dbResolveSolanaRpcUrls(
+    env.TRADINGBOT_DB,
+    user.id,
+    env.SOLANA_RPC_URL,
+  );
+  const marketSnapshot = await syncTokenMarketSnapshotForUser(
+    env.TRADINGBOT_DB,
+    user.id,
+    'solana',
+    contractAddress,
+    rpcUrls,
+    {
+      force: true,
+      fallbackToStoredOnError: false,
+    },
+  );
+
+  if (!marketSnapshot) {
+    throw new ApiError(
+      502,
+      'No live market data is available for the active trading token',
+    );
+  }
+
+  await dbAddAuditLog(
+    env.TRADINGBOT_DB,
+    user.id,
+    'market_snapshot.force_refreshed',
+    contractAddress,
+    'Forced a live market snapshot refresh and stored a new historical record.',
+  );
+
+  return jsonResponse({ marketSnapshot });
 }
 
 // POST /api/rpc-endpoints
@@ -2756,10 +3785,14 @@ async function handleApi(
       return await handleLogout(request, env);
     if (method === 'GET' && pathname === '/api/state')
       return await handleGetState(request, env);
+    if (method === 'POST' && pathname === '/api/webhooks/alchemy/notify')
+      return await handleAlchemyNotifyWebhook(request, url, env);
     if (method === 'POST' && pathname === '/api/settings')
       return await handleSaveSettings(request, env);
     if (method === 'POST' && pathname === '/api/tradable-tokens')
       return await handleAddTradableToken(request, env);
+    if (method === 'POST' && pathname === '/api/market-snapshot/refresh')
+      return await handleForceRefreshMarketSnapshot(request, env);
     if (method === 'POST' && pathname === '/api/rpc-endpoints')
       return await handleAddRpcEndpoint(request, env);
     if (method === 'POST' && pathname === '/api/private-keys/import')
