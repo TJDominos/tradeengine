@@ -91,7 +91,8 @@ Optional environment variables:
 | Variable | Description |
 |----------|-------------|
 | `SOLANA_RPC_URL` | Preferred Solana HTTP RPC endpoint for metadata, balances, and transaction enrichment. |
-| `ALCHEMY_WEBHOOK_SECRET` | Shared secret required by `/api/webhooks/alchemy/notify`. Configure the same value in the webhook URL or send it as a bearer token. |
+| `ALCHEMY_WEBHOOK_SIGNING_KEY` | Signing key from the Alchemy webhook detail page. The Worker verifies the `X-Alchemy-Signature` HMAC-SHA256 header against the raw request body. |
+| `ALCHEMY_WEBHOOK_SECRET` | Backward-compatible alias for `ALCHEMY_WEBHOOK_SIGNING_KEY`. Use only if you already deployed that variable name. |
 
 Set it with Wrangler:
 
@@ -155,12 +156,13 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 Use an Alchemy Notify webhook URL in this shape:
 
 ```text
-https://<your-worker-domain>/api/webhooks/alchemy/notify?secret=<ALCHEMY_WEBHOOK_SECRET>&contractAddress=<solana-token-mint>
+https://<your-worker-domain>/api/webhooks/alchemy/notify?contractAddress=<solana-token-mint>
 ```
 
-- `secret` must match the Worker environment variable `ALCHEMY_WEBHOOK_SECRET`.
+- Alchemy signs each request with `X-Alchemy-Signature`. The Worker verifies that signature using `ALCHEMY_WEBHOOK_SIGNING_KEY`.
+- Find the signing key in the Alchemy dashboard on the webhook detail page.
 - `contractAddress` is recommended because webhook payloads vary by product and chain. If the payload does not include a parsable Solana mint, this query parameter lets the Worker route the event to users whose active trading token matches that mint.
-- The endpoint stores the raw event in `signals`, refreshes market snapshots, and records a `strategy.triggered` audit log entry.
+- The endpoint stores the raw event in `signals`, refreshes market snapshots, records a `strategy.triggered` audit log entry, and returns `200` after successful verification and ingestion.
 
 ## Data model summary
 

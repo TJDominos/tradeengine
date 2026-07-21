@@ -14,7 +14,9 @@ export interface Env {
   PRIVATE_KEY_ENCRYPTION_KEY?: string;
   /** Optional Solana RPC URL. Falls back to the public mainnet endpoint. */
   SOLANA_RPC_URL?: string;
-  /** Shared secret used to protect the inbound Alchemy Notify webhook endpoint. */
+  /** Alchemy webhook signing key used to verify X-Alchemy-Signature. */
+  ALCHEMY_WEBHOOK_SIGNING_KEY?: string;
+  /** Backward-compatible alias for the Alchemy webhook signing key. */
   ALCHEMY_WEBHOOK_SECRET?: string;
 }
 
@@ -979,6 +981,14 @@ async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
 async function parseJsonBody<T>(request: Request): Promise<T> {
   try {
     return await request.json<T>();
+  } catch {
+    throw new ApiError(400, 'Request body must be valid JSON');
+  }
+}
+
+function parseJsonText<T>(body: string): T {
+  try {
+    return JSON.parse(body) as T;
   } catch {
     throw new ApiError(400, 'Request body must be valid JSON');
   }
@@ -2754,33 +2764,57 @@ async function dbListUserIdsByActiveContractAddress(
   return rows.results.map((row) => row.user_id);
 }
 
-function readBearerToken(request: Request): string | null {
-  const authorization = request.headers.get('Authorization')?.trim();
-  if (!authorization) {
-    return null;
+function resolveAlchemyWebhookSigningKey(env: Env): string {
+  const signingKey =
+    env.ALCHEMY_WEBHOOK_SIGNING_KEY?.trim() ||
+    env.ALCHEMY_WEBHOOK_SECRET?.trim();
+  if (!signingKey) {
+    throw new ApiError(
+      503,
+      'ALCHEMY_WEBHOOK_SIGNING_KEY is not configured',
+    );
   }
-  const prefix = 'Bearer ';
-  return authorization.startsWith(prefix)
-    ? authorization.slice(prefix.length).trim()
-    : null;
+  return signingKey;
 }
 
-function assertAlchemyWebhookAuthorized(
+function parseHexString(value: string): Uint8Array {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized.length % 2 !== 0 || /[^0-9a-f]/.test(normalized)) {
+    throw new ApiError(400, 'X-Alchemy-Signature must be a valid hex string');
+  }
+  const bytes = new Uint8Array(normalized.length / 2);
+  for (let index = 0; index < normalized.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(normalized.slice(index, index + 2), 16);
+  }
+  return bytes;
+}
+
+async function assertAlchemyWebhookSignature(
   request: Request,
-  url: URL,
   env: Env,
-): void {
-  const configuredSecret = env.ALCHEMY_WEBHOOK_SECRET?.trim();
-  if (!configuredSecret) {
-    throw new ApiError(503, 'ALCHEMY_WEBHOOK_SECRET is not configured');
+  rawBody: string,
+): Promise<void> {
+  const signature = request.headers.get('X-Alchemy-Signature')?.trim();
+  if (!signature) {
+    throw new ApiError(401, 'Missing X-Alchemy-Signature header');
   }
 
-  const providedSecret =
-    url.searchParams.get('secret')?.trim() ||
-    request.headers.get('X-Webhook-Secret')?.trim() ||
-    readBearerToken(request);
-  if (providedSecret !== configuredSecret) {
-    throw new ApiError(401, 'Alchemy webhook secret is invalid');
+  const signingKey = resolveAlchemyWebhookSigningKey(env);
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(signingKey),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify'],
+  );
+  const isValid = await crypto.subtle.verify(
+    'HMAC',
+    key,
+    parseHexString(signature),
+    new TextEncoder().encode(rawBody),
+  );
+  if (!isValid) {
+    throw new ApiError(401, 'Alchemy webhook signature is invalid');
   }
 }
 
@@ -2985,8 +3019,9 @@ async function handleAlchemyNotifyWebhook(
   url: URL,
   env: Env,
 ): Promise<Response> {
-  assertAlchemyWebhookAuthorized(request, url, env);
-  const payload = await parseJsonBody<AlchemyWebhookPayload>(request);
+  const rawBody = await request.text();
+  await assertAlchemyWebhookSignature(request, env, rawBody);
+  const payload = parseJsonText<AlchemyWebhookPayload>(rawBody);
   const contractFromQuery = tryNormalizeSolanaPubkey(
     url.searchParams.get('contractAddress'),
   );
@@ -3064,7 +3099,7 @@ async function handleAlchemyNotifyWebhook(
       duplicates,
       ignored,
     },
-    202,
+    200,
   );
 }
 
