@@ -25,12 +25,18 @@ const DEFAULT_SOLANA_DERIVATION_PATH = "m/44'/501'/0'/0'";
 const DEFAULT_SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com';
 const SOLANA_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const WALLET_BALANCE_CACHE_TTL_MS = 30_000;
+const TOKEN_MARKET_CACHE_TTL_MS = 30_000;
 const BASE58_ALPHABET =
   '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
 const walletBalanceCache = new Map<
   string,
   { expiresAt: number; value: WalletBalanceResponse }
+>();
+
+const tokenMarketCache = new Map<
+  string,
+  { expiresAt: number; value: TokenMarketSnapshot }
 >();
 
 // ─── types (mirror frontend type shapes) ─────────────────────────────────────
@@ -109,6 +115,20 @@ interface RpcEndpoint {
   network: string;
   url: string;
   createdAt: number;
+}
+
+interface TokenMarketSnapshot {
+  network: string;
+  contractAddress: string;
+  tokenName: string | null;
+  tokenSymbol: string | null;
+  priceUsd: number | null;
+  liquidityUsd: number | null;
+  fdv: number | null;
+  volume24h: number | null;
+  totalTransactions24h: number | null;
+  dexId: string | null;
+  pairAddress: string | null;
 }
 
 interface HistoricalSetupRecord {
@@ -573,6 +593,43 @@ function writeWalletBalanceCache(
   });
 }
 
+function tokenMarketCacheKey(network: string, contractAddress: string): string {
+  return `${network}:${contractAddress}`;
+}
+
+function readTokenMarketCache(
+  cacheKey: string,
+): TokenMarketSnapshot | null {
+  const cached = tokenMarketCache.get(cacheKey);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    tokenMarketCache.delete(cacheKey);
+    return null;
+  }
+  return cached.value;
+}
+
+function writeTokenMarketCache(
+  cacheKey: string,
+  value: TokenMarketSnapshot,
+): void {
+  tokenMarketCache.set(cacheKey, {
+    expiresAt: Date.now() + TOKEN_MARKET_CACHE_TTL_MS,
+    value,
+  });
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 // ─── input validation ─────────────────────────────────────────────────────────
 
 function validateLabel(label: string): void {
@@ -696,6 +753,17 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     created_at INTEGER NOT NULL,
     UNIQUE(network, contract_address)
   )`,
+  `CREATE TABLE IF NOT EXISTS positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet_address TEXT NOT NULL,
+    token_id INTEGER NOT NULL,
+    quantity REAL NOT NULL DEFAULT 0,
+    avg_cost REAL NOT NULL DEFAULT 0,
+    realized_pnl REAL NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(wallet_address, token_id),
+    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id)
+  )`,
   `CREATE TABLE IF NOT EXISTS trade_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id INTEGER NOT NULL,
@@ -741,6 +809,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     UNIQUE(user_id, network, url),
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
   )`,
+  'CREATE INDEX IF NOT EXISTS idx_positions_wallet ON positions(wallet_address)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_token_created ON trade_logs(token_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_wallet_created ON trade_logs(wallet_address, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_user_network_created ON rpc_endpoints(user_id, network, created_at DESC)',
@@ -1669,6 +1738,42 @@ async function dbGetLatestHistoricalSetupId(
   return row?.id ?? null;
 }
 
+async function dbComputeManagedProfitUsdc(
+  db: D1Database,
+  userId: number,
+  contractAddress: string,
+  currentPriceUsd: number | null,
+): Promise<number> {
+  await dbEnsureTradeDomainSchema(db);
+  const tokenId = await dbResolveTradableTokenId(db, contractAddress);
+  if (!tokenId) {
+    return 0;
+  }
+
+  const rows = await db
+    .prepare(
+      `SELECT p.quantity, p.avg_cost, p.realized_pnl
+       FROM positions p
+       INNER JOIN accounts a ON a.wallet_address = p.wallet_address
+       WHERE a.user_id = ?1 AND a.type = 'managed' AND p.token_id = ?2`,
+    )
+    .bind(userId, tokenId)
+    .all<{
+      quantity: number;
+      avg_cost: number;
+      realized_pnl: number;
+    }>();
+
+  let profitUsdc = 0;
+  for (const row of rows.results) {
+    profitUsdc += row.realized_pnl ?? 0;
+    if (currentPriceUsd != null) {
+      profitUsdc += (currentPriceUsd - (row.avg_cost ?? 0)) * (row.quantity ?? 0);
+    }
+  }
+  return profitUsdc;
+}
+
 async function dbListHistoricalSetups(
   db: D1Database,
   userId: number,
@@ -1735,6 +1840,99 @@ async function dbUserOwnsAccount(
     .bind(userId, address)
     .first<{ id: number }>();
   return !!row;
+}
+
+async function fetchTokenMarketSnapshot(
+  network: string,
+  contractAddress: string,
+): Promise<TokenMarketSnapshot | null> {
+  const normalizedNetwork = network.trim().toLowerCase();
+  if (normalizedNetwork !== 'solana') {
+    return null;
+  }
+
+  const normalizedAddress = normalizePubkey(contractAddress);
+  const cacheKey = tokenMarketCacheKey(normalizedNetwork, normalizedAddress);
+  const cached = readTokenMarketCache(cacheKey);
+  if (cached) return cached;
+
+  const response = await fetch(
+    `https://api.dexscreener.com/latest/dex/tokens/${normalizedAddress}`,
+    {
+      headers: { Accept: 'application/json' },
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`DexScreener request failed with ${response.status}`);
+  }
+
+  const body = await response.json<{
+    pairs?: Array<{
+      chainId?: string;
+      dexId?: string;
+      pairAddress?: string;
+      baseToken?: { address?: string; name?: string; symbol?: string };
+      quoteToken?: { address?: string; name?: string; symbol?: string };
+      priceUsd?: string;
+      fdv?: number | string;
+      liquidity?: { usd?: number | string };
+      volume?: { h24?: number | string };
+      txns?: { h24?: { buys?: number | string; sells?: number | string } };
+    }>;
+  }>();
+
+  const targetAddress = normalizedAddress.toLowerCase();
+  const candidatePairs = (body.pairs ?? []).filter((pair) => {
+    if ((pair.chainId ?? '').toLowerCase() !== normalizedNetwork) {
+      return false;
+    }
+    return (
+      pair.baseToken?.address?.toLowerCase() === targetAddress ||
+      pair.quoteToken?.address?.toLowerCase() === targetAddress
+    );
+  });
+
+  if (candidatePairs.length === 0) {
+    return null;
+  }
+
+  const baseSidePairs = candidatePairs.filter(
+    (pair) => pair.baseToken?.address?.toLowerCase() === targetAddress,
+  );
+  const rankedPairs = (baseSidePairs.length > 0 ? baseSidePairs : candidatePairs)
+    .slice()
+    .sort(
+      (left, right) =>
+        (toFiniteNumber(right.liquidity?.usd) ?? -1) -
+        (toFiniteNumber(left.liquidity?.usd) ?? -1),
+    );
+  const bestPair = rankedPairs[0];
+
+  const tokenSide =
+    bestPair.baseToken?.address?.toLowerCase() === targetAddress
+      ? bestPair.baseToken
+      : bestPair.quoteToken;
+  const totalTransactions24h =
+    (toFiniteNumber(bestPair.txns?.h24?.buys) ?? 0) +
+    (toFiniteNumber(bestPair.txns?.h24?.sells) ?? 0);
+
+  const snapshot: TokenMarketSnapshot = {
+    network: normalizedNetwork,
+    contractAddress: normalizedAddress,
+    tokenName: tokenSide?.name ?? null,
+    tokenSymbol: tokenSide?.symbol ?? null,
+    priceUsd: toFiniteNumber(bestPair.priceUsd),
+    liquidityUsd: toFiniteNumber(bestPair.liquidity?.usd),
+    fdv: toFiniteNumber(bestPair.fdv),
+    volume24h: toFiniteNumber(bestPair.volume?.h24),
+    totalTransactions24h,
+    dexId: bestPair.dexId ?? null,
+    pairAddress: bestPair.pairAddress ?? null,
+  };
+
+  writeTokenMarketCache(cacheKey, snapshot);
+  return snapshot;
 }
 
 async function solanaRpc<T>(
@@ -2073,8 +2271,8 @@ async function handleLogout(request: Request, env: Env): Promise<Response> {
 // GET /api/state
 async function handleGetState(request: Request, env: Env): Promise<Response> {
   const user = await requireUser(request, env);
+  const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
   const [
-    settings,
     internalAccs,
     outsiderAccs,
     activityLogs,
@@ -2084,7 +2282,6 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     rpcEndpoints,
   ] =
     await Promise.all([
-      dbLoadSettings(env.TRADINGBOT_DB, user.id),
       dbListAccounts(env.TRADINGBOT_DB, user.id, 'managed'),
       dbListAccounts(env.TRADINGBOT_DB, user.id, 'watch'),
       dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
@@ -2093,6 +2290,31 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
       dbListHistoricalSetups(env.TRADINGBOT_DB, user.id),
       dbListRpcEndpoints(env.TRADINGBOT_DB, user.id),
     ]);
+
+  let marketSnapshot: TokenMarketSnapshot | null = null;
+  if (settings.contractAddress.trim()) {
+    try {
+      marketSnapshot = await fetchTokenMarketSnapshot(
+        'solana',
+        settings.contractAddress,
+      );
+    } catch (err: unknown) {
+      console.warn(
+        `Failed to load token market snapshot for ${settings.contractAddress}:`,
+        err,
+      );
+    }
+  }
+
+  const profitUsdc = settings.contractAddress.trim()
+    ? await dbComputeManagedProfitUsdc(
+        env.TRADINGBOT_DB,
+        user.id,
+        settings.contractAddress,
+        marketSnapshot?.priceUsd ?? null,
+      )
+    : 0;
+
   return jsonResponse({
     auth: { username: user.username, role: user.role },
     settings,
@@ -2104,6 +2326,8 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     tradableTokens,
     historicalSetups,
     rpcEndpoints,
+    marketSnapshot,
+    profitUsdc,
     stats: {
       managedAccounts: internalAccs.length,
       watchedAccounts: outsiderAccs.length,

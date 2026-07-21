@@ -81,6 +81,20 @@ type RpcEndpoint = {
   createdAt: number;
 };
 
+type TokenMarketSnapshot = {
+  network: string;
+  contractAddress: string;
+  tokenName: string | null;
+  tokenSymbol: string | null;
+  priceUsd: number | null;
+  liquidityUsd: number | null;
+  fdv: number | null;
+  volume24h: number | null;
+  totalTransactions24h: number | null;
+  dexId: string | null;
+  pairAddress: string | null;
+};
+
 type TradableToken = {
   id: number;
   network: string;
@@ -131,6 +145,8 @@ type EngineState = {
   tradableTokens: TradableToken[];
   historicalSetups: HistoricalSetup[];
   rpcEndpoints: RpcEndpoint[];
+  marketSnapshot: TokenMarketSnapshot | null;
+  profitUsdc: number;
   stats: {
     managedAccounts: number;
     watchedAccounts: number;
@@ -156,6 +172,8 @@ type AccountSummary = {
   trackedWallets: number;
   trackedTokenLines: number;
 };
+
+type DashboardLogTab = 'transaction' | 'activity';
 
 const CONTRACT_ADDRESS = '';
 const ITEMS_PER_PAGE = 20;
@@ -186,6 +204,21 @@ const formatUSD = (value: number) =>
 
 const formatNum = (value: number) =>
   new Intl.NumberFormat('en-US', { maximumFractionDigits: 4 }).format(value);
+
+const formatLivePrice = (value: number | null | undefined) => {
+  if (value == null) return 'Unavailable';
+  const maximumFractionDigits = value >= 1 ? 4 : value >= 0.01 ? 6 : 8;
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits,
+  }).format(value);
+};
+
+function formatOptionalUsd(value: number | null | undefined): string {
+  return value == null ? 'Unavailable' : formatUSD(value);
+}
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -242,6 +275,12 @@ function walletHasAssets(balance?: WalletBalance): boolean {
   return balance.tokens.some((token) => parseAmount(token.amount) > 0);
 }
 
+function findWalletTokenAmount(balance: WalletBalance | undefined, mint: string): number {
+  if (!balance) return 0;
+  const token = balance.tokens.find((entry) => entry.mint === mint);
+  return parseAmount(token?.amount);
+}
+
 function summarizeAccounts(
   accounts: AccountRecord[],
   balances: Record<string, WalletBalance>,
@@ -283,25 +322,6 @@ function getLogsForSetup(
   return logs
     .filter((log) => log.createdAt >= current.createdAt && log.createdAt < newerBoundary)
     .slice(0, 8);
-}
-
-function loadStoredList(key: string): string[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === 'string')
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveStoredList(key: string, values: string[]) {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(key, JSON.stringify(values));
 }
 
 function loadStoredString(key: string, fallback: string): string {
@@ -518,106 +538,6 @@ function SettingInput({
   );
 }
 
-function ComboInput({
-  value,
-  onChange,
-  onSave,
-  onDelete,
-  savedItems,
-  placeholder,
-  labelText,
-  statusText,
-  saveLabel = 'Save',
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  onSave: () => void;
-  onDelete: (item: string) => void;
-  savedItems: string[];
-  placeholder: string;
-  labelText?: string;
-  statusText?: string;
-  saveLabel?: string;
-}) {
-  const [isOpen, setIsOpen] = React.useState(false);
-  const containerRef = React.useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
-        setIsOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  return (
-    <div className="relative" ref={containerRef}>
-      {labelText ? (
-        <label className="mb-1.5 flex justify-between text-xs font-medium uppercase tracking-wider text-slate-400">
-          {labelText}
-          {statusText ? (
-            <span className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] normal-case text-blue-400">
-              {statusText}
-            </span>
-          ) : null}
-        </label>
-      ) : null}
-      <div className="flex gap-2">
-        <div className="relative flex-1">
-          <input
-            type="text"
-            value={value}
-            onChange={(event) => {
-              onChange(event.target.value);
-              setIsOpen(true);
-            }}
-            onFocus={() => setIsOpen(true)}
-            placeholder={placeholder}
-            className="h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 font-mono text-sm text-slate-300 outline-none focus:border-blue-500"
-          />
-          {isOpen && savedItems.length > 0 ? (
-            <ul className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded-md border border-slate-700 bg-slate-900 shadow-lg">
-              {savedItems.map((item) => (
-                <li
-                  key={item}
-                  className="group flex cursor-pointer items-center justify-between px-3 py-2 text-sm font-mono text-slate-300 hover:bg-slate-800"
-                >
-                  <span
-                    className="flex-1 overflow-hidden text-ellipsis"
-                    onClick={() => {
-                      onChange(item);
-                      setIsOpen(false);
-                    }}
-                  >
-                    {item}
-                  </span>
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onDelete(item);
-                    }}
-                    className="p-1 text-slate-500 opacity-0 hover:text-rose-400 group-hover:opacity-100"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-        <button
-          onClick={onSave}
-          className="cursor-pointer whitespace-nowrap rounded-md border border-blue-500/30 bg-blue-600/20 px-4 text-sm font-medium text-blue-400 hover:bg-blue-600/30"
-        >
-          {saveLabel}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function SummaryBlock({
   title,
   icon,
@@ -740,6 +660,7 @@ export default function App() {
   const [accountSearchTerm, setAccountSearchTerm] = React.useState('');
   const [internalPage, setInternalPage] = React.useState(1);
   const [outsiderPage, setOutsiderPage] = React.useState(1);
+  const [dashboardLogTab, setDashboardLogTab] = React.useState<DashboardLogTab>('transaction');
   const [transactionLogSearchTerm, setTransactionLogSearchTerm] = React.useState('');
   const [activityLogSearchTerm, setActivityLogSearchTerm] = React.useState('');
   const [transactionLogCurrentPage, setTransactionLogCurrentPage] = React.useState(1);
@@ -760,10 +681,13 @@ export default function App() {
     strategyNotes: '',
     managedKeyCount: 0,
   });
+  const [tradableTokenForm, setTradableTokenForm] = React.useState({
+    network: 'solana',
+    contractAddress: '',
+  });
   const [rpcEndpointForm, setRpcEndpointForm] = React.useState({ url: '' });
   const [accountForm, setAccountForm] = React.useState({ label: '', address: '' });
 
-  const [savedContractAddresses, setSavedContractAddresses] = React.useState<string[]>([]);
   const [tradingAlgorithm, setTradingAlgorithm] = React.useState(workerAlgorithmTemplate);
   const [submitting, setSubmitting] = React.useState<string | null>(null);
 
@@ -788,7 +712,6 @@ export default function App() {
   const hasDateRange = dateRange.from !== '' && dateRange.to !== '';
 
   useEffect(() => {
-    setSavedContractAddresses(loadStoredList('tradeengine.savedContractAddresses'));
     setTradingAlgorithm(loadStoredString('tradeengine.tradingAlgorithm', workerAlgorithmTemplate));
   }, []);
 
@@ -897,21 +820,6 @@ export default function App() {
     }
   };
 
-  const saveContractAddress = () => {
-    const value = settings.contractAddress.trim();
-    if (!value) return;
-    const next = [value, ...savedContractAddresses.filter((item) => item !== value)].slice(0, 12);
-    setSavedContractAddresses(next);
-    saveStoredList('tradeengine.savedContractAddresses', next);
-    setNotice('Saved contract address shortcut.');
-  };
-
-  const deleteSavedContractAddress = (value: string) => {
-    const next = savedContractAddresses.filter((item) => item !== value);
-    setSavedContractAddresses(next);
-    saveStoredList('tradeengine.savedContractAddresses', next);
-  };
-
   const handleBootstrap = () =>
     submitWithFeedback('bootstrap', async () => {
       await api('/api/auth/bootstrap', {
@@ -991,6 +899,20 @@ export default function App() {
         method: 'DELETE',
       });
       setNotice('RPC endpoint removed.');
+      await refresh();
+    });
+
+  const handleAddTrackedToken = () =>
+    submitWithFeedback('token', async () => {
+      await api('/api/tradable-tokens', {
+        method: 'POST',
+        body: JSON.stringify({
+          network: tradableTokenForm.network,
+          contractAddress: tradableTokenForm.contractAddress,
+        }),
+      });
+      setTradableTokenForm((current) => ({ ...current, contractAddress: '' }));
+      setNotice('Tracked token added successfully.');
       await refresh();
     });
 
@@ -1288,6 +1210,32 @@ export default function App() {
     activityLogCurrentPage * ITEMS_PER_PAGE,
   );
 
+  const activeTokenContractAddress = settings.contractAddress.trim();
+  const activeTrackedToken = engineState.tradableTokens.find(
+    (token) => token.contractAddress === activeTokenContractAddress,
+  );
+  const activeTokenSymbol =
+    activeTrackedToken?.symbol ?? engineState.marketSnapshot?.tokenSymbol ?? 'WLT';
+  const activeTokenName =
+    engineState.marketSnapshot?.tokenName ?? activeTrackedToken?.name ?? activeTokenSymbol;
+  const totalInternalTokenAmount = activeTokenContractAddress
+    ? engineState.internalAccs.reduce(
+        (sum, account) =>
+          sum + findWalletTokenAmount(walletBalances[account.address], activeTokenContractAddress),
+        0,
+      )
+    : 0;
+  const totalOutsidersOverOneUsd =
+    activeTokenContractAddress && engineState.marketSnapshot?.priceUsd != null
+      ? engineState.outsiderAccs.filter((account) => {
+          const tokenAmount = findWalletTokenAmount(
+            walletBalances[account.address],
+            activeTokenContractAddress,
+          );
+          return tokenAmount * engineState.marketSnapshot!.priceUsd! > 1;
+        }).length
+      : 0;
+
   const managedWallets = engineState.internalAccs;
 
   const renderTransactionLogs = () => (
@@ -1434,25 +1382,61 @@ export default function App() {
     </div>
   );
 
+  const renderDashboardLogs = () => (
+    <div className="space-y-4">
+      <div className="inline-flex rounded-xl border border-slate-800 bg-slate-900 p-1 shadow-sm">
+        <TabButton
+          active={dashboardLogTab === 'transaction'}
+          onClick={() => setDashboardLogTab('transaction')}
+          icon={<FileText size={14} />}
+          label="Transaction Log"
+        />
+        <TabButton
+          active={dashboardLogTab === 'activity'}
+          onClick={() => setDashboardLogTab('activity')}
+          icon={<Activity size={14} />}
+          label="Activity Log"
+        />
+      </div>
+      {dashboardLogTab === 'transaction' ? renderTransactionLogs() : renderActivityLogs()}
+    </div>
+  );
+
   const renderDashboard = () => (
     <div className="space-y-6">
       <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange} />
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        <StatCard title="Contract Address" value={settings.contractAddress || CONTRACT_ADDRESS || 'Not Configured'} isAddress />
-        <StatCard title="Managed Wallets" value={String(engineState.stats.managedAccounts)} />
-        <StatCard title="Watch Accounts" value={String(engineState.stats.watchedAccounts)} />
-        <StatCard title="Tracked Tokens" value={String(engineState.tradableTokens.length)} />
-        <StatCard title="Historical Setups" value={String(engineState.historicalSetups.length)} />
-        <StatCard title="Database State" value={engineState.system.databaseConnected ? 'Connected' : 'Offline'} subtitle={engineState.system.databasePath} />
-        <StatCard title="Primary Time Range" value={settings.timeRangeTarget} />
-        <StatCard title="Tracked Contract" value={settings.contractAddress ? compactAddress(settings.contractAddress) : 'None'} copyable />
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <StatCard title="Token Contract Address" value={settings.contractAddress || CONTRACT_ADDRESS || 'Not Configured'} isAddress />
+        <StatCard
+          title={`Total ${activeTokenSymbol} Amount (Internal)`}
+          value={activeTokenContractAddress ? formatNum(totalInternalTokenAmount) : 'Not Configured'}
+          subtitle={`${engineState.stats.managedAccounts} internal wallet(s)`}
+        />
+        <StatCard title="Profit (USDC)" value={formatUSD(engineState.profitUsdc)} />
+        <StatCard title="FDV" value={formatOptionalUsd(engineState.marketSnapshot?.fdv)} />
+        <StatCard
+          title={`Price: ${activeTokenName} (Live)`}
+          value={formatLivePrice(engineState.marketSnapshot?.priceUsd)}
+          subtitle={engineState.marketSnapshot?.dexId ? `Source: ${engineState.marketSnapshot.dexId}` : 'Live market source unavailable'}
+        />
+        <StatCard
+          title="Liquidity (USDC)"
+          value={formatOptionalUsd(engineState.marketSnapshot?.liquidityUsd)}
+        />
+        <StatCard
+          title="Total Outsiders (>$1)"
+          value={engineState.marketSnapshot?.priceUsd != null ? String(totalOutsidersOverOneUsd) : 'Unavailable'}
+          subtitle={engineState.marketSnapshot?.priceUsd != null ? `At ${formatLivePrice(engineState.marketSnapshot.priceUsd)}` : 'Live price unavailable'}
+        />
+        <StatCard
+          title="Number of Transaction and Volumes"
+          value={engineState.marketSnapshot?.totalTransactions24h != null ? formatNum(engineState.marketSnapshot.totalTransactions24h) : 'Unavailable'}
+          subtitle={engineState.marketSnapshot?.volume24h != null ? `24h volume ${formatUSD(engineState.marketSnapshot.volume24h)}` : '24h volume unavailable'}
+        />
       </div>
 
-      <div className="mt-8 grid grid-cols-1 gap-6 2xl:grid-cols-2">
-        {renderTransactionLogs()}
-        {renderActivityLogs()}
-      </div>
+      <div className="mt-8">{renderDashboardLogs()}</div>
     </div>
   );
 
@@ -1539,22 +1523,55 @@ export default function App() {
         </h3>
 
         <div className="space-y-4">
-          <ComboInput
-            value={settings.contractAddress}
-            onChange={(value) => setSettings((current) => ({ ...current, contractAddress: value }))}
-            onSave={saveContractAddress}
-            onDelete={deleteSavedContractAddress}
-            savedItems={savedContractAddresses}
-            placeholder="Solana token mint address"
-            labelText="Trading Token (Solana + Contract Address)"
-            statusText={`${engineState.tradableTokens.length} tracked token(s)`}
-            saveLabel="Save Shortcut"
-          />
-
           <p className="rounded-md border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs leading-relaxed text-slate-400">
-            Saving the configuration with a new contract address automatically adds that token to the tracked registry.
+            Add a token below, then use the token registry to switch the active trading contract.
             Updating the active trading token never deletes historical transaction records.
           </p>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
+            <div>
+              <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
+                Add Trading Token
+              </label>
+              <p className="text-xs text-slate-500">
+                Add tracked tokens explicitly with separate network and contract address fields.
+              </p>
+            </div>
+
+            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[150px_minmax(0,1fr)_auto]">
+              <select
+                value={tradableTokenForm.network}
+                onChange={(event) =>
+                  setTradableTokenForm((current) => ({
+                    ...current,
+                    network: event.target.value,
+                  }))
+                }
+                className="h-10 rounded-md border border-slate-700 bg-slate-950 px-3 text-sm outline-none focus:border-blue-500"
+              >
+                <option value="solana">Solana</option>
+              </select>
+              <input
+                type="text"
+                value={tradableTokenForm.contractAddress}
+                onChange={(event) =>
+                  setTradableTokenForm((current) => ({
+                    ...current,
+                    contractAddress: event.target.value,
+                  }))
+                }
+                placeholder="Token contract address"
+                className="h-10 rounded-md border border-slate-700 bg-slate-950 px-3 font-mono text-sm outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={handleAddTrackedToken}
+                disabled={submitting === 'token'}
+                className="flex h-10 items-center justify-center gap-2 rounded-md bg-emerald-600 px-4 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+              >
+                <Plus size={14} /> Add Token
+              </button>
+            </div>
+          </div>
 
           <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
             <div className="flex items-start justify-between gap-3">
