@@ -99,6 +99,9 @@ Set it with Wrangler:
 ```bash
 npx wrangler secret put PRIVATE_KEY_ENCRYPTION_KEY
 # then paste your 32-byte value (generate one with: openssl rand -base64 32)
+
+npx wrangler secret put ALCHEMY_WEBHOOK_SIGNING_KEY
+# paste the signing key from the Alchemy webhook detail page
 ```
 
 ## Local development
@@ -146,7 +149,7 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 | GET | `/api/state` | Yes | Full engine state (includes configured tradable tokens) |
 | POST | `/api/settings` | Admin | Save trading settings |
 | POST | `/api/market-snapshot/refresh` | Admin | Force a live market fetch for the active trading token and store a new historical snapshot |
-| POST | `/api/webhooks/alchemy/notify` | No | Ingest an Alchemy Notify webhook, persist `signals`, and trigger strategy evaluation for matching active tokens |
+| POST | `/api/webhooks/alchemy/notify` | No | Verify the webhook signature, return `200`, then persist `signals` and trigger strategy evaluation in the background with D1-backed idempotency |
 | POST | `/api/private-keys/import` | Admin | Import + encrypt a managed private key |
 | POST | `/api/accounts/import` | Admin | Import a watch-only account |
 | POST | `/api/trade` | Admin | Trade (returns 501 – not implemented) |
@@ -161,8 +164,10 @@ https://<your-worker-domain>/api/webhooks/alchemy/notify?contractAddress=<solana
 
 - Alchemy signs each request with `X-Alchemy-Signature`. The Worker verifies that signature using `ALCHEMY_WEBHOOK_SIGNING_KEY`.
 - Find the signing key in the Alchemy dashboard on the webhook detail page.
+- The Worker acknowledges the webhook immediately and continues the database work in `ctx.waitUntil(...)`.
+- D1 `signals` is the source of truth for idempotency. New events enter the table in an in-progress state, successful events are marked processed, and failed events fall back to retryable state for later webhook retries.
 - `contractAddress` is recommended because webhook payloads vary by product and chain. If the payload does not include a parsable Solana mint, this query parameter lets the Worker route the event to users whose active trading token matches that mint.
-- The endpoint stores the raw event in `signals`, refreshes market snapshots, records a `strategy.triggered` audit log entry, and returns `200` after successful verification and ingestion.
+- The endpoint stores the raw event in `signals`, refreshes market snapshots, records a `strategy.triggered` audit log entry, and keeps D1 as the auditable source of truth for business processing.
 
 ## Data model summary
 

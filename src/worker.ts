@@ -150,6 +150,7 @@ interface SignalRecord {
   txSignature: string | null;
   payload: string;
   processed: boolean;
+  processedState: number;
   processedAt: number | null;
   errorMessage: string | null;
   retryCount: number;
@@ -2001,6 +2002,7 @@ async function dbCreateSignal(
         txSignature: existing.tx_signature,
         payload: existing.payload,
         processed: existing.processed === 1,
+        processedState: existing.processed,
         processedAt: existing.processed_at,
         errorMessage: existing.error_message,
         retryCount: existing.retry_count,
@@ -2024,7 +2026,7 @@ async function dbCreateSignal(
         error_message,
         retry_count,
         created_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, NULL, 0, ?7)`,
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, NULL, NULL, 0, ?7)`,
     )
     .bind(
       input.source,
@@ -2048,12 +2050,32 @@ async function dbCreateSignal(
       txSignature: input.txSignature,
       payload: input.payload,
       processed: false,
+      processedState: 2,
       processedAt: null,
       errorMessage: null,
       retryCount: 0,
       createdAt,
     },
   };
+}
+
+async function dbClaimSignalProcessing(
+  db: D1Database,
+  source: string,
+  externalId: string,
+): Promise<boolean> {
+  await dbEnsureTradeDomainSchema(db);
+  const result = await db
+    .prepare(
+      `UPDATE signals
+       SET processed = 2,
+           processed_at = NULL,
+           error_message = NULL
+       WHERE source = ?1 AND external_id = ?2 AND processed = 0`,
+    )
+    .bind(source, externalId)
+    .run();
+  return (result.meta?.changes ?? 0) > 0;
 }
 
 async function dbMarkSignalProcessed(
@@ -2084,7 +2106,9 @@ async function dbMarkSignalFailed(
   await db
     .prepare(
       `UPDATE signals
-       SET error_message = ?3,
+       SET processed = 0,
+           processed_at = NULL,
+           error_message = ?3,
            retry_count = retry_count + 1
        WHERE source = ?1 AND external_id = ?2`,
     )
@@ -2949,7 +2973,7 @@ async function processTokenActivitySignal(
   },
 ): Promise<boolean> {
   const normalizedContractAddress = normalizePubkey(input.contractAddress);
-  const { inserted } = await dbCreateSignal(env.TRADINGBOT_DB, {
+  const { inserted, signal } = await dbCreateSignal(env.TRADINGBOT_DB, {
     source: input.source,
     externalId: input.externalId,
     eventType: input.eventType,
@@ -2959,7 +2983,17 @@ async function processTokenActivitySignal(
   });
 
   if (!inserted) {
-    return false;
+    if (signal.processed) {
+      return false;
+    }
+    const claimed = await dbClaimSignalProcessing(
+      env.TRADINGBOT_DB,
+      input.source,
+      input.externalId,
+    );
+    if (!claimed) {
+      return false;
+    }
   }
 
   try {
@@ -3014,21 +3048,18 @@ async function processTokenActivitySignal(
   }
 }
 
-async function handleAlchemyNotifyWebhook(
-  request: Request,
-  url: URL,
+async function processAlchemyNotifyWebhookPayload(
   env: Env,
-): Promise<Response> {
-  const rawBody = await request.text();
-  await assertAlchemyWebhookSignature(request, env, rawBody);
-  const payload = parseJsonText<AlchemyWebhookPayload>(rawBody);
-  const contractFromQuery = tryNormalizeSolanaPubkey(
-    url.searchParams.get('contractAddress'),
-  );
-  const derivedSignals = deriveAlchemySignalsFromPayload(
-    payload,
-    contractFromQuery,
-  );
+  payload: AlchemyWebhookPayload,
+  contractFromQuery: string | null,
+  derivedSignals: DerivedChainSignal[],
+): Promise<{
+  received: number;
+  routedTargets: number;
+  processed: number;
+  duplicates: number;
+  ignored: number;
+}> {
   const webhookId = readNonEmptyString(payload.webhookId) ?? 'shared';
   const targetCache = new Map<string, number[]>();
 
@@ -3090,17 +3121,44 @@ async function handleAlchemyNotifyWebhook(
     }
   }
 
-  return jsonResponse(
-    {
-      ok: true,
-      received: derivedSignals.length,
-      routedTargets,
-      processed,
-      duplicates,
-      ignored,
-    },
-    200,
+  return {
+    received: derivedSignals.length,
+    routedTargets,
+    processed,
+    duplicates,
+    ignored,
+  };
+}
+
+async function handleAlchemyNotifyWebhook(
+  request: Request,
+  url: URL,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const rawBody = await request.text();
+  await assertAlchemyWebhookSignature(request, env, rawBody);
+  const payload = parseJsonText<AlchemyWebhookPayload>(rawBody);
+  const contractFromQuery = tryNormalizeSolanaPubkey(
+    url.searchParams.get('contractAddress'),
   );
+  const derivedSignals = deriveAlchemySignalsFromPayload(
+    payload,
+    contractFromQuery,
+  );
+
+  ctx.waitUntil(
+    processAlchemyNotifyWebhookPayload(
+      env,
+      payload,
+      contractFromQuery,
+      derivedSignals,
+    ).catch((err) => {
+      console.error('Alchemy webhook background processing failed:', err);
+    }),
+  );
+
+  return jsonResponse({ ok: true, accepted: true }, 200);
 }
 
 // ─── route handlers ───────────────────────────────────────────────────────────
@@ -3803,6 +3861,7 @@ async function handleApi(
   request: Request,
   url: URL,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<Response> {
   const { pathname } = url;
   const { method } = request;
@@ -3821,7 +3880,7 @@ async function handleApi(
     if (method === 'GET' && pathname === '/api/state')
       return await handleGetState(request, env);
     if (method === 'POST' && pathname === '/api/webhooks/alchemy/notify')
-      return await handleAlchemyNotifyWebhook(request, url, env);
+      return await handleAlchemyNotifyWebhook(request, url, env, ctx);
     if (method === 'POST' && pathname === '/api/settings')
       return await handleSaveSettings(request, env);
     if (method === 'POST' && pathname === '/api/tradable-tokens')
@@ -3855,11 +3914,15 @@ async function handleApi(
 // ─── Worker entry point ───────────────────────────────────────────────────────
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith('/api/')) {
-      return handleApi(request, url, env);
+      return handleApi(request, url, env, ctx);
     }
 
     // Pass all other requests through to the static assets binding
