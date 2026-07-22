@@ -2737,6 +2737,42 @@ function mapStrategyVersionRow(row: {
   };
 }
 
+function mapStrategyEvaluationRow(row: {
+  id: number;
+  user_id: number;
+  strategy_version_id: number;
+  version_no: number;
+  source: string;
+  event_type: string;
+  external_id: string | null;
+  contract_address: string;
+  wallet_address: string | null;
+  tx_signature: string | null;
+  status: string;
+  should_execute: number;
+  dry_run: number;
+  summary_json: string;
+  created_at: number;
+}) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    strategyVersionId: row.strategy_version_id,
+    strategyVersionNo: row.version_no,
+    source: row.source,
+    eventType: row.event_type,
+    externalId: row.external_id,
+    contractAddress: row.contract_address,
+    walletAddress: row.wallet_address,
+    txSignature: row.tx_signature,
+    status: row.status,
+    shouldExecute: row.should_execute === 1,
+    dryRun: row.dry_run === 1,
+    summary: parseJsonText<Record<string, unknown>>(row.summary_json),
+    createdAt: row.created_at,
+  };
+}
+
 async function dbGetOrCreatePrimaryStrategyDefinition(
   db: D1Database,
   userId: number,
@@ -2883,23 +2919,33 @@ async function dbGetActiveStrategyVersion(
   return dbGetStrategyVersionById(db, definition.currentVersionId);
 }
 
-async function dbSyncActiveStrategyVersionFromSettings(
+function mapStrategyDocumentToSettingsUpdate(
+  document: StrategyVersionDocument,
+): SettingsUpdateRequest {
+  return {
+    contractAddress: document.parameters.contractAddress,
+    volatilityTarget: document.targets.volatilityPctMin,
+    pullbackTarget: document.targets.pullbackPctMax,
+    volumeTarget: document.targets.volumeUsdMin,
+    netBuyinTarget: document.targets.netBuyinUsdMin,
+    timeRangeTarget: document.parameters.timeRangeTarget,
+    maxTransactions: document.parameters.maxTransactions,
+    maxSlippage: document.parameters.maxSlippageBps / 100,
+    strategyNotes: document.parameters.notes,
+  };
+}
+
+async function dbSaveActiveStrategyVersionDocument(
   db: D1Database,
   userId: number,
-  settings: StrategySettingsInput,
+  documentInput: StrategyVersionDocument,
   options?: {
-    author?: string | null;
     changeNote?: string;
-    origin?: 'settings-sync' | 'manual' | 'migration';
   },
 ): Promise<{ version: StrategyVersionRecord; created: boolean }> {
   await dbEnsureTradeDomainSchema(db);
   const definition = await dbGetOrCreatePrimaryStrategyDefinition(db, userId);
-  const document = buildStrategyDocumentFromSettings(settings, {
-    author: options?.author ?? null,
-    changeNote: options?.changeNote,
-    origin: options?.origin,
-  });
+  const document = normalizeStrategyDocument(documentInput);
   const checksum = await sha256Hex(JSON.stringify(document));
   const currentVersion = definition.currentVersionId
     ? await dbGetStrategyVersionById(db, definition.currentVersionId)
@@ -3023,6 +3069,148 @@ async function dbSyncActiveStrategyVersionFromSettings(
     version: mapStrategyVersionRow(inserted),
     created: true,
   };
+}
+
+async function dbListStrategyVersions(
+  db: D1Database,
+  userId: number,
+  limit = 25,
+): Promise<StrategyVersionRecord[]> {
+  await dbEnsureTradeDomainSchema(db);
+  const definition = await dbGetOrCreatePrimaryStrategyDefinition(db, userId);
+  const rows = await db
+    .prepare(
+      `SELECT
+         id,
+         strategy_id,
+         version_no,
+         schema_version,
+         engine_version,
+         strategy_type,
+         status,
+         params_json,
+         triggers_json,
+         targets_json,
+         risk_json,
+         execution_json,
+         metadata_json,
+         checksum,
+         change_note,
+         created_at,
+         activated_at
+       FROM strategy_versions
+       WHERE strategy_id = ?1
+       ORDER BY version_no DESC, id DESC
+       LIMIT ?2`,
+    )
+    .bind(definition.id, limit)
+    .all<{
+      id: number;
+      strategy_id: number;
+      version_no: number;
+      schema_version: number;
+      engine_version: string;
+      strategy_type: string;
+      status: string;
+      params_json: string;
+      triggers_json: string;
+      targets_json: string;
+      risk_json: string;
+      execution_json: string;
+      metadata_json: string;
+      checksum: string;
+      change_note: string | null;
+      created_at: number;
+      activated_at: number | null;
+    }>();
+  return rows.results.map(mapStrategyVersionRow);
+}
+
+async function dbListStrategyEvaluations(
+  db: D1Database,
+  userId: number,
+  limit = 50,
+): Promise<Array<{
+  id: number;
+  userId: number;
+  strategyVersionId: number;
+  strategyVersionNo: number;
+  source: string;
+  eventType: string;
+  externalId: string | null;
+  contractAddress: string;
+  walletAddress: string | null;
+  txSignature: string | null;
+  status: string;
+  shouldExecute: boolean;
+  dryRun: boolean;
+  summary: Record<string, unknown>;
+  createdAt: number;
+}>> {
+  await dbEnsureTradeDomainSchema(db);
+  const rows = await db
+    .prepare(
+      `SELECT
+         se.id,
+         se.user_id,
+         se.strategy_version_id,
+         sv.version_no,
+         se.source,
+         se.event_type,
+         se.external_id,
+         se.contract_address,
+         se.wallet_address,
+         se.tx_signature,
+         se.status,
+         se.should_execute,
+         se.dry_run,
+         se.summary_json,
+         se.created_at
+       FROM strategy_evaluations se
+       INNER JOIN strategy_versions sv ON sv.id = se.strategy_version_id
+       WHERE se.user_id = ?1
+       ORDER BY se.created_at DESC, se.id DESC
+       LIMIT ?2`,
+    )
+    .bind(userId, limit)
+    .all<{
+      id: number;
+      user_id: number;
+      strategy_version_id: number;
+      version_no: number;
+      source: string;
+      event_type: string;
+      external_id: string | null;
+      contract_address: string;
+      wallet_address: string | null;
+      tx_signature: string | null;
+      status: string;
+      should_execute: number;
+      dry_run: number;
+      summary_json: string;
+      created_at: number;
+    }>();
+  return rows.results.map(mapStrategyEvaluationRow);
+}
+
+async function dbSyncActiveStrategyVersionFromSettings(
+  db: D1Database,
+  userId: number,
+  settings: StrategySettingsInput,
+  options?: {
+    author?: string | null;
+    changeNote?: string;
+    origin?: 'settings-sync' | 'manual' | 'migration';
+  },
+): Promise<{ version: StrategyVersionRecord; created: boolean }> {
+  const document = buildStrategyDocumentFromSettings(settings, {
+    author: options?.author ?? null,
+    changeNote: options?.changeNote,
+    origin: options?.origin,
+  });
+  return dbSaveActiveStrategyVersionDocument(db, userId, document, {
+    changeNote: options?.changeNote,
+  });
 }
 
 async function dbCreateStrategyEvaluation(
@@ -4223,6 +4411,27 @@ async function handleLogout(request: Request, env: Env): Promise<Response> {
 async function handleGetState(request: Request, env: Env): Promise<Response> {
   const user = await requireUser(request, env);
   const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+  let activeStrategyVersion: StrategyVersionRecord | null = null;
+  try {
+    activeStrategyVersion = (
+      await dbSyncActiveStrategyVersionFromSettings(
+        env.TRADINGBOT_DB,
+        user.id,
+        settings,
+        {
+          author: user.username,
+          changeNote: 'Auto-synced strategy version during state load',
+          origin: 'migration',
+        },
+      )
+    ).version;
+  } catch (err: unknown) {
+    console.warn(`Failed to auto-sync active strategy version for user ${user.id}:`, err);
+    activeStrategyVersion = await dbGetActiveStrategyVersion(
+      env.TRADINGBOT_DB,
+      user.id,
+    ).catch(() => null);
+  }
   let [
     internalAccs,
     outsiderAccs,
@@ -4231,6 +4440,8 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     webhookTransactionLogs,
     tradableTokens,
     historicalSetups,
+    strategyVersions,
+    strategyEvaluations,
     rpcEndpoints,
   ] =
     await Promise.all([
@@ -4241,6 +4452,8 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
       dbListWebhookTransactionLogs(env.TRADINGBOT_DB, user.id),
       dbListTradableTokens(env.TRADINGBOT_DB),
       dbListHistoricalSetups(env.TRADINGBOT_DB, user.id),
+      dbListStrategyVersions(env.TRADINGBOT_DB, user.id),
+      dbListStrategyEvaluations(env.TRADINGBOT_DB, user.id),
       dbListRpcEndpoints(env.TRADINGBOT_DB, user.id),
     ]);
 
@@ -4293,6 +4506,9 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     webhookTransactionLogs,
     tradableTokens,
     historicalSetups,
+    activeStrategyVersion,
+    strategyVersions,
+    strategyEvaluations,
     rpcEndpoints,
     marketSnapshot,
     marketSnapshotHistory: [],
@@ -4480,6 +4696,119 @@ async function handleSaveActiveToken(
 
   return jsonResponse({
     contractAddress: normalizedContractAddress,
+    marketSnapshot,
+  });
+}
+
+// POST /api/strategy/active
+async function handleSaveActiveStrategy(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const currentSettings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+  const document = normalizeStrategyDocument(
+    await parseJsonBody<unknown>(request),
+  );
+
+  const normalizedContractAddress = document.parameters.contractAddress.trim()
+    ? normalizePubkey(document.parameters.contractAddress)
+    : '';
+  const normalizedDocument = normalizeStrategyDocument({
+    ...document,
+    parameters: {
+      ...document.parameters,
+      contractAddress: normalizedContractAddress,
+    },
+  });
+
+  const strategySave = await dbSaveActiveStrategyVersionDocument(
+    env.TRADINGBOT_DB,
+    user.id,
+    normalizedDocument,
+    {
+      changeNote:
+        normalizedDocument.metadata.changeNote ||
+        normalizedDocument.parameters.notes ||
+        'Strategy document updated',
+    },
+  );
+
+  const settingsUpdate = mapStrategyDocumentToSettingsUpdate(normalizedDocument);
+  await dbSaveSettings(env.TRADINGBOT_DB, user.id, settingsUpdate);
+  const updatedSettings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+  await dbCreateHistoricalSetupSnapshot(
+    env.TRADINGBOT_DB,
+    user.id,
+    updatedSettings,
+  );
+
+  let marketSnapshot: TokenMarketSnapshot | null = null;
+  if (normalizedContractAddress) {
+    const rpcUrls = await dbResolveSolanaRpcUrls(
+      env.TRADINGBOT_DB,
+      user.id,
+      env.SOLANA_RPC_URL,
+    );
+
+    const existingTokenId = await dbResolveTradableTokenId(
+      env.TRADINGBOT_DB,
+      normalizedContractAddress,
+    );
+    if (!existingTokenId) {
+      try {
+        const decimals = await fetchSolanaMintDecimals(
+          rpcUrls,
+          normalizedContractAddress,
+        ).catch(() => null);
+        await dbCreateTradableToken(
+          env.TRADINGBOT_DB,
+          {
+            network: 'solana',
+            contractAddress: normalizedContractAddress,
+          },
+          decimals,
+        );
+      } catch (err: unknown) {
+        console.warn(
+          `Failed to ensure tracked token metadata for strategy contract ${normalizedContractAddress}:`,
+          err,
+        );
+      }
+    }
+
+    try {
+      marketSnapshot = await syncTokenMarketSnapshotForUser(
+        env.TRADINGBOT_DB,
+        user.id,
+        'solana',
+        normalizedContractAddress,
+        rpcUrls,
+        {
+          force: true,
+        },
+      );
+    } catch (err: unknown) {
+      console.warn(
+        `Failed to initialize market snapshot after saving strategy for ${normalizedContractAddress}:`,
+        err,
+      );
+    }
+  }
+
+  await dbAddAuditLog(
+    env.TRADINGBOT_DB,
+    user.id,
+    'strategy.version_activated',
+    normalizedContractAddress || 'none',
+    strategySave.created
+      ? `Activated strategy version v${strategySave.version.versionNo}.`
+      : `Strategy version v${strategySave.version.versionNo} remains active.`,
+  );
+
+  return jsonResponse({
+    activeStrategyVersion: strategySave.version,
+    settings: updatedSettings,
     marketSnapshot,
   });
 }
@@ -5153,6 +5482,8 @@ async function handleApi(
       return await handleSaveActiveToken(request, env);
     if (method === 'POST' && pathname === '/api/settings')
       return await handleSaveSettings(request, env);
+    if (method === 'POST' && pathname === '/api/strategy/active')
+      return await handleSaveActiveStrategy(request, env);
     if (method === 'POST' && pathname === '/api/tradable-tokens')
       return await handleAddTradableToken(request, env);
     if (method === 'POST' && pathname === '/api/market-snapshot/refresh')

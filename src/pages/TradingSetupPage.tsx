@@ -1,12 +1,12 @@
 import React from 'react';
 import { Code, Plus, Settings, Trash2 } from 'lucide-react';
 
-import type { EngineState, SettingsState, TokenMarketSnapshot, TradableToken } from '../app/types';
-import SettingInput from '../components/SettingInput';
+import type { EngineState, StrategyVersionDocument } from '../app/types';
+import StrategySchemaForm from '../components/StrategySchemaForm';
 
 type TradingSetupPageProps = {
   engineState: EngineState;
-  settings: SettingsState;
+  strategyDraft: StrategyVersionDocument | null;
   tradableTokenForm: { network: string; contractAddress: string };
   setTradableTokenForm: React.Dispatch<React.SetStateAction<{ network: string; contractAddress: string }>>;
   rpcEndpointForm: { url: string };
@@ -16,17 +16,19 @@ type TradingSetupPageProps = {
   handleUseToken: (contractAddress: string) => void;
   handleAddRpcEndpoint: () => void;
   handleDeleteRpcEndpoint: (endpointId: number) => void;
-  updateStrategySettings: (updater: (current: SettingsState) => SettingsState) => void;
+  updateStrategyDraft: (updater: (current: StrategyVersionDocument) => StrategyVersionDocument) => void;
   handleSaveConfig: () => void;
   tradingAlgorithm: string;
   setTradingAlgorithm: React.Dispatch<React.SetStateAction<string>>;
   onPersistAlgorithm: () => void;
   onOpenSimulation: () => void;
+  activeStrategyVersionNo: number | null;
+  activeStrategyStatus: string | null;
 };
 
 export default function TradingSetupPage({
   engineState,
-  settings,
+  strategyDraft,
   tradableTokenForm,
   setTradableTokenForm,
   rpcEndpointForm,
@@ -36,18 +38,20 @@ export default function TradingSetupPage({
   handleUseToken,
   handleAddRpcEndpoint,
   handleDeleteRpcEndpoint,
-  updateStrategySettings,
+  updateStrategyDraft,
   handleSaveConfig,
   tradingAlgorithm,
   setTradingAlgorithm,
   onPersistAlgorithm,
   onOpenSimulation,
+  activeStrategyVersionNo,
+  activeStrategyStatus,
 }: TradingSetupPageProps) {
   return (
     <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
       <div className="h-fit space-y-5 rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-sm">
         <h3 className="flex items-center gap-2 border-b border-slate-800 pb-4 text-lg font-semibold">
-          <Settings size={18} /> Trading Parameters
+          <Settings size={18} /> Strategy Editor
         </h3>
 
         <div className="space-y-4">
@@ -55,6 +59,21 @@ export default function TradingSetupPage({
             Add a token below, then use the token registry to switch the active trading contract.
             Updating the active trading token never deletes historical transaction records.
           </p>
+
+          <div className="rounded-xl border border-blue-500/20 bg-blue-500/10 p-4 text-sm text-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-wider text-blue-300">Active Version</p>
+                <p className="mt-1 font-semibold text-white">
+                  {activeStrategyVersionNo != null ? `v${activeStrategyVersionNo}` : 'Not published yet'}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-wider text-blue-300">Status</p>
+                <p className="mt-1 font-semibold text-white">{activeStrategyStatus ?? 'unknown'}</p>
+              </div>
+            </div>
+          </div>
 
           <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
             <div>
@@ -128,7 +147,7 @@ export default function TradingSetupPage({
                         <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] uppercase tracking-wider text-slate-400">
                           {token.network}
                         </span>
-                        {settings.contractAddress === token.contractAddress ? (
+                        {strategyDraft?.parameters.contractAddress === token.contractAddress ? (
                           <span className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-blue-300">
                             active
                           </span>
@@ -140,10 +159,10 @@ export default function TradingSetupPage({
                     </div>
                     <button
                       onClick={() => void handleUseToken(token.contractAddress)}
-                      disabled={submitting === 'use-token' || settings.contractAddress === token.contractAddress}
+                      disabled={submitting === 'use-token' || strategyDraft?.parameters.contractAddress === token.contractAddress}
                       className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-60"
                     >
-                      {settings.contractAddress === token.contractAddress
+                      {strategyDraft?.parameters.contractAddress === token.contractAddress
                         ? 'Active'
                         : submitting === 'use-token'
                           ? 'Activating...'
@@ -219,46 +238,13 @@ export default function TradingSetupPage({
             </div>
           </div>
 
-          <SettingInput
-            label="Time Range Target"
-            sublabel="Target Pre-Condition"
-            value={settings.timeRangeTarget}
-            onChange={(value) => updateStrategySettings((current) => ({ ...current, timeRangeTarget: value }))}
-            options={[
-              { label: '1 Hour', value: '1h' },
-              { label: '6 Hours', value: '6h' },
-              { label: '12 Hours', value: '12h' },
-              { label: '24 Hours', value: '24h' },
-              { label: '3 Days', value: '3d' },
-              { label: '1 Week', value: '1w' },
-            ]}
-          />
-
-          <div className="grid grid-cols-2 gap-4">
-            <SettingInput label="Max Transactions" sublabel="Time Range Limit" value={settings.maxTransactions} onChange={(value) => updateStrategySettings((current) => ({ ...current, maxTransactions: Number(value) }))} />
-            <SettingInput label="Max Slippage" sublabel="Min 0.0001" value={settings.maxSlippage} onChange={(value) => updateStrategySettings((current) => ({ ...current, maxSlippage: Number(value) }))} />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <SettingInput label="Volume Target (USDC)" value={settings.volumeTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, volumeTarget: Number(value) }))} />
-            <SettingInput label="Net Buyin Target" sublabel="Negative = Sell" value={settings.netBuyinTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, netBuyinTarget: Number(value) }))} />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <SettingInput label="Volatility Target (%)" value={settings.volatilityTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, volatilityTarget: Number(value) }))} />
-            <SettingInput label="Outsider Pull Back (%)" value={settings.pullbackTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, pullbackTarget: Number(value) }))} />
-          </div>
-
-          <div>
-            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
-              Strategy Notes
-            </label>
-            <textarea
-              value={settings.strategyNotes}
-              onChange={(event) => updateStrategySettings((current) => ({ ...current, strategyNotes: event.target.value }))}
-              className="min-h-28 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-blue-500"
-            />
-          </div>
+          {strategyDraft ? (
+            <StrategySchemaForm draft={strategyDraft} onChange={updateStrategyDraft} />
+          ) : (
+            <div className="rounded-md border border-dashed border-slate-700 px-3 py-3 text-xs text-slate-500">
+              Strategy draft is loading.
+            </div>
+          )}
         </div>
 
         <div className="mt-4 flex flex-col gap-3">
@@ -267,7 +253,7 @@ export default function TradingSetupPage({
             disabled={submitting === 'settings'}
             className="h-11 w-full cursor-pointer rounded-md border border-blue-500 bg-blue-600 font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60"
           >
-            {submitting === 'settings' ? 'Saving...' : 'Save Strategy Configuration'}
+            {submitting === 'settings' ? 'Saving...' : 'Save and Activate Strategy Version'}
           </button>
         </div>
       </div>

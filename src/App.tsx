@@ -31,6 +31,7 @@ import {
   ITEMS_PER_PAGE,
   workerAlgorithmTemplate,
 } from './app/constants';
+import { createStrategyDraftFromSettings } from './app/strategyFormSchema';
 import type {
   AuthStatus,
   DashboardLogTab,
@@ -38,6 +39,7 @@ import type {
   DateRangeState,
   EngineState,
   SettingsState,
+  StrategyVersionDocument,
   TabId,
   TokenMarketSnapshot,
   TradableToken,
@@ -106,6 +108,7 @@ export default function App() {
   });
   const [rpcEndpointForm, setRpcEndpointForm] = React.useState({ url: '' });
   const [accountForm, setAccountForm] = React.useState({ label: '', address: '' });
+  const [strategyDraft, setStrategyDraft] = React.useState<StrategyVersionDocument | null>(null);
 
   const [tradingAlgorithm, setTradingAlgorithm] = React.useState(workerAlgorithmTemplate);
   const [submitting, setSubmitting] = React.useState<string | null>(null);
@@ -130,6 +133,7 @@ export default function App() {
   const [loadingMarketSnapshots, setLoadingMarketSnapshots] = React.useState(false);
   
   const settingsDirtyRef = React.useRef(false);
+  const strategyDraftDirtyRef = React.useRef(false);
   // Tracks which token address we last attempted to auto-init, to avoid
   // re-firing every 3-second polling cycle when the snapshot stays null.
   const marketInitAttemptedRef = React.useRef('');
@@ -142,25 +146,29 @@ export default function App() {
   }, []);
 
   const syncSettingsFromServer = React.useCallback(
-    (nextSettings: SettingsState, options?: { preserveDraft?: boolean }) => {
-      setSettings((current) => {
-        if (options?.preserveDraft && settingsDirtyRef.current) {
-          return {
-            ...current,
-            contractAddress: nextSettings.contractAddress,
-            managedKeyCount: nextSettings.managedKeyCount,
-          };
+    (nextSettings: SettingsState) => {
+      setSettings(nextSettings);
+    },
+    [],
+  );
+
+  const syncStrategyDraftFromServer = React.useCallback(
+    (state: EngineState, options?: { preserveDraft?: boolean }) => {
+      const nextDraft = state.activeStrategyVersion?.document ?? createStrategyDraftFromSettings(state.settings);
+      setStrategyDraft((current) => {
+        if (options?.preserveDraft && strategyDraftDirtyRef.current && current) {
+          return current;
         }
-        return nextSettings;
+        return nextDraft;
       });
     },
     [],
   );
 
-  const updateStrategySettings = React.useCallback(
-    (updater: (current: SettingsState) => SettingsState) => {
-      settingsDirtyRef.current = true;
-      setSettings((current) => updater(current));
+  const updateStrategyDraft = React.useCallback(
+    (updater: (current: StrategyVersionDocument) => StrategyVersionDocument) => {
+      strategyDraftDirtyRef.current = true;
+      setStrategyDraft((current) => (current ? updater(current) : current));
     },
     [],
   );
@@ -174,10 +182,11 @@ export default function App() {
   const loadState = React.useCallback(async () => {
     const state = await api<EngineState>('/api/state');
     setEngineState(state);
-    syncSettingsFromServer(state.settings, { preserveDraft: true });
+    syncSettingsFromServer(state.settings);
+    syncStrategyDraftFromServer(state, { preserveDraft: true });
     setLastUpdated(new Date().toLocaleString());
     return state;
-  }, [syncSettingsFromServer]);
+  }, [syncSettingsFromServer, syncStrategyDraftFromServer]);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -322,7 +331,9 @@ export default function App() {
     submitWithFeedback('logout', async () => {
       await api('/api/auth/logout', { method: 'POST' });
       settingsDirtyRef.current = false;
+      strategyDraftDirtyRef.current = false;
       setEngineState(null);
+      setStrategyDraft(null);
       setWalletBalances({});
       setNotice('Logged out.');
       await refresh();
@@ -483,12 +494,34 @@ export default function App() {
 
   const handleSaveConfig = () =>
     submitWithFeedback('settings', async () => {
-      await api('/api/settings', {
+      if (!strategyDraft) {
+        throw new Error('Strategy draft is not ready');
+      }
+      const response = await api<{
+        activeStrategyVersion: EngineState['activeStrategyVersion'];
+        settings: SettingsState;
+        marketSnapshot: TokenMarketSnapshot | null;
+      }>('/api/strategy/active', {
         method: 'POST',
-        body: JSON.stringify(serializeSettings(settings)),
+        body: JSON.stringify(strategyDraft),
       });
       settingsDirtyRef.current = false;
-      setNotice('Strategy configuration saved. The active tracked token stays unchanged.');
+      strategyDraftDirtyRef.current = false;
+      setSettings(response.settings);
+      setEngineState((current) =>
+        current
+          ? {
+              ...current,
+              activeStrategyVersion: response.activeStrategyVersion,
+              marketSnapshot: response.marketSnapshot ?? current.marketSnapshot,
+            }
+          : current,
+      );
+      setNotice(
+        response.activeStrategyVersion
+          ? `Strategy version v${response.activeStrategyVersion.versionNo} saved and activated.`
+          : 'Strategy configuration saved.',
+      );
       await refresh();
     });
 
@@ -506,6 +539,7 @@ export default function App() {
         );
       }
       setNotice(result.marketSnapshot ? 'Token activated with live market data.' : 'Token activated.');
+      await refresh();
     });
 
   const handleAddRpcEndpoint = () =>
@@ -585,6 +619,7 @@ export default function App() {
             ? 'Token saved as active with live market data.'
             : 'Token saved as active.',
       );
+      await refresh();
     });
 
   const handleImportAccount = () =>
@@ -972,7 +1007,7 @@ export default function App() {
   const renderSetup = () => (
     <TradingSetupPage
       engineState={engineState}
-      settings={settings}
+      strategyDraft={strategyDraft}
       tradableTokenForm={tradableTokenForm}
       setTradableTokenForm={setTradableTokenForm}
       rpcEndpointForm={rpcEndpointForm}
@@ -982,7 +1017,7 @@ export default function App() {
       handleUseToken={handleUseToken}
       handleAddRpcEndpoint={handleAddRpcEndpoint}
       handleDeleteRpcEndpoint={handleDeleteRpcEndpoint}
-      updateStrategySettings={updateStrategySettings}
+      updateStrategyDraft={updateStrategyDraft}
       handleSaveConfig={handleSaveConfig}
       tradingAlgorithm={tradingAlgorithm}
       setTradingAlgorithm={setTradingAlgorithm}
@@ -991,13 +1026,16 @@ export default function App() {
         setNotice('Algorithm draft saved locally in the browser.');
       }}
       onOpenSimulation={() => setIsSimulationModalOpen(true)}
+      activeStrategyVersionNo={engineState.activeStrategyVersion?.versionNo ?? null}
+      activeStrategyStatus={engineState.activeStrategyVersion?.status ?? null}
     />
   );
 
   const renderSetups = () => (
     <HistoricalSetupsPage
-      setups={engineState.historicalSetups}
-      activityLogs={engineState.activityLogs}
+      activeStrategyVersion={engineState.activeStrategyVersion}
+      strategyVersions={engineState.strategyVersions}
+      strategyEvaluations={engineState.strategyEvaluations}
     />
   );
 

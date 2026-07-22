@@ -1,3 +1,8 @@
+import type {
+  StrategyEvaluationRecord,
+  StrategyVersionRecord,
+} from './strategyTypes';
+
 export type TabId = 'dashboard' | 'accounts' | 'setup' | 'setups';
 
 export type AuthStatus = {
@@ -138,6 +143,9 @@ export type EngineState = {
   webhookTransactionLogs: WebhookTransactionLog[];
   tradableTokens: TradableToken[];
   historicalSetups: HistoricalSetup[];
+  activeStrategyVersion: StrategyVersionRecord | null;
+  strategyVersions: StrategyVersionRecord[];
+  strategyEvaluations: StrategyEvaluationRecord[];
   rpcEndpoints: RpcEndpoint[];
   marketSnapshot: TokenMarketSnapshot | null;
   marketSnapshotHistory: TokenMarketSnapshot[];
@@ -180,3 +188,24 @@ export type WalletOwnershipMeta = {
   ownership: WalletOwnership;
   accountLabel: string | null;
 };
+
+export type {
+  StrategyEvaluationRecord,
+  StrategyExecutionConfig,
+  StrategyFieldCapability,
+  StrategyFieldPath,
+  StrategyFieldSchema,
+  StrategyFieldType,
+  StrategyMetadata,
+  StrategyParameters,
+  StrategyRiskControls,
+  StrategySectionId,
+  StrategySectionSchema,
+  StrategyTargets,
+  StrategyTriggerConfig,
+  StrategyTriggerSource,
+  StrategyType,
+  StrategyVersionDocument,
+  StrategyVersionRecord,
+  StrategyVersionStatus,
+} from './strategyTypes';
