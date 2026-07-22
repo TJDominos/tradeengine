@@ -148,6 +148,7 @@ type EngineState = {
   historicalSetups: HistoricalSetup[];
   rpcEndpoints: RpcEndpoint[];
   marketSnapshot: TokenMarketSnapshot | null;
+  marketSnapshotHistory: TokenMarketSnapshot[];
   profitUsdc: number;
   stats: {
     managedAccounts: number;
@@ -739,6 +740,10 @@ export default function App() {
   const [adminMsg, setAdminMsg] = React.useState({ type: '', text: '' });
 
   const [isSimulationModalOpen, setIsSimulationModalOpen] = React.useState(false);
+  const [marketSnapshotTimeRange, setMarketSnapshotTimeRange] = React.useState<'24h' | '7d' | '30d' | 'custom'>('24h');
+  const [marketSnapshotCustomRange, setMarketSnapshotCustomRange] = React.useState<DateRangeState>({ from: '', to: '' });
+  const [loadingMarketHistory, setLoadingMarketHistory] = React.useState(false);
+  
   const settingsDirtyRef = React.useRef(false);
   // Tracks which token address we last attempted to auto-init, to avoid
   // re-firing every 3-second polling cycle when the snapshot stays null.
@@ -936,6 +941,47 @@ export default function App() {
       setNotice('Logged out.');
       await refresh();
     });
+
+  const loadMarketSnapshotHistory = async () => {
+    if (!auth?.authenticated || !engineState || !settings.contractAddress.trim()) {
+      return;
+    }
+
+    setLoadingMarketHistory(true);
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      let startTime = now - 86400; // default: last 24 hours
+      let endTime = now;
+
+      if (marketSnapshotTimeRange === '7d') {
+        startTime = now - 7 * 86400;
+      } else if (marketSnapshotTimeRange === '30d') {
+        startTime = now - 30 * 86400;
+      } else if (marketSnapshotTimeRange === 'custom' && marketSnapshotCustomRange.from && marketSnapshotCustomRange.to) {
+        startTime = Math.floor(new Date(marketSnapshotCustomRange.from).getTime() / 1000);
+        endTime = Math.floor(new Date(marketSnapshotCustomRange.to).getTime() / 1000);
+      }
+
+      const result = await api<{ snapshots: TokenMarketSnapshot[] }>(
+        `/api/market-snapshots?startTime=${startTime}&endTime=${endTime}&limit=500`,
+      );
+
+      if (result.snapshots && Array.isArray(result.snapshots)) {
+        setEngineState((current) =>
+          current
+            ? {
+                ...current,
+                marketSnapshotHistory: result.snapshots,
+              }
+            : current,
+        );
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to load market snapshot history');
+    } finally {
+      setLoadingMarketHistory(false);
+    }
+  };
 
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
@@ -1594,6 +1640,82 @@ export default function App() {
           value={engineState.marketSnapshot?.totalTransactions24h != null ? formatNum(engineState.marketSnapshot.totalTransactions24h) : 'Unavailable'}
           subtitle={engineState.marketSnapshot?.volume24h != null ? `24h volume ${formatUSD(engineState.marketSnapshot.volume24h)}` : '24h volume unavailable'}
         />
+      </div>
+
+      {/* Market Snapshot History Section */}
+      <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950 p-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-slate-200">Market Snapshot History</h3>
+          <div className="flex items-center gap-2">
+            <select
+              value={marketSnapshotTimeRange}
+              onChange={(e) => setMarketSnapshotTimeRange(e.target.value as any)}
+              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1 text-sm text-slate-300 outline-none focus:border-blue-500"
+            >
+              <option value="24h">Last 24 Hours</option>
+              <option value="7d">Last 7 Days</option>
+              <option value="30d">Last 30 Days</option>
+              <option value="custom">Custom Range</option>
+            </select>
+            <button
+              onClick={loadMarketSnapshotHistory}
+              disabled={loadingMarketHistory}
+              className="rounded-md border border-blue-500 bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+            >
+              {loadingMarketHistory ? 'Loading...' : 'Load'}
+            </button>
+          </div>
+        </div>
+
+        {marketSnapshotTimeRange === 'custom' && (
+          <div className="flex gap-3">
+            <input
+              type="datetime-local"
+              value={marketSnapshotCustomRange.from}
+              onChange={(e) => setMarketSnapshotCustomRange((c) => ({ ...c, from: e.target.value }))}
+              className="flex-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-1 text-sm text-slate-300 outline-none focus:border-blue-500"
+            />
+            <input
+              type="datetime-local"
+              value={marketSnapshotCustomRange.to}
+              onChange={(e) => setMarketSnapshotCustomRange((c) => ({ ...c, to: e.target.value }))}
+              className="flex-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-1 text-sm text-slate-300 outline-none focus:border-blue-500"
+            />
+          </div>
+        )}
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-700">
+                <th className="px-4 py-2 text-left font-medium text-slate-400">Time</th>
+                <th className="px-4 py-2 text-right font-medium text-slate-400">Price (USDC)</th>
+                <th className="px-4 py-2 text-right font-medium text-slate-400">FDV</th>
+                <th className="px-4 py-2 text-right font-medium text-slate-400">Liquidity</th>
+                <th className="px-4 py-2 text-right font-medium text-slate-400">Outsiders (&gt;$1)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {engineState?.marketSnapshotHistory && engineState.marketSnapshotHistory.length > 0 ? (
+                engineState.marketSnapshotHistory.map((snap, index) => (
+                  <tr key={index} className="border-b border-slate-700/50 hover:bg-slate-900">
+                    <td className="px-4 py-2 text-slate-300">{formatDate(snap.fetchedAt)}</td>
+                    <td className="px-4 py-2 text-right text-slate-300">{formatOptionalUsd(snap.priceUsd)}</td>
+                    <td className="px-4 py-2 text-right text-slate-300">{formatOptionalUsd(snap.fdv)}</td>
+                    <td className="px-4 py-2 text-right text-slate-300">{formatOptionalUsd(snap.liquidityUsd)}</td>
+                    <td className="px-4 py-2 text-right text-slate-300">{snap.outsidersOverOneUsd != null ? formatNum(snap.outsidersOverOneUsd) : 'N/A'}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={5} className="py-8 text-center text-sm text-slate-500">
+                    {loadingMarketHistory ? 'Loading...' : 'No snapshot history available. Click Load to fetch data.'}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div className="mt-8">{renderDashboardLogs()}</div>

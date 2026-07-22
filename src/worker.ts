@@ -2039,6 +2039,70 @@ async function dbInsertTokenMarketSnapshot(
     .run();
 }
 
+// Query market snapshots within a time range
+async function dbGetTokenMarketSnapshotsByTimeRange(
+  db: D1Database,
+  tokenId: number,
+  startTime: number,
+  endTime: number,
+  limit: number = 100,
+): Promise<TokenMarketSnapshot[]> {
+  await dbEnsureTradeDomainSchema(db);
+  const rows = await db
+    .prepare(
+      `SELECT
+         network,
+         contract_address,
+         token_name,
+         token_symbol,
+         price_usd,
+         liquidity_usd,
+         fdv,
+         volume_24h,
+         total_transactions_24h,
+         outsiders_over_one_usd,
+         dex_id,
+         pair_address,
+         fetched_at
+       FROM token_market_snapshots
+       WHERE token_id = ?1 AND fetched_at >= ?2 AND fetched_at <= ?3
+       ORDER BY fetched_at DESC
+       LIMIT ?4`,
+    )
+    .bind(tokenId, startTime, endTime, limit)
+    .all<{
+      network: string;
+      contract_address: string;
+      token_name: string | null;
+      token_symbol: string | null;
+      price_usd: number | null;
+      liquidity_usd: number | null;
+      fdv: number | null;
+      volume_24h: number | null;
+      total_transactions_24h: number | null;
+      outsiders_over_one_usd: number | null;
+      dex_id: string | null;
+      pair_address: string | null;
+      fetched_at: number;
+    }>();
+
+  return rows.results.map((row) => ({
+    network: row.network,
+    contractAddress: row.contract_address,
+    tokenName: row.token_name,
+    tokenSymbol: row.token_symbol,
+    priceUsd: row.price_usd,
+    liquidityUsd: row.liquidity_usd,
+    fdv: row.fdv,
+    volume24h: row.volume_24h,
+    totalTransactions24h: row.total_transactions_24h,
+    outsidersOverOneUsd: row.outsiders_over_one_usd,
+    dexId: row.dex_id,
+    pairAddress: row.pair_address,
+    fetchedAt: row.fetched_at,
+  }));
+}
+
 async function dbCreateSignal(
   db: D1Database,
   input: SignalCreateRequest,
@@ -3774,6 +3838,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     historicalSetups,
     rpcEndpoints,
     marketSnapshot,
+    marketSnapshotHistory: [],
     profitUsdc,
     stats: {
       managedAccounts: internalAccs.length,
@@ -4043,6 +4108,74 @@ async function handleAddTradableToken(
       : `Added tradable token on ${token.network}. Live market initialization will retry on the next refresh.`,
   );
   return jsonResponse({ token, marketSnapshot }, 201);
+}
+
+// GET /api/market-snapshots?startTime=xxx&endTime=xxx
+async function handleGetMarketSnapshotsByTimeRange(
+  request: Request,
+  url: URL,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+  const contractAddress = settings.contractAddress.trim();
+  
+  if (!contractAddress) {
+    throw new ApiError(
+      400,
+      'Set an active trading token before querying market snapshots',
+    );
+  }
+
+  const startTimeParam = url.searchParams.get('startTime');
+  const endTimeParam = url.searchParams.get('endTime');
+  const limitParam = url.searchParams.get('limit');
+
+  const now = Math.floor(Date.now() / 1000);
+  let startTime = now - 86400; // default: last 24 hours
+  let endTime = now;
+  let limit = 100;
+
+  if (startTimeParam) {
+    const parsed = Number.parseInt(startTimeParam, 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      startTime = parsed;
+    }
+  }
+
+  if (endTimeParam) {
+    const parsed = Number.parseInt(endTimeParam, 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      endTime = parsed;
+    }
+  }
+
+  if (limitParam) {
+    const parsed = Number.parseInt(limitParam, 10);
+    if (Number.isInteger(parsed) && parsed > 0 && parsed <= 500) {
+      limit = parsed;
+    }
+  }
+
+  // Find token by contract address
+  const token = await env.TRADINGBOT_DB
+    .prepare('SELECT id FROM tradable_tokens WHERE user_id = ?1 AND contract_address = ?2')
+    .bind(user.id, contractAddress)
+    .first<{ id: number }>();
+
+  if (!token) {
+    throw new ApiError(404, 'Token not found');
+  }
+
+  const snapshots = await dbGetTokenMarketSnapshotsByTimeRange(
+    env.TRADINGBOT_DB,
+    token.id,
+    startTime,
+    endTime,
+    limit,
+  );
+
+  return jsonResponse({ snapshots });
 }
 
 // POST /api/market-snapshot/refresh
@@ -4508,6 +4641,8 @@ async function handleApi(
       return await handleAddTradableToken(request, env);
     if (method === 'POST' && pathname === '/api/market-snapshot/refresh')
       return await handleForceRefreshMarketSnapshot(request, env);
+    if (method === 'GET' && pathname === '/api/market-snapshots')
+      return await handleGetMarketSnapshotsByTimeRange(request, url, env);
     if (method === 'POST' && pathname === '/api/rpc-endpoints')
       return await handleAddRpcEndpoint(request, env);
     if (method === 'POST' && pathname === '/api/private-keys/import')
