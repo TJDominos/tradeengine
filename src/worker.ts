@@ -477,6 +477,21 @@ async function encryptPrivateKey(
   return btoa(binary);
 }
 
+async function decryptPrivateKey(
+  encryptedB64: string,
+  keyStr: string,
+): Promise<Uint8Array> {
+  const keyBytes = parseEncryptionKey(keyStr);
+  const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, [
+    'decrypt',
+  ]);
+  const payload = Uint8Array.from(atob(encryptedB64), (c) => c.charCodeAt(0));
+  const iv = payload.slice(0, 12);
+  const ciphertext = payload.slice(12);
+  const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+  return new Uint8Array(decrypted);
+}
+
 function normalizeWhitespace(value: string): string {
   return value.trim().split(/\s+/).filter(Boolean).join(' ');
 }
@@ -1515,6 +1530,25 @@ async function dbImportManagedKeyBytes(
   };
 }
 
+async function dbLoadManagedKeypairBytes(
+  db: D1Database,
+  userId: number,
+  walletAddress: string,
+  encryptionKeyStr: string,
+): Promise<Uint8Array> {
+  const normalizedAddress = normalizePubkey(walletAddress);
+  const row = await db
+    .prepare(
+      "SELECT encrypted_private_key FROM accounts WHERE user_id = ?1 AND type = 'managed' AND wallet_address = ?2",
+    )
+    .bind(userId, normalizedAddress)
+    .first<{ encrypted_private_key: string | null }>();
+  if (!row?.encrypted_private_key) {
+    throw new ApiError(404, `Managed wallet ${normalizedAddress} not found or has no key`);
+  }
+  return decryptPrivateKey(row.encrypted_private_key, encryptionKeyStr);
+}
+
 async function dbAddAuditLog(
   db: D1Database,
   userId: number,
@@ -1807,6 +1841,24 @@ async function dbCreateTradableToken(
   }
   const contractAddress = normalizePubkey(input.contractAddress);
   const createdAt = nowTs();
+
+  // Enrich with Jupiter token metadata (name, symbol, decimals)
+  let jupiterName: string | null = null;
+  let jupiterSymbol: string | null = null;
+  let resolvedDecimals = decimals;
+  try {
+    const jupiterMeta = await fetchJupiterTokenMetadata(contractAddress);
+    if (jupiterMeta) {
+      jupiterName = jupiterMeta.name;
+      jupiterSymbol = jupiterMeta.symbol;
+      if (resolvedDecimals == null && jupiterMeta.decimals != null) {
+        resolvedDecimals = jupiterMeta.decimals;
+      }
+    }
+  } catch {
+    // non-fatal: token may not be in Jupiter's verified list yet
+  }
+
   await db
     .prepare(
       `INSERT INTO tradable_tokens (
@@ -1817,12 +1869,14 @@ async function dbCreateTradableToken(
          decimals,
          is_active,
          created_at
-       ) VALUES (?1, ?2, NULL, NULL, ?3, 1, ?4)
+       ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
        ON CONFLICT(network, contract_address) DO UPDATE SET
          is_active = 1,
-         decimals = COALESCE(excluded.decimals, tradable_tokens.decimals)`,
+         symbol = COALESCE(?3, tradable_tokens.symbol),
+         name = COALESCE(?4, tradable_tokens.name),
+         decimals = COALESCE(?5, tradable_tokens.decimals)`,
     )
-    .bind(network, contractAddress, decimals, createdAt)
+    .bind(network, contractAddress, jupiterSymbol, jupiterName, resolvedDecimals, createdAt)
     .run();
   const row = await db
     .prepare(
@@ -2314,6 +2368,190 @@ async function dbUserOwnsAccount(
   return !!row;
 }
 
+// ─── Jupiter token API ────────────────────────────────────────────────────────
+
+interface JupiterTokenMetadata {
+  address: string;
+  name: string | null;
+  symbol: string | null;
+  decimals: number | null;
+  logoUri: string | null;
+  tags: string[];
+}
+
+async function fetchJupiterTokenMetadata(
+  mint: string,
+): Promise<JupiterTokenMetadata | null> {
+  try {
+    const response = await fetch(
+      `https://tokens.jup.ag/token/${encodeURIComponent(mint)}`,
+      { headers: { Accept: 'application/json' } },
+    );
+    if (!response.ok) return null;
+    const body = await response.json<{
+      address?: string;
+      name?: string;
+      symbol?: string;
+      decimals?: number;
+      logoURI?: string;
+      tags?: string[];
+    }>();
+    return {
+      address: body.address ?? mint,
+      name: typeof body.name === 'string' ? body.name : null,
+      symbol: typeof body.symbol === 'string' ? body.symbol : null,
+      decimals: typeof body.decimals === 'number' ? body.decimals : null,
+      logoUri: typeof body.logoURI === 'string' ? body.logoURI : null,
+      tags: Array.isArray(body.tags) ? (body.tags as string[]) : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchJupiterTokenPrice(mint: string): Promise<number | null> {
+  try {
+    const response = await fetch(
+      `https://api.jup.ag/price/v2?ids=${encodeURIComponent(mint)}`,
+      { headers: { Accept: 'application/json' } },
+    );
+    if (!response.ok) return null;
+    const body = await response.json<{
+      data?: Record<string, { price?: number | string } | null>;
+    }>();
+    const entry = body.data?.[mint] ?? body.data?.[mint.toLowerCase()];
+    if (!entry) return null;
+    const price = toFiniteNumber(entry.price);
+    return price != null && price > 0 ? price : null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Jupiter swap API ─────────────────────────────────────────────────────────
+
+type JupiterQuoteResponse = {
+  inputMint: string;
+  inAmount: string;
+  outputMint: string;
+  outAmount: string;
+  otherAmountThreshold: string;
+  swapMode: string;
+  slippageBps: number;
+  priceImpactPct: string;
+  routePlan: unknown[];
+  contextSlot?: number;
+};
+
+async function fetchJupiterSwapQuote(
+  inputMint: string,
+  outputMint: string,
+  amountAtomicUnits: string,
+  slippageBps: number,
+): Promise<JupiterQuoteResponse> {
+  const url = new URL('https://quote-api.jup.ag/v6/quote');
+  url.searchParams.set('inputMint', inputMint);
+  url.searchParams.set('outputMint', outputMint);
+  url.searchParams.set('amount', amountAtomicUnits);
+  url.searchParams.set('slippageBps', String(slippageBps));
+
+  const response = await fetch(url.toString(), {
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new ApiError(502, `Jupiter quote request failed (${response.status}): ${errText.slice(0, 200)}`);
+  }
+  const body = await response.json<JupiterQuoteResponse & { error?: string }>();
+  if (body.error) {
+    throw new ApiError(502, `Jupiter quote error: ${body.error}`);
+  }
+  return body;
+}
+
+async function buildJupiterSwapTransaction(
+  quoteResponse: JupiterQuoteResponse,
+  userPublicKey: string,
+): Promise<Uint8Array> {
+  const response = await fetch('https://quote-api.jup.ag/v6/swap', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      quoteResponse,
+      userPublicKey,
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+    }),
+  });
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new ApiError(502, `Jupiter swap transaction request failed (${response.status}): ${errText.slice(0, 200)}`);
+  }
+  const body = await response.json<{ swapTransaction?: string; error?: string }>();
+  if (body.error) {
+    throw new ApiError(502, `Jupiter swap error: ${body.error}`);
+  }
+  if (!body.swapTransaction) {
+    throw new ApiError(502, 'Jupiter swap response missing transaction');
+  }
+  return Uint8Array.from(atob(body.swapTransaction), (c) => c.charCodeAt(0));
+}
+
+// ─── Solana transaction signing ───────────────────────────────────────────────
+
+/**
+ * Parse a compact-u16 integer from a byte array at a given offset.
+ * Returns [value, number of bytes consumed].
+ */
+function readCompactU16(bytes: Uint8Array, offset: number): [number, number] {
+  let val = 0;
+  let shift = 0;
+  let bytesRead = 0;
+  while (offset + bytesRead < bytes.length) {
+    const byte = bytes[offset + bytesRead];
+    bytesRead += 1;
+    val |= (byte & 0x7f) << shift;
+    shift += 7;
+    if ((byte & 0x80) === 0) break;
+  }
+  return [val, bytesRead];
+}
+
+/**
+ * Sign a Solana (legacy or v0) serialized transaction with the given 64-byte
+ * Solana keypair. The first signature slot is replaced with the real signature.
+ * The keypair must be the primary signer (index 0).
+ */
+function signSolanaTransaction(txBytes: Uint8Array, signerKeypair: Uint8Array): Uint8Array {
+  const [sigCount, sigCountLen] = readCompactU16(txBytes, 0);
+  if (sigCount === 0) throw new Error('Transaction has no signature slots');
+  const messageOffset = sigCountLen + sigCount * 64;
+  const messageBytes = txBytes.slice(messageOffset);
+  // nacl.sign.detached takes the 64-byte secretKey
+  const signature = nacl.sign.detached(messageBytes, signerKeypair);
+  const signed = new Uint8Array(txBytes);
+  // Replace the first 64-byte signature slot
+  signed.set(signature, sigCountLen);
+  return signed;
+}
+
+async function sendSolanaTransaction(
+  rpcUrls: string | string[],
+  signedTxBytes: Uint8Array,
+): Promise<string> {
+  let binary = '';
+  signedTxBytes.forEach((b) => (binary += String.fromCharCode(b)));
+  const base64Tx = btoa(binary);
+  const signature = await solanaRpc<string>(rpcUrls, 'sendTransaction', [
+    base64Tx,
+    { encoding: 'base64', preflightCommitment: 'confirmed' },
+  ]);
+  return signature;
+}
+
 async function fetchDexScreenerTokenMarketSnapshot(
   network: string,
   contractAddress: string,
@@ -2544,6 +2782,7 @@ async function syncTokenMarketSnapshotForUser(
     }
   }
 
+  // Try DexScreener first (richer data: liquidity, FDV, volume, txns)
   let liveSnapshot: TokenMarketSnapshot | null = null;
   try {
     liveSnapshot = await fetchDexScreenerTokenMarketSnapshot(
@@ -2551,11 +2790,35 @@ async function syncTokenMarketSnapshotForUser(
       normalizedAddress,
     );
   } catch (err: unknown) {
-    if ((options?.fallbackToStoredOnError ?? true) && latestStoredSnapshot) {
-      writeTokenMarketCache(cacheKey, latestStoredSnapshot);
-      return latestStoredSnapshot;
+    console.warn(`DexScreener snapshot failed for ${normalizedAddress}:`, err);
+  }
+
+  // Fall back to Jupiter Price API when DexScreener returns nothing or errors
+  if (!liveSnapshot) {
+    try {
+      const jupiterPrice = await fetchJupiterTokenPrice(normalizedAddress);
+      if (jupiterPrice != null) {
+        // Build a minimal snapshot from Jupiter price + stored metadata
+        const jupiterMeta = await fetchJupiterTokenMetadata(normalizedAddress);
+        liveSnapshot = {
+          network: normalizedNetwork,
+          contractAddress: normalizedAddress,
+          tokenName: jupiterMeta?.name ?? latestStoredSnapshot?.tokenName ?? null,
+          tokenSymbol: jupiterMeta?.symbol ?? latestStoredSnapshot?.tokenSymbol ?? null,
+          priceUsd: jupiterPrice,
+          liquidityUsd: latestStoredSnapshot?.liquidityUsd ?? null,
+          fdv: latestStoredSnapshot?.fdv ?? null,
+          volume24h: latestStoredSnapshot?.volume24h ?? null,
+          totalTransactions24h: latestStoredSnapshot?.totalTransactions24h ?? null,
+          outsidersOverOneUsd: null,
+          dexId: latestStoredSnapshot?.dexId ?? null,
+          pairAddress: latestStoredSnapshot?.pairAddress ?? null,
+          fetchedAt: nowTs(),
+        };
+      }
+    } catch (err: unknown) {
+      console.warn(`Jupiter price fallback failed for ${normalizedAddress}:`, err);
     }
-    throw err;
   }
 
   if (!liveSnapshot) {
@@ -3790,56 +4053,185 @@ async function handleImportAccount(
 
 // POST /api/trade
 async function handleTrade(request: Request, env: Env): Promise<Response> {
+  if (!env.PRIVATE_KEY_ENCRYPTION_KEY) {
+    throw new ApiError(503, 'PRIVATE_KEY_ENCRYPTION_KEY is not configured — cannot decrypt signing key');
+  }
+
   const user = await requireAdmin(request, env);
   const body = await request.json<{
-    symbol?: string;
     action?: string;
     contractAddress?: string;
     walletAddress?: string;
+    /** Amount in USDC for BUY; amount in the base token for SELL */
     requestedAmount?: number;
   }>();
-  const symbol = body.symbol ?? 'unknown';
-  const action = body.action ?? 'unspecified';
+
+  const action = (body.action ?? '').toUpperCase();
+  if (action !== 'BUY' && action !== 'SELL') {
+    throw new ApiError(400, 'action must be BUY or SELL');
+  }
+  if (typeof body.requestedAmount !== 'number' || !Number.isFinite(body.requestedAmount) || body.requestedAmount <= 0) {
+    throw new ApiError(400, 'requestedAmount must be a positive number');
+  }
+
   const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-  const targetAddress =
+  const targetMint = normalizePubkey(
     typeof body.contractAddress === 'string' && body.contractAddress.trim().length > 0
       ? body.contractAddress
-      : settings.contractAddress;
-  if (targetAddress.trim()) {
-    const tokenId = await dbResolveTradableTokenId(
-      env.TRADINGBOT_DB,
-      targetAddress,
-    );
-    if (tokenId) {
-      await dbCreateTradeLog(env.TRADINGBOT_DB, {
-        tokenId,
-        setupId: await dbGetLatestHistoricalSetupId(env.TRADINGBOT_DB, user.id),
-        walletAddress:
-          typeof body.walletAddress === 'string' && body.walletAddress.trim().length > 0
-            ? body.walletAddress.trim()
-            : 'system',
-        action: action.toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
-        requestedAmount:
-          typeof body.requestedAmount === 'number' && Number.isFinite(body.requestedAmount)
-            ? body.requestedAmount
-            : 0,
-        status: 'FAILED',
-        errorMessage:
-          'Trade execution is intentionally not implemented in this Worker yet.',
-      });
-    }
+      : settings.contractAddress,
+  );
+  if (!targetMint) {
+    throw new ApiError(400, 'No active trading token configured');
   }
-  await dbAddAuditLog(
+
+  // Resolve the managed wallet to sign with
+  const signerAddress = normalizePubkey(
+    typeof body.walletAddress === 'string' && body.walletAddress.trim().length > 0
+      ? body.walletAddress
+      : '',
+  );
+  // Find first managed wallet if none specified
+  let resolvedSignerAddress = signerAddress;
+  if (!resolvedSignerAddress) {
+    const managed = await dbListManagedAccountAddresses(env.TRADINGBOT_DB, user.id);
+    if (managed.length === 0) {
+      throw new ApiError(400, 'No managed wallet imported — import a private key first');
+    }
+    resolvedSignerAddress = managed[0];
+  }
+
+  // Load the managed keypair for signing
+  const keypairBytes = await dbLoadManagedKeypairBytes(
     env.TRADINGBOT_DB,
     user.id,
-    'trade.execution_blocked',
-    symbol,
-    `Received blocked trade execution request for action '${action}'. Real trade execution is not implemented.`,
+    resolvedSignerAddress,
+    env.PRIVATE_KEY_ENCRYPTION_KEY,
   );
-  throw new ApiError(
-    501,
-    'Trade execution is intentionally not implemented in this Worker yet.',
-  );
+
+  // Resolve token decimals for amount calculation
+  const tokenRecord = await env.TRADINGBOT_DB
+    .prepare('SELECT decimals FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2')
+    .bind('solana', targetMint)
+    .first<{ decimals: number | null }>();
+  const tokenDecimals = tokenRecord?.decimals ?? 6;
+
+  // Calculate atomic units for the quote
+  const USDC_DECIMALS = 6;
+  let inputMint: string;
+  let outputMint: string;
+  let amountAtomicUnits: string;
+
+  if (action === 'BUY') {
+    // Spend USDC → receive target token
+    inputMint = SOLANA_USDC_MINT;
+    outputMint = targetMint;
+    amountAtomicUnits = String(Math.round(body.requestedAmount * 10 ** USDC_DECIMALS));
+  } else {
+    // Spend target token → receive USDC
+    inputMint = targetMint;
+    outputMint = SOLANA_USDC_MINT;
+    amountAtomicUnits = String(Math.round(body.requestedAmount * 10 ** tokenDecimals));
+  }
+
+  const slippageBps = Math.round(settings.maxSlippage * 100); // % → bps
+
+  // Resolve the token record for audit
+  const tokenId = await dbResolveTradableTokenId(env.TRADINGBOT_DB, targetMint);
+  const setupId = await dbGetLatestHistoricalSetupId(env.TRADINGBOT_DB, user.id);
+
+  let tradeLogId: number | null = null;
+  if (tokenId) {
+    const logRow = await env.TRADINGBOT_DB
+      .prepare(
+        `INSERT INTO trade_logs (
+           token_id, setup_id, wallet_address, action,
+           requested_amount, status, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', ?6, ?6)
+         RETURNING id`,
+      )
+      .bind(tokenId, setupId, resolvedSignerAddress, action, body.requestedAmount, nowTs())
+      .first<{ id: number }>();
+    tradeLogId = logRow?.id ?? null;
+  }
+
+  try {
+    // 1. Get swap quote from Jupiter
+    const quote = await fetchJupiterSwapQuote(
+      inputMint,
+      outputMint,
+      amountAtomicUnits,
+      slippageBps,
+    );
+
+    // 2. Build the transaction via Jupiter
+    const unsignedTxBytes = await buildJupiterSwapTransaction(quote, resolvedSignerAddress);
+
+    // 3. Sign with the managed keypair
+    const signedTxBytes = signSolanaTransaction(unsignedTxBytes, keypairBytes);
+
+    // 4. Broadcast to Solana
+    const rpcUrls = await dbResolveSolanaRpcUrls(
+      env.TRADINGBOT_DB,
+      user.id,
+      env.SOLANA_RPC_URL,
+    );
+    const txSignature = await sendSolanaTransaction(rpcUrls, signedTxBytes);
+
+    // 5. Compute the executed amounts from the quote
+    const executedAmountRaw = Number(action === 'BUY' ? quote.outAmount : quote.inAmount);
+    const executedDecimals = action === 'BUY' ? tokenDecimals : USDC_DECIMALS;
+    const executedAmount = executedAmountRaw / 10 ** executedDecimals;
+
+    // 6. Update trade log with success
+    if (tradeLogId != null) {
+      await env.TRADINGBOT_DB
+        .prepare(
+          `UPDATE trade_logs
+           SET status = 'PENDING', tx_signature = ?2, executed_amount = ?3, updated_at = ?4
+           WHERE id = ?1`,
+        )
+        .bind(tradeLogId, txSignature, executedAmount, nowTs())
+        .run();
+    }
+
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      user.id,
+      'trade.submitted',
+      txSignature,
+      `${action} ${body.requestedAmount} (${action === 'BUY' ? 'USDC → ' + targetMint : targetMint + ' → USDC'}) via Jupiter. Tx: ${txSignature}`,
+    );
+
+    return jsonResponse({
+      txSignature,
+      action,
+      inputMint,
+      outputMint,
+      requestedAmount: body.requestedAmount,
+      executedAmount,
+      slippageBps,
+      status: 'PENDING',
+    });
+
+  } catch (err: unknown) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    if (tradeLogId != null) {
+      await env.TRADINGBOT_DB
+        .prepare(
+          `UPDATE trade_logs SET status = 'FAILED', error_message = ?2, updated_at = ?3 WHERE id = ?1`,
+        )
+        .bind(tradeLogId, errorMessage, nowTs())
+        .run();
+    }
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      user.id,
+      'trade.failed',
+      targetMint,
+      `${action} trade failed: ${errorMessage}`,
+    );
+    throw err instanceof ApiError ? err : new ApiError(502, `Trade failed: ${errorMessage}`);
+  }
 }
 
 // POST /api/admin/password - Change admin password
