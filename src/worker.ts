@@ -2225,6 +2225,164 @@ async function dbListRecentSignalsForDebug(
   }));
 }
 
+async function dbSignalExistsForUserTxSignature(
+  db: D1Database,
+  userId: number,
+  txSignature: string,
+): Promise<boolean> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT id
+       FROM signals
+       WHERE source LIKE ?1 AND tx_signature = ?2
+       LIMIT 1`,
+    )
+    .bind(`%:user:${userId}`, txSignature)
+    .first<{ id: number }>();
+  return !!row;
+}
+
+async function fetchRecentSolanaSignaturesForAddress(
+  rpcUrls: string | string[],
+  address: string,
+  limit: number,
+): Promise<Array<{ signature: string; blockTime?: number | null; err?: unknown }>> {
+  return solanaRpc<Array<{ signature: string; blockTime?: number | null; err?: unknown }>>(
+    rpcUrls,
+    'getSignaturesForAddress',
+    [address, { limit }],
+  );
+}
+
+async function reconcileTokenTransactionsFromRpc(
+  db: D1Database,
+  userId: number,
+  contractAddress: string,
+  rpcUrls: string | string[],
+  options?: {
+    perAddressLimit?: number;
+  },
+): Promise<{
+  scannedSignatures: number;
+  insertedSignals: number;
+  duplicates: number;
+  skippedIrrelevant: number;
+}> {
+  const perAddressLimit = options?.perAddressLimit ?? 15;
+  const [managed, watched] = await Promise.all([
+    dbListManagedAccountAddresses(db, userId),
+    dbListAccounts(db, userId, 'watch'),
+  ]);
+  const candidateAddresses = dedupeStrings([
+    ...managed,
+    ...watched.map((account) => account.address),
+  ]);
+
+  if (candidateAddresses.length === 0) {
+    return {
+      scannedSignatures: 0,
+      insertedSignals: 0,
+      duplicates: 0,
+      skippedIrrelevant: 0,
+    };
+  }
+
+  const signaturePool = new Map<string, string>();
+  for (const address of candidateAddresses) {
+    try {
+      const signatures = await fetchRecentSolanaSignaturesForAddress(
+        rpcUrls,
+        address,
+        perAddressLimit,
+      );
+      for (const entry of signatures) {
+        if (!entry.signature || signaturePool.has(entry.signature)) continue;
+        signaturePool.set(entry.signature, address);
+      }
+    } catch (err: unknown) {
+      console.warn(`Failed to fetch signatures for ${address}:`, err);
+    }
+  }
+
+  let insertedSignals = 0;
+  let duplicates = 0;
+  let skippedIrrelevant = 0;
+
+  for (const [txSignature, address] of signaturePool.entries()) {
+    if (await dbSignalExistsForUserTxSignature(db, userId, txSignature)) {
+      duplicates += 1;
+      continue;
+    }
+
+    const rpcDetails = await fetchSolanaWebhookTransactionDetailsFromRpc(
+      rpcUrls,
+      txSignature,
+      contractAddress,
+      {
+        primaryWalletAddress: address,
+      },
+    );
+
+    const mergedDetails = mergeStoredSignalTransactionDetails(
+      {
+        tokenContractAddress: contractAddress,
+        primaryWalletAddress: address,
+        transactionStatus: 'PENDING',
+        detailSource: 'unknown',
+      },
+      rpcDetails,
+    );
+
+    const isRelevant =
+      mergedDetails.action != null ||
+      mergedDetails.tokenAmount != null ||
+      mergedDetails.usdcAmount != null;
+    if (!isRelevant) {
+      skippedIrrelevant += 1;
+      continue;
+    }
+
+    const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
+      db,
+      userId,
+      [
+        mergedDetails.primaryWalletAddress,
+        mergedDetails.fromWalletAddress,
+        mergedDetails.toWalletAddress,
+      ],
+      address,
+    );
+    mergedDetails.primaryWalletAddress = preferredWalletAddress;
+
+    const source = `rpc_reconcile:refresh:user:${userId}`;
+    const externalId = `${txSignature}:${contractAddress}`;
+    await dbCreateSignal(db, {
+      source,
+      externalId,
+      eventType: 'rpc_reconcile:transaction',
+      walletAddress: preferredWalletAddress,
+      txSignature,
+      payload: JSON.stringify({
+        type: 'rpc_reconcile',
+        txSignature,
+        contractAddress,
+        walletAddress: address,
+      }),
+      detailsJson: JSON.stringify(mergedDetails),
+    });
+    await dbMarkSignalProcessed(db, source, externalId);
+    insertedSignals += 1;
+  }
+
+  return {
+    scannedSignatures: signaturePool.size,
+    insertedSignals,
+    duplicates,
+    skippedIrrelevant,
+  };
+}
+
 async function dbCreateTradeLog(
   db: D1Database,
   input: TradeLogCreateRequest,
@@ -5657,6 +5815,21 @@ async function handleForceRefreshMarketSnapshot(
     },
   );
 
+  const rpcReconciliation = await reconcileTokenTransactionsFromRpc(
+    env.TRADINGBOT_DB,
+    user.id,
+    contractAddress,
+    rpcUrls,
+  ).catch((err) => {
+    console.warn(`RPC reconciliation failed for ${contractAddress}:`, err);
+    return {
+      scannedSignatures: 0,
+      insertedSignals: 0,
+      duplicates: 0,
+      skippedIrrelevant: 0,
+    };
+  });
+
   let strategyEvaluationSummary: string | null = null;
   let strategyEvaluationPayload: Record<string, unknown> | null = null;
   try {
@@ -5694,11 +5867,15 @@ async function handleForceRefreshMarketSnapshot(
     'market_snapshot.force_refreshed',
     contractAddress,
     strategyEvaluationSummary
-      ? `Forced a live market snapshot refresh and stored a new historical record. ${strategyEvaluationSummary}`
-      : 'Forced a live market snapshot refresh and stored a new historical record.',
+      ? `Forced a live market snapshot refresh and stored a new historical record. ${strategyEvaluationSummary} RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions.`
+      : `Forced a live market snapshot refresh and stored a new historical record. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions.`,
   );
 
-  return jsonResponse({ marketSnapshot, strategyEvaluation: strategyEvaluationPayload });
+  return jsonResponse({
+    marketSnapshot,
+    strategyEvaluation: strategyEvaluationPayload,
+    rpcReconciliation,
+  });
 }
 
 // POST /api/rpc-endpoints

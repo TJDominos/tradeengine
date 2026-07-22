@@ -396,7 +396,15 @@ export default function App() {
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
       if (auth?.authenticated && settings.contractAddress.trim()) {
-        const result = await api<{ marketSnapshot: TokenMarketSnapshot | null }>(
+        const result = await api<{
+          marketSnapshot: TokenMarketSnapshot | null;
+          rpcReconciliation?: {
+            scannedSignatures: number;
+            insertedSignals: number;
+            duplicates: number;
+            skippedIrrelevant: number;
+          };
+        }>(
           '/api/market-snapshot/refresh',
           { method: 'POST' },
         );
@@ -411,10 +419,13 @@ export default function App() {
                 }
               : current,
           );
+          await loadState();
           await loadMarketSnapshotHistory();
           setNotice(
             result.marketSnapshot.priceUsd != null
-              ? 'Market data refreshed.'
+              ? result.rpcReconciliation
+                ? `Market data refreshed. RPC reconciliation scanned ${result.rpcReconciliation.scannedSignatures} signatures and inserted ${result.rpcReconciliation.insertedSignals} transaction record(s).`
+                : 'Market data refreshed.'
               : 'Token metadata loaded. Price data not yet available in Jupiter.',
           );
         } else {
