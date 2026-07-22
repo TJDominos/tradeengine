@@ -61,6 +61,7 @@ export default function TransactionLogsCard({
               <th className="px-4 py-2 font-medium">Action / Event</th>
               <th className="px-4 py-2 font-medium">Token Qty</th>
               <th className="px-4 py-2 font-medium">USDC Amount</th>
+              <th className="px-4 py-2 font-medium">Fee</th>
               <th className="px-4 py-2 text-center font-medium">Status</th>
               <th className="px-4 py-2 font-medium">Tx / Error</th>
             </tr>
@@ -105,6 +106,10 @@ export default function TransactionLogsCard({
                     : log.executedAmount != null && log.executedPrice != null
                       ? log.executedAmount * log.executedPrice
                       : null;
+              const feeAmount =
+                log.kind === 'webhook'
+                  ? log.feeAmountUsd
+                  : null;
               const txOrError = log.txSignature
                 ? compactAddress(log.txSignature)
                 : log.errorMessage ?? (log.kind === 'webhook' ? 'Tracked by webhook' : '-');
@@ -151,6 +156,7 @@ export default function TransactionLogsCard({
                   <td className={`px-4 py-1.5 text-xs font-bold ${actionClass}`}>{actionLabel}</td>
                   <td className="px-4 py-1.5 text-xs text-slate-300">{tokenAmount != null ? formatNum(tokenAmount) : '-'}</td>
                   <td className="px-4 py-1.5 text-xs text-slate-300">{usdcAmount != null ? formatNum(usdcAmount) : '-'}</td>
+                  <td className="px-4 py-1.5 text-xs text-slate-300">{feeAmount != null ? formatNum(feeAmount) : '-'}</td>
                   <td className="px-4 py-1.5 text-center">
                     <span
                       className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
@@ -170,7 +176,7 @@ export default function TransactionLogsCard({
             })}
             {currentTransactionLogs.length === 0 ? (
               <tr>
-                <td colSpan={8} className="py-8 text-center text-sm text-slate-500">
+                <td colSpan={9} className="py-8 text-center text-sm text-slate-500">
                   No trade or webhook records yet.
                 </td>
               </tr>

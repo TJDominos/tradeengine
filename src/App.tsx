@@ -888,6 +888,7 @@ export default function App() {
       log.status.toLowerCase().includes(term) ||
       String(log.usdcAmount ?? '').includes(term) ||
       String(log.tokenAmount ?? '').includes(term) ||
+      String(log.feeAmountUsd ?? '').includes(term) ||
       (log.txSignature ?? '').toLowerCase().includes(term) ||
       (log.errorMessage ?? '').toLowerCase().includes(term)
     );

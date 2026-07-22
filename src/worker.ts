@@ -62,6 +62,7 @@ const SESSION_TTL_HOURS = 12;
 const PBKDF2_ITERATIONS = 100_000; // Max supported by Cloudflare Workers
 const DEFAULT_SOLANA_DERIVATION_PATH = "m/44'/501'/0'/0'";
 const SOLANA_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const SOLANA_WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 const SOLANA_SPL_TOKEN_PROGRAM_ID =
   'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const SOLANA_TOKEN_2022_PROGRAM_ID =
@@ -166,6 +167,7 @@ interface WebhookTransactionLogRecord {
   action: 'BUY' | 'SELL' | null;
   usdcAmount: number | null;
   tokenAmount: number | null;
+  feeAmountUsd: number | null;
   eventType: string;
   txSignature: string | null;
   status: 'PENDING' | 'CONFIRMED' | 'FAILED';
@@ -181,6 +183,7 @@ interface StoredSignalTransactionDetails {
   action: 'BUY' | 'SELL' | null;
   usdcAmount: number | null;
   tokenAmount: number | null;
+  feeAmountUsd: number | null;
   transactionStatus: 'PENDING' | 'CONFIRMED' | 'FAILED';
   detailSource: 'payload' | 'rpc' | 'payload+rpc' | 'unknown';
 }
@@ -877,6 +880,7 @@ function parseStoredSignalTransactionDetails(
     action: actionText === 'BUY' || actionText === 'SELL' ? actionText : null,
     usdcAmount: toFiniteNumber(payload.usdcAmount),
     tokenAmount: toFiniteNumber(payload.tokenAmount),
+    feeAmountUsd: toFiniteNumber(payload.feeAmountUsd),
     transactionStatus:
       statusText === 'CONFIRMED' || statusText === 'FAILED' || statusText === 'PENDING'
         ? statusText
@@ -902,6 +906,7 @@ function mergeStoredSignalTransactionDetails(
     action: null,
     usdcAmount: null,
     tokenAmount: null,
+    feeAmountUsd: null,
     transactionStatus: 'PENDING',
     detailSource: 'unknown',
   };
@@ -915,6 +920,7 @@ function mergeStoredSignalTransactionDetails(
     merged.action ??= details.action ?? null;
     merged.usdcAmount ??= details.usdcAmount ?? null;
     merged.tokenAmount ??= details.tokenAmount ?? null;
+    merged.feeAmountUsd ??= details.feeAmountUsd ?? null;
 
     if (details.transactionStatus === 'FAILED') {
       merged.transactionStatus = 'FAILED';
@@ -1017,6 +1023,17 @@ function extractWebhookTransactionDetailsFromPayload(
     action,
     detailSource: 'payload',
   };
+
+  const payloadFee =
+    toFiniteNumber(activity?.fee) ??
+    toFiniteNumber(activity?.feeUsd) ??
+    toFiniteNumber(activity?.feeUSD) ??
+    toFiniteNumber(log?.fee) ??
+    toFiniteNumber(log?.feeUsd) ??
+    toFiniteNumber(log?.feeUSD);
+  if (payloadFee != null) {
+    details.feeAmountUsd = Math.abs(payloadFee);
+  }
 
   if (amountCandidate != null) {
     if (
@@ -2129,6 +2146,7 @@ async function dbListWebhookTransactionLogs(
       action: mergedDetails.action,
       usdcAmount: mergedDetails.usdcAmount,
       tokenAmount: mergedDetails.tokenAmount,
+      feeAmountUsd: mergedDetails.feeAmountUsd,
       eventType: firstRow.event_type,
       txSignature: firstRow.tx_signature,
       status,
@@ -2796,9 +2814,13 @@ async function fetchSolanaWebhookTransactionDetailsFromRpc(
   payloadDetails: Partial<StoredSignalTransactionDetails>,
 ): Promise<Partial<StoredSignalTransactionDetails>> {
   try {
+    const solPriceUsd =
+      (await fetchJupiterTokenPrice(SOLANA_WRAPPED_SOL_MINT)) ??
+      (await fetchJupiterPriceViaQuote(SOLANA_WRAPPED_SOL_MINT, 9));
     const transaction = await solanaRpc<{
       meta?: {
         err?: unknown;
+        fee?: number;
         preTokenBalances?: Array<{
           owner?: string;
           mint?: string;
@@ -2916,6 +2938,10 @@ async function fetchSolanaWebhookTransactionDetailsFromRpc(
       tokenAmount: focusDelta && focusDelta.tracked !== 0 ? Math.abs(focusDelta.tracked) : null,
       transactionStatus: transaction.meta?.err ? 'FAILED' : 'CONFIRMED',
       detailSource: 'rpc',
+      feeAmountUsd:
+        typeof transaction.meta?.fee === 'number' && solPriceUsd != null
+          ? (transaction.meta.fee / 1_000_000_000) * solPriceUsd
+          : null,
     };
   } catch (err: unknown) {
     console.warn(`Failed to enrich webhook transaction ${txSignature} from RPC:`, err);

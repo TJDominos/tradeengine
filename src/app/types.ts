@@ -68,6 +68,7 @@ export type WebhookTransactionLog = {
   action: 'BUY' | 'SELL' | null;
   usdcAmount: number | null;
   tokenAmount: number | null;
+  feeAmountUsd: number | null;
   eventType: string;
   txSignature: string | null;
   status: 'PENDING' | 'CONFIRMED' | 'FAILED';
