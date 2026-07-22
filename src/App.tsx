@@ -740,6 +740,9 @@ export default function App() {
 
   const [isSimulationModalOpen, setIsSimulationModalOpen] = React.useState(false);
   const settingsDirtyRef = React.useRef(false);
+  // Tracks which token address we last attempted to auto-init, to avoid
+  // re-firing every 3-second polling cycle when the snapshot stays null.
+  const marketInitAttemptedRef = React.useRef('');
 
   const hasDateRange = dateRange.from !== '' && dateRange.to !== '';
 
@@ -866,9 +869,12 @@ export default function App() {
   // Auto-initialize market data when dashboard loads with active token
   useEffect(() => {
     if (!auth?.authenticated || !engineState || activeTab !== 'dashboard') return;
-    if (!settings.contractAddress.trim()) return;
+    const addr = settings.contractAddress.trim();
+    if (!addr) return;
     if (engineState.marketSnapshot) return; // Already loaded
+    if (marketInitAttemptedRef.current === addr) return; // Already tried for this address
 
+    marketInitAttemptedRef.current = addr;
     const initializeMarketData = async () => {
       try {
         const result = await api<{ marketSnapshot: TokenMarketSnapshot | null }>(
@@ -885,11 +891,10 @@ export default function App() {
               : current,
           );
         }
-      } catch (err: unknown) {
-        // Silently fail, market data will load in next poll
+      } catch {
+        // Silently fail — user can click Refresh manually
       }
     };
-
     void initializeMarketData();
   }, [auth?.authenticated, activeTab, settings.contractAddress, engineState]);
 
@@ -948,6 +953,8 @@ export default function App() {
           { method: 'POST' },
         );
         if (result.marketSnapshot) {
+          // Allow auto-init to retry if user manually refreshes
+          marketInitAttemptedRef.current = '';
           setEngineState((current) =>
             current
               ? {
@@ -956,12 +963,18 @@ export default function App() {
                 }
               : current,
           );
+          setNotice(
+            result.marketSnapshot.priceUsd != null
+              ? 'Market data refreshed.'
+              : 'Token metadata loaded. Price data not yet available in Jupiter.',
+          );
+        } else {
+          setNotice(
+            'No data found for this token in Jupiter. The contract address may be incorrect or the token is not yet indexed.',
+          );
         }
-        setNotice('Market data refreshed with live token update.');
       } else {
-        setNotice(
-          'No active trading token. Select a token first to refresh market data.',
-        );
+        setNotice('No active trading token. Select a token first to refresh market data.');
       }
     });
 

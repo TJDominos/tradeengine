@@ -2419,10 +2419,47 @@ async function fetchJupiterTokenPrice(mint: string): Promise<number | null> {
     const body = await response.json<{
       data?: Record<string, { price?: number | string } | null>;
     }>();
+    // Jupiter uses the exact mint address as the key
     const entry = body.data?.[mint] ?? body.data?.[mint.toLowerCase()];
     if (!entry) return null;
     const price = toFiniteNumber(entry.price);
     return price != null && price > 0 ? price : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Derive token price by getting a Jupiter swap quote for 1 USDC → token.
+ * Used as a fallback when the Jupiter Price API does not index the token.
+ */
+async function fetchJupiterPriceViaQuote(
+  mint: string,
+  tokenDecimals: number,
+): Promise<number | null> {
+  try {
+    const url = new URL('https://quote-api.jup.ag/v6/quote');
+    url.searchParams.set('inputMint', SOLANA_USDC_MINT);
+    url.searchParams.set('outputMint', mint);
+    url.searchParams.set('amount', '1000000'); // 1 USDC (6 decimals)
+    url.searchParams.set('slippageBps', '500');
+
+    const response = await fetch(url.toString(), {
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) return null;
+
+    const body = await response.json<{
+      outAmount?: string;
+      error?: string;
+    }>();
+    if (body.error || !body.outAmount) return null;
+
+    const outAmount = Number(body.outAmount);
+    if (!Number.isFinite(outAmount) || outAmount <= 0) return null;
+
+    // 1 USDC / (outAmount / 10^tokenDecimals) = price per token in USD
+    return (10 ** tokenDecimals) / outAmount;
   } catch {
     return null;
   }
@@ -2693,14 +2730,33 @@ async function syncTokenMarketSnapshotForUser(
     }
   }
 
+  // Look up stored decimals for the quote-based price fallback
+  const storedDecimals: number | null = tokenId
+    ? ((await db
+        .prepare('SELECT decimals FROM tradable_tokens WHERE id = ?1')
+        .bind(tokenId)
+        .first<{ decimals: number | null }>())?.decimals ?? null)
+    : null;
+
   // Fetch price and metadata from Jupiter APIs in parallel
   let liveSnapshot: TokenMarketSnapshot | null = null;
   try {
-    const [jupiterPrice, jupiterMeta] = await Promise.all([
+    const [priceApiResult, jupiterMeta] = await Promise.all([
       fetchJupiterTokenPrice(normalizedAddress),
       fetchJupiterTokenMetadata(normalizedAddress),
     ]);
-    if (jupiterPrice != null) {
+
+    // Resolve decimals: DB → Jupiter metadata → null
+    const resolvedDecimals = storedDecimals ?? jupiterMeta?.decimals ?? null;
+
+    // If Price API has no data, fall back to a quote-derived price
+    let jupiterPrice = priceApiResult;
+    if (jupiterPrice == null && resolvedDecimals != null) {
+      jupiterPrice = await fetchJupiterPriceViaQuote(normalizedAddress, resolvedDecimals);
+    }
+
+    // Build a snapshot from any available data — even if price is null
+    if (jupiterPrice != null || jupiterMeta != null) {
       liveSnapshot = {
         network: normalizedNetwork,
         contractAddress: normalizedAddress,
@@ -3862,13 +3918,6 @@ async function handleForceRefreshMarketSnapshot(
       fallbackToStoredOnError: false,
     },
   );
-
-  if (!marketSnapshot) {
-    throw new ApiError(
-      502,
-      'No live market data is available for the active trading token',
-    );
-  }
 
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
