@@ -396,6 +396,9 @@ export default function App() {
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
       if (auth?.authenticated && settings.contractAddress.trim()) {
+        const refreshQuery = hasDateRange
+          ? `?startTime=${toRangeStartMs(dateRange.from)}&endTime=${toRangeEndMs(dateRange.to)}`
+          : '';
         const result = await api<{
           marketSnapshot: TokenMarketSnapshot | null;
           rpcReconciliation?: {
@@ -405,7 +408,7 @@ export default function App() {
             skippedIrrelevant: number;
           };
         }>(
-          '/api/market-snapshot/refresh',
+          `/api/market-snapshot/refresh${refreshQuery}`,
           { method: 'POST' },
         );
         if (result.marketSnapshot) {

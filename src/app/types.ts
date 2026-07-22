@@ -69,6 +69,7 @@ export type WebhookTransactionLog = {
   usdcAmount: number | null;
   tokenAmount: number | null;
   feeAmountUsd: number | null;
+  source: 'webhook' | 'rpc_reconcile';
   eventType: string;
   txSignature: string | null;
   status: 'PENDING' | 'CONFIRMED' | 'FAILED';

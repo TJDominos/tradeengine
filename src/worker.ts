@@ -168,6 +168,7 @@ interface WebhookTransactionLogRecord {
   usdcAmount: number | null;
   tokenAmount: number | null;
   feeAmountUsd: number | null;
+  source: 'webhook' | 'rpc_reconcile';
   eventType: string;
   txSignature: string | null;
   status: 'PENDING' | 'CONFIRMED' | 'FAILED';
@@ -184,6 +185,7 @@ interface StoredSignalTransactionDetails {
   usdcAmount: number | null;
   tokenAmount: number | null;
   feeAmountUsd: number | null;
+  source: 'webhook' | 'rpc_reconcile';
   transactionStatus: 'PENDING' | 'CONFIRMED' | 'FAILED';
   detailSource: 'payload' | 'rpc' | 'payload+rpc' | 'unknown';
 }
@@ -881,6 +883,10 @@ function parseStoredSignalTransactionDetails(
     usdcAmount: toFiniteNumber(payload.usdcAmount),
     tokenAmount: toFiniteNumber(payload.tokenAmount),
     feeAmountUsd: toFiniteNumber(payload.feeAmountUsd),
+    source:
+      readNonEmptyString(payload.source) === 'rpc_reconcile'
+        ? 'rpc_reconcile'
+        : 'webhook',
     transactionStatus:
       statusText === 'CONFIRMED' || statusText === 'FAILED' || statusText === 'PENDING'
         ? statusText
@@ -907,6 +913,7 @@ function mergeStoredSignalTransactionDetails(
     usdcAmount: null,
     tokenAmount: null,
     feeAmountUsd: null,
+    source: 'webhook',
     transactionStatus: 'PENDING',
     detailSource: 'unknown',
   };
@@ -1022,6 +1029,7 @@ function extractWebhookTransactionDetailsFromPayload(
     toWalletAddress,
     action,
     detailSource: 'payload',
+    source: 'webhook',
   };
 
   const payloadFee =
@@ -2147,6 +2155,7 @@ async function dbListWebhookTransactionLogs(
       usdcAmount: mergedDetails.usdcAmount,
       tokenAmount: mergedDetails.tokenAmount,
       feeAmountUsd: mergedDetails.feeAmountUsd,
+      source: mergedDetails.source,
       eventType: firstRow.event_type,
       txSignature: firstRow.tx_signature,
       status,
@@ -2255,6 +2264,13 @@ async function fetchRecentSolanaSignaturesForAddress(
   );
 }
 
+function signatureBlockTimeToMs(blockTime: number | null | undefined): number | null {
+  if (typeof blockTime !== 'number' || !Number.isFinite(blockTime) || blockTime <= 0) {
+    return null;
+  }
+  return blockTime * 1000;
+}
+
 async function reconcileTokenTransactionsFromRpc(
   db: D1Database,
   userId: number,
@@ -2262,6 +2278,8 @@ async function reconcileTokenTransactionsFromRpc(
   rpcUrls: string | string[],
   options?: {
     perAddressLimit?: number;
+    startTimeMs?: number | null;
+    endTimeMs?: number | null;
   },
 ): Promise<{
   scannedSignatures: number;
@@ -2288,7 +2306,7 @@ async function reconcileTokenTransactionsFromRpc(
     };
   }
 
-  const signaturePool = new Map<string, string>();
+  const signaturePool = new Map<string, { address: string; blockTimeMs: number | null }>();
   for (const address of candidateAddresses) {
     try {
       const signatures = await fetchRecentSolanaSignaturesForAddress(
@@ -2298,7 +2316,10 @@ async function reconcileTokenTransactionsFromRpc(
       );
       for (const entry of signatures) {
         if (!entry.signature || signaturePool.has(entry.signature)) continue;
-        signaturePool.set(entry.signature, address);
+        signaturePool.set(entry.signature, {
+          address,
+          blockTimeMs: signatureBlockTimeToMs(entry.blockTime),
+        });
       }
     } catch (err: unknown) {
       console.warn(`Failed to fetch signatures for ${address}:`, err);
@@ -2309,7 +2330,24 @@ async function reconcileTokenTransactionsFromRpc(
   let duplicates = 0;
   let skippedIrrelevant = 0;
 
-  for (const [txSignature, address] of signaturePool.entries()) {
+  for (const [txSignature, signatureMeta] of signaturePool.entries()) {
+    if (
+      signatureMeta.blockTimeMs != null &&
+      options?.startTimeMs != null &&
+      signatureMeta.blockTimeMs < options.startTimeMs
+    ) {
+      skippedIrrelevant += 1;
+      continue;
+    }
+    if (
+      signatureMeta.blockTimeMs != null &&
+      options?.endTimeMs != null &&
+      signatureMeta.blockTimeMs > options.endTimeMs
+    ) {
+      skippedIrrelevant += 1;
+      continue;
+    }
+
     if (await dbSignalExistsForUserTxSignature(db, userId, txSignature)) {
       duplicates += 1;
       continue;
@@ -2320,14 +2358,15 @@ async function reconcileTokenTransactionsFromRpc(
       txSignature,
       contractAddress,
       {
-        primaryWalletAddress: address,
+        primaryWalletAddress: signatureMeta.address,
       },
     );
 
     const mergedDetails = mergeStoredSignalTransactionDetails(
       {
         tokenContractAddress: contractAddress,
-        primaryWalletAddress: address,
+        primaryWalletAddress: signatureMeta.address,
+        source: 'rpc_reconcile',
         transactionStatus: 'PENDING',
         detailSource: 'unknown',
       },
@@ -2351,7 +2390,7 @@ async function reconcileTokenTransactionsFromRpc(
         mergedDetails.fromWalletAddress,
         mergedDetails.toWalletAddress,
       ],
-      address,
+      signatureMeta.address,
     );
     mergedDetails.primaryWalletAddress = preferredWalletAddress;
 
@@ -2367,7 +2406,8 @@ async function reconcileTokenTransactionsFromRpc(
         type: 'rpc_reconcile',
         txSignature,
         contractAddress,
-        walletAddress: address,
+        walletAddress: signatureMeta.address,
+        blockTimeMs: signatureMeta.blockTimeMs,
       }),
       detailsJson: JSON.stringify(mergedDetails),
     });
@@ -3163,6 +3203,7 @@ async function fetchSolanaWebhookTransactionDetailsFromRpc(
       action,
       usdcAmount: focusDelta && focusDelta.usdc !== 0 ? Math.abs(focusDelta.usdc) : null,
       tokenAmount: focusDelta && focusDelta.tracked !== 0 ? Math.abs(focusDelta.tracked) : null,
+      source: 'rpc_reconcile',
       transactionStatus: transaction.meta?.err ? 'FAILED' : 'CONFIRMED',
       detailSource: 'rpc',
       feeAmountUsd:
@@ -3175,6 +3216,7 @@ async function fetchSolanaWebhookTransactionDetailsFromRpc(
     return {
       tokenContractAddress: trackedContractAddress,
       feeAmountUsd: null,
+      source: 'rpc_reconcile',
       transactionStatus: 'PENDING',
       detailSource: 'unknown',
     };
@@ -5789,6 +5831,7 @@ async function handleForceRefreshMarketSnapshot(
   env: Env,
 ): Promise<Response> {
   const user = await requireAdmin(request, env);
+  const url = new URL(request.url);
   const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
   const contractAddress = settings.contractAddress.trim();
   if (!contractAddress) {
@@ -5820,6 +5863,18 @@ async function handleForceRefreshMarketSnapshot(
     user.id,
     contractAddress,
     rpcUrls,
+    {
+      startTimeMs: (() => {
+        const raw = url.searchParams.get('startTime');
+        const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+        return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
+      })(),
+      endTimeMs: (() => {
+        const raw = url.searchParams.get('endTime');
+        const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+        return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
+      })(),
+    },
   ).catch((err) => {
     console.warn(`RPC reconciliation failed for ${contractAddress}:`, err);
     return {

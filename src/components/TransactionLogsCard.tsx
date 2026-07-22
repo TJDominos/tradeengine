@@ -110,6 +110,12 @@ export default function TransactionLogsCard({
                 log.kind === 'webhook'
                   ? log.feeAmountUsd
                   : null;
+              const sourceLabel =
+                log.kind === 'webhook'
+                  ? log.source === 'rpc_reconcile'
+                    ? 'rpc'
+                    : 'webhook'
+                  : 'trade';
               const txOrError = log.txSignature
                 ? compactAddress(log.txSignature)
                 : log.errorMessage ?? (log.kind === 'webhook' ? 'Tracked by webhook' : '-');
@@ -145,6 +151,9 @@ export default function TransactionLogsCard({
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${ownershipBadgeClass}`}>
                         {walletOwnershipMeta.ownership}
+                      </span>
+                      <span className="rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 text-[10px] uppercase tracking-wider text-slate-300">
+                        {sourceLabel}
                       </span>
                       {walletOwnershipMeta.accountLabel ? (
                         <span className="rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 text-[10px] text-slate-300">
