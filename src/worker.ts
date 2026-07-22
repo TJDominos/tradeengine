@@ -2156,6 +2156,75 @@ async function dbListWebhookTransactionLogs(
   });
 }
 
+async function dbListRecentSignalsForDebug(
+  db: D1Database,
+  userId: number,
+  limit: number,
+): Promise<Array<{
+  id: number;
+  source: string;
+  externalId: string;
+  eventType: string;
+  walletAddress: string | null;
+  txSignature: string | null;
+  processed: number;
+  errorMessage: string | null;
+  createdAt: number;
+  contractAddresses: string[];
+  details: StoredSignalTransactionDetails | null;
+  payloadPreview: string;
+}>> {
+  await dbEnsureTradeDomainSchema(db);
+  const rows = await db
+    .prepare(
+      `SELECT
+         id,
+         source,
+         external_id,
+         event_type,
+         wallet_address,
+         tx_signature,
+         processed,
+         error_message,
+         created_at,
+         details_json,
+         payload
+       FROM signals
+       WHERE source LIKE ?1
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?2`,
+    )
+    .bind(`%:user:${userId}`, limit)
+    .all<{
+      id: number;
+      source: string;
+      external_id: string;
+      event_type: string;
+      wallet_address: string | null;
+      tx_signature: string | null;
+      processed: number;
+      error_message: string | null;
+      created_at: number;
+      details_json: string | null;
+      payload: string;
+    }>();
+
+  return rows.results.map((row) => ({
+    id: row.id,
+    source: row.source,
+    externalId: row.external_id,
+    eventType: row.event_type,
+    walletAddress: row.wallet_address,
+    txSignature: row.tx_signature,
+    processed: row.processed,
+    errorMessage: row.error_message,
+    createdAt: row.created_at,
+    contractAddresses: extractStoredSignalContractAddresses(row.payload),
+    details: parseStoredSignalTransactionDetails(row.details_json),
+    payloadPreview: row.payload.slice(0, 2000),
+  }));
+}
+
 async function dbCreateTradeLog(
   db: D1Database,
   input: TradeLogCreateRequest,
@@ -2947,6 +3016,7 @@ async function fetchSolanaWebhookTransactionDetailsFromRpc(
     console.warn(`Failed to enrich webhook transaction ${txSignature} from RPC:`, err);
     return {
       tokenContractAddress: trackedContractAddress,
+      feeAmountUsd: null,
       transactionStatus: 'PENDING',
       detailSource: 'unknown',
     };
@@ -4826,6 +4896,41 @@ async function handleHealth(_req: Request, env: Env): Promise<Response> {
   });
 }
 
+// GET /api/debug/webhook-transactions
+async function handleDebugWebhookTransactions(
+  request: Request,
+  url: URL,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const limitText = url.searchParams.get('limit');
+  const limit = Number.isInteger(Number.parseInt(limitText ?? '', 10))
+    ? Math.min(Math.max(Number.parseInt(limitText ?? '', 10), 1), 50)
+    : 10;
+
+  const [signalCountRow, recentSignals, groupedWebhookTransactions, tradeLogCountRow] =
+    await Promise.all([
+      env.TRADINGBOT_DB
+        .prepare('SELECT COUNT(*) AS cnt FROM signals WHERE source LIKE ?1')
+        .bind(`%:user:${user.id}`)
+        .first<{ cnt: number }>(),
+      dbListRecentSignalsForDebug(env.TRADINGBOT_DB, user.id, limit),
+      dbListWebhookTransactionLogs(env.TRADINGBOT_DB, user.id),
+      env.TRADINGBOT_DB
+        .prepare('SELECT COUNT(*) AS cnt FROM trade_logs')
+        .first<{ cnt: number }>(),
+    ]);
+
+  return jsonResponse({
+    user: { id: user.id, username: user.username },
+    signalCount: signalCountRow?.cnt ?? 0,
+    tradeLogCount: tradeLogCountRow?.cnt ?? 0,
+    groupedWebhookTransactionCount: groupedWebhookTransactions.length,
+    groupedWebhookTransactions: groupedWebhookTransactions.slice(0, limit),
+    recentSignals,
+  });
+}
+
 // GET /api/auth/status
 async function handleAuthStatus(request: Request, env: Env): Promise<Response> {
   const setupRequired = await dbSetupRequired(env.TRADINGBOT_DB);
@@ -5996,6 +6101,8 @@ async function handleApi(
   try {
     if (method === 'GET' && pathname === '/api/health')
       return await handleHealth(request, env);
+    if (method === 'GET' && pathname === '/api/debug/webhook-transactions')
+      return await handleDebugWebhookTransactions(request, url, env);
     if (method === 'GET' && pathname === '/api/auth/status')
       return await handleAuthStatus(request, env);
     if (method === 'POST' && pathname === '/api/auth/bootstrap')
