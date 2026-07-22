@@ -1316,6 +1316,16 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY(strategy_version_id) REFERENCES strategy_versions(id) ON DELETE CASCADE
   )`,
+  `CREATE TABLE IF NOT EXISTS token_holder_addresses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id INTEGER NOT NULL,
+    wallet_address TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'rpc_scan',
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    UNIQUE(token_id, wallet_address),
+    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
+  )`,
   `CREATE TABLE IF NOT EXISTS rpc_endpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -1336,6 +1346,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_strategy_versions_strategy_created ON strategy_versions(strategy_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_version_created ON strategy_evaluations(strategy_version_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_user_created ON strategy_evaluations(user_id, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_wallet ON token_holder_addresses(token_id, wallet_address)',
   'CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_user_network_created ON rpc_endpoints(user_id, network, created_at DESC)',
 ];
 
@@ -2232,6 +2243,276 @@ async function dbListRecentSignalsForDebug(
     details: parseStoredSignalTransactionDetails(row.details_json),
     payloadPreview: row.payload.slice(0, 2000),
   }));
+}
+
+async function fetchSolanaTokenHolderAddresses(
+  rpcUrls: string | string[],
+  mint: string,
+): Promise<string[]> {
+  const filters = [{ dataSize: 165 }, { memcmp: { offset: 0, bytes: mint } }];
+  const programResults = await Promise.allSettled(
+    [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID].map((programId) =>
+      solanaRpc<
+        Array<{
+          account: {
+            data: {
+              parsed?: {
+                info?: {
+                  owner?: string;
+                };
+              };
+            };
+          };
+        }>
+      >(rpcUrls, 'getProgramAccounts', [
+        programId,
+        { filters, encoding: 'jsonParsed' },
+      ]),
+    ),
+  );
+
+  const owners = new Set<string>();
+  for (const result of programResults) {
+    if (result.status !== 'fulfilled') {
+      continue;
+    }
+    for (const account of result.value) {
+      const owner = tryNormalizeSolanaPubkey(
+        account.account.data.parsed?.info?.owner,
+      );
+      if (owner) {
+        owners.add(owner);
+      }
+    }
+  }
+  return [...owners];
+}
+
+async function dbUpsertTokenHolderAddresses(
+  db: D1Database,
+  tokenId: number,
+  addresses: string[],
+  source = 'rpc_scan',
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  if (addresses.length === 0) {
+    return;
+  }
+  const timestamp = nowTs();
+  await db.batch(
+    addresses.map((address) =>
+      db
+        .prepare(
+          `INSERT INTO token_holder_addresses (
+             token_id,
+             wallet_address,
+             source,
+             first_seen_at,
+             last_seen_at
+           ) VALUES (?1, ?2, ?3, ?4, ?4)
+           ON CONFLICT(token_id, wallet_address)
+           DO UPDATE SET
+             source = excluded.source,
+             last_seen_at = excluded.last_seen_at`,
+        )
+        .bind(tokenId, address, source, timestamp),
+    ),
+  );
+}
+
+async function dbUpdateSignalsByTxSignatureForUser(
+  db: D1Database,
+  userId: number,
+  txSignature: string,
+  walletAddress: string | null,
+  details: StoredSignalTransactionDetails,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  await db
+    .prepare(
+      `UPDATE signals
+       SET wallet_address = COALESCE(?3, wallet_address),
+           details_json = ?4
+       WHERE source LIKE ?1 AND tx_signature = ?2`,
+    )
+    .bind(`%:user:${userId}`, txSignature, walletAddress, JSON.stringify(details))
+    .run();
+}
+
+async function dbListSignalGroupsForTokenWindow(
+  db: D1Database,
+  userId: number,
+  contractAddress: string,
+  startTimeMs: number | null,
+  endTimeMs: number | null,
+): Promise<Array<{
+  groupKey: string;
+  txSignature: string | null;
+  rows: Array<{
+    id: number;
+    source: string;
+    event_type: string;
+    wallet_address: string | null;
+    tx_signature: string | null;
+    details_json: string | null;
+    payload: string;
+    processed: number;
+    error_message: string | null;
+    created_at: number;
+  }>;
+  mergedDetails: StoredSignalTransactionDetails;
+}>> {
+  await dbEnsureTradeDomainSchema(db);
+  const rows = await db
+    .prepare(
+      `SELECT
+         id,
+         source,
+         event_type,
+         wallet_address,
+         tx_signature,
+         details_json,
+         payload,
+         processed,
+         error_message,
+         created_at
+       FROM signals
+       WHERE source LIKE ?1
+       ORDER BY created_at DESC, id DESC
+       LIMIT 2000`,
+    )
+    .bind(`%:user:${userId}`)
+    .all<{
+      id: number;
+      source: string;
+      event_type: string;
+      wallet_address: string | null;
+      tx_signature: string | null;
+      details_json: string | null;
+      payload: string;
+      processed: number;
+      error_message: string | null;
+      created_at: number;
+    }>();
+
+  const grouped = new Map<string, typeof rows.results>();
+  for (const row of rows.results) {
+    const createdAtMs = normalizeTimestampMs(row.created_at);
+    if (startTimeMs != null && createdAtMs < startTimeMs) continue;
+    if (endTimeMs != null && createdAtMs > endTimeMs) continue;
+
+    const contractAddresses = extractStoredSignalContractAddresses(row.payload);
+    if (!contractAddresses.includes(contractAddress)) {
+      continue;
+    }
+
+    const key = row.tx_signature?.trim() || `signal:${row.id}`;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.push(row);
+    } else {
+      grouped.set(key, [row]);
+    }
+  }
+
+  return [...grouped.entries()].map(([groupKey, groupRows]) => ({
+    groupKey,
+    txSignature: groupRows[0]?.tx_signature ?? null,
+    rows: groupRows,
+    mergedDetails: mergeStoredSignalTransactionDetails(
+      ...groupRows.map((row) => parseStoredSignalTransactionDetails(row.details_json)),
+      {
+        tokenContractAddress: contractAddress,
+        source: groupRows[0]?.source.includes('rpc_reconcile') ? 'rpc_reconcile' : 'webhook',
+      },
+    ),
+  }));
+}
+
+function isWebhookTransactionDetailsComplete(
+  details: StoredSignalTransactionDetails,
+): boolean {
+  return !!(
+    details.fromWalletAddress &&
+    details.toWalletAddress &&
+    details.action &&
+    details.usdcAmount != null &&
+    details.tokenAmount != null
+  );
+}
+
+async function reconcileWebhookTransactionDetailsInWindow(
+  db: D1Database,
+  userId: number,
+  contractAddress: string,
+  rpcUrls: string | string[],
+  startTimeMs: number | null,
+  endTimeMs: number | null,
+): Promise<{
+  expectedTransactions: number;
+  completeTransactionsBefore: number;
+  enrichedTransactions: number;
+  completeTransactionsAfter: number;
+}> {
+  const groups = await dbListSignalGroupsForTokenWindow(
+    db,
+    userId,
+    contractAddress,
+    startTimeMs,
+    endTimeMs,
+  );
+
+  const incompleteGroups = groups.filter(
+    (group) => group.txSignature && !isWebhookTransactionDetailsComplete(group.mergedDetails),
+  );
+  let enrichedTransactions = 0;
+
+  for (const group of incompleteGroups) {
+    const rpcDetails = await fetchSolanaWebhookTransactionDetailsFromRpc(
+      rpcUrls,
+      group.txSignature!,
+      contractAddress,
+      group.mergedDetails,
+    );
+    const mergedDetails = mergeStoredSignalTransactionDetails(
+      group.mergedDetails,
+      rpcDetails,
+    );
+    const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
+      db,
+      userId,
+      [
+        mergedDetails.primaryWalletAddress,
+        mergedDetails.fromWalletAddress,
+        mergedDetails.toWalletAddress,
+      ],
+      group.rows[0]?.wallet_address ?? null,
+    );
+    mergedDetails.primaryWalletAddress = preferredWalletAddress;
+    await dbUpdateSignalsByTxSignatureForUser(
+      db,
+      userId,
+      group.txSignature!,
+      preferredWalletAddress,
+      mergedDetails,
+    );
+    enrichedTransactions += 1;
+  }
+
+  const finalGroups = await dbListSignalGroupsForTokenWindow(
+    db,
+    userId,
+    contractAddress,
+    startTimeMs,
+    endTimeMs,
+  );
+
+  return {
+    expectedTransactions: groups.length,
+    completeTransactionsBefore: groups.filter((group) => isWebhookTransactionDetailsComplete(group.mergedDetails)).length,
+    enrichedTransactions,
+    completeTransactionsAfter: finalGroups.filter((group) => isWebhookTransactionDetailsComplete(group.mergedDetails)).length,
+  };
 }
 
 async function dbSignalExistsForUserTxSignature(
@@ -5906,6 +6187,56 @@ async function handleForceRefreshMarketSnapshot(
     },
   );
 
+  const startTimeMs = (() => {
+    const raw = url.searchParams.get('startTime');
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
+  })();
+  const endTimeMs = (() => {
+    const raw = url.searchParams.get('endTime');
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
+  })();
+
+  const tokenId = await dbResolveTradableTokenId(
+    env.TRADINGBOT_DB,
+    contractAddress,
+  );
+  if (tokenId) {
+    const holderAddresses = await fetchSolanaTokenHolderAddresses(
+      rpcUrls,
+      contractAddress,
+    ).catch((err) => {
+      console.warn(`Failed to scan holder addresses for ${contractAddress}:`, err);
+      return [];
+    });
+    await dbUpsertTokenHolderAddresses(
+      env.TRADINGBOT_DB,
+      tokenId,
+      holderAddresses,
+      'rpc_scan',
+    ).catch((err) => {
+      console.warn(`Failed to store holder addresses for ${contractAddress}:`, err);
+    });
+  }
+
+  const windowCompleteness = await reconcileWebhookTransactionDetailsInWindow(
+    env.TRADINGBOT_DB,
+    user.id,
+    contractAddress,
+    rpcUrls,
+    startTimeMs,
+    endTimeMs,
+  ).catch((err) => {
+    console.warn(`Window detail reconciliation failed for ${contractAddress}:`, err);
+    return {
+      expectedTransactions: 0,
+      completeTransactionsBefore: 0,
+      enrichedTransactions: 0,
+      completeTransactionsAfter: 0,
+    };
+  });
+
   const rpcReconciliation = await reconcileTokenTransactionsFromRpc(
     env.TRADINGBOT_DB,
     user.id,
@@ -5913,16 +6244,8 @@ async function handleForceRefreshMarketSnapshot(
     rpcUrls,
     {
       additionalAddresses: [marketSnapshot?.pairAddress ?? null],
-      startTimeMs: (() => {
-        const raw = url.searchParams.get('startTime');
-        const parsed = raw ? Number.parseInt(raw, 10) : NaN;
-        return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
-      })(),
-      endTimeMs: (() => {
-        const raw = url.searchParams.get('endTime');
-        const parsed = raw ? Number.parseInt(raw, 10) : NaN;
-        return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
-      })(),
+      startTimeMs,
+      endTimeMs,
     },
   ).catch((err) => {
     console.warn(`RPC reconciliation failed for ${contractAddress}:`, err);
@@ -5971,14 +6294,15 @@ async function handleForceRefreshMarketSnapshot(
     'market_snapshot.force_refreshed',
     contractAddress,
     strategyEvaluationSummary
-      ? `Forced a live market snapshot refresh and stored a new historical record. ${strategyEvaluationSummary} RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions.`
-      : `Forced a live market snapshot refresh and stored a new historical record. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions.`,
+      ? `Forced a live market snapshot refresh and stored a new historical record. ${strategyEvaluationSummary} Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions.`
+      : `Forced a live market snapshot refresh and stored a new historical record. Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions.`,
   );
 
   return jsonResponse({
     marketSnapshot,
     strategyEvaluation: strategyEvaluationPayload,
     rpcReconciliation,
+    windowCompleteness,
   });
 }
 

@@ -401,6 +401,12 @@ export default function App() {
           : '';
         const result = await api<{
           marketSnapshot: TokenMarketSnapshot | null;
+          windowCompleteness?: {
+            expectedTransactions: number;
+            completeTransactionsBefore: number;
+            enrichedTransactions: number;
+            completeTransactionsAfter: number;
+          };
           rpcReconciliation?: {
             scannedSignatures: number;
             insertedSignals: number;
@@ -426,8 +432,8 @@ export default function App() {
           await loadMarketSnapshotHistory();
           setNotice(
             result.marketSnapshot.priceUsd != null
-              ? result.rpcReconciliation
-                ? `Market data refreshed. RPC reconciliation scanned ${result.rpcReconciliation.scannedSignatures} signatures and inserted ${result.rpcReconciliation.insertedSignals} transaction record(s).`
+              ? result.rpcReconciliation || result.windowCompleteness
+                ? `Market data refreshed. Window transactions ${result.windowCompleteness?.expectedTransactions ?? 0}, complete before ${result.windowCompleteness?.completeTransactionsBefore ?? 0}, enriched ${result.windowCompleteness?.enrichedTransactions ?? 0}, complete after ${result.windowCompleteness?.completeTransactionsAfter ?? 0}. RPC reconciliation scanned ${result.rpcReconciliation?.scannedSignatures ?? 0} signatures and inserted ${result.rpcReconciliation?.insertedSignals ?? 0} transaction record(s).`
                 : 'Market data refreshed.'
               : 'Token metadata loaded. Price data not yet available in Jupiter.',
           );
