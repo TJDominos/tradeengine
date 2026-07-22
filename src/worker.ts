@@ -1396,6 +1396,14 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_user_network_created ON rpc_endpoints(user_id, network, created_at DESC)',
 ];
 
+const D1_TRADE_DOMAIN_TABLE_STATEMENTS = D1_TRADE_DOMAIN_SCHEMA_STATEMENTS.filter(
+  (statement) => !statement.startsWith('CREATE INDEX'),
+);
+
+const D1_TRADE_DOMAIN_INDEX_STATEMENTS = D1_TRADE_DOMAIN_SCHEMA_STATEMENTS.filter(
+  (statement) => statement.startsWith('CREATE INDEX'),
+);
+
 interface CredentialsBody {
   username: string;
   password: string;
@@ -1441,12 +1449,41 @@ async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
   if (!tradeDomainSchemaInitPromise) {
     tradeDomainSchemaInitPromise = db
       .batch(
-        D1_TRADE_DOMAIN_SCHEMA_STATEMENTS.map((statement) =>
+        D1_TRADE_DOMAIN_TABLE_STATEMENTS.map((statement) =>
           db.prepare(statement),
         ),
       )
       .then(async () => {
         await dbEnsureTableColumn(db, 'signals', 'details_json', 'TEXT');
+        await dbEnsureTableColumn(
+          db,
+          'token_holder_addresses',
+          'amount_holding',
+          'REAL NOT NULL DEFAULT 0',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'token_holder_addresses',
+          'source',
+          "TEXT NOT NULL DEFAULT 'rpc_scan'",
+        );
+        await dbEnsureTableColumn(
+          db,
+          'token_holder_addresses',
+          'first_seen_at',
+          'INTEGER NOT NULL DEFAULT 0',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'token_holder_addresses',
+          'last_seen_at',
+          'INTEGER NOT NULL DEFAULT 0',
+        );
+        await db.batch(
+          D1_TRADE_DOMAIN_INDEX_STATEMENTS.map((statement) =>
+            db.prepare(statement),
+          ),
+        );
       })
       .catch((err) => {
         tradeDomainSchemaInitPromise = undefined;
