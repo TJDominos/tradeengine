@@ -12,6 +12,9 @@
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/material": "^9.2.0",
     "@scure/bip39": "^2.2.0",
     "lucide-react": "^0.546.0",
     "micro-ed25519-hdkey": "^0.1.2",

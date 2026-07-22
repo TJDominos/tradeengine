@@ -1,3 +1,13 @@
+import FormControl from '@mui/material/FormControl';
+import FormControlLabel from '@mui/material/FormControlLabel';
+import InputLabel from '@mui/material/InputLabel';
+import MenuItem from '@mui/material/MenuItem';
+import MuiCheckbox from '@mui/material/Checkbox';
+import InputAdornment from '@mui/material/InputAdornment';
+import Select from '@mui/material/Select';
+import type { SelectChangeEvent } from '@mui/material/Select';
+import TextField from '@mui/material/TextField';
+
 import type { StrategyVersionDocument } from '../app/strategyTypes';
 import {
   getStrategyFieldsForSection,
@@ -69,51 +79,114 @@ export default function StrategySchemaForm({ draft, onChange }: StrategySchemaFo
                     ) : null}
 
                     {field.fieldType === 'textarea' ? (
-                      <textarea
+                      <TextField
+                        multiline
+                        minRows={4}
+                        fullWidth
                         value={String(displayValue)}
                         disabled={!field.editable}
                         onChange={(event) => saveValue(event.target.value)}
                         placeholder={field.placeholder}
-                        className="min-h-24 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        variant="outlined"
+                        size="small"
+                        sx={{
+                          '& .MuiOutlinedInput-root': {
+                            color: '#e2e8f0',
+                            backgroundColor: '#020617',
+                            '& fieldset': { borderColor: '#334155' },
+                            '&:hover fieldset': { borderColor: '#475569' },
+                            '&.Mui-focused fieldset': { borderColor: '#3b82f6' },
+                          },
+                          '& .MuiInputBase-input::placeholder': { color: '#64748b', opacity: 1 },
+                        }}
                       />
                     ) : field.fieldType === 'select' ? (
-                      <select
+                      <FormControl
+                        fullWidth
+                        size="small"
+                        disabled={!field.editable}
+                        sx={{
+                          '& .MuiOutlinedInput-root': {
+                            color: '#e2e8f0',
+                            backgroundColor: '#020617',
+                            '& fieldset': { borderColor: '#334155' },
+                            '&:hover fieldset': { borderColor: '#475569' },
+                            '&.Mui-focused fieldset': { borderColor: '#3b82f6' },
+                          },
+                          '& .MuiSvgIcon-root': { color: '#94a3b8' },
+                        }}
+                      >
+                        <InputLabel shrink sx={{ color: '#94a3b8', position: 'static', transform: 'none', mb: 0.75, fontSize: '0.75rem', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+                          Select Value
+                        </InputLabel>
+                        <Select
+                          value={String(displayValue)}
+                          onChange={(event: SelectChangeEvent<string>) => saveValue(event.target.value)}
+                          displayEmpty
+                          MenuProps={{
+                            slotProps: {
+                              paper: {
+                                sx: {
+                                  bgcolor: '#0f172a',
+                                  color: '#e2e8f0',
+                                  border: '1px solid #334155',
+                                },
+                              },
+                            },
+                          }}
+                        >
+                          {(field.options ?? []).map((option) => (
+                            <MenuItem key={option.value} value={option.value}>
+                              {option.label}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    ) : field.fieldType === 'boolean' ? (
+                      <div className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2">
+                        <FormControlLabel
+                          control={
+                            <MuiCheckbox
+                              checked={Boolean(displayValue)}
+                              disabled={!field.editable}
+                              onChange={(event) => saveValue(event.target.checked)}
+                              sx={{
+                                color: '#94a3b8',
+                                '&.Mui-checked': { color: '#3b82f6' },
+                              }}
+                            />
+                          }
+                          label={field.placeholder ?? 'Enabled'}
+                          sx={{ color: '#e2e8f0', m: 0 }}
+                        />
+                      </div>
+                    ) : (
+                      <TextField
+                        type={field.fieldType === 'number' ? 'number' : 'text'}
+                        fullWidth
+                        size="small"
                         value={String(displayValue)}
                         disabled={!field.editable}
                         onChange={(event) => saveValue(event.target.value)}
-                        className="h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 text-sm outline-none focus:border-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {(field.options ?? []).map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    ) : field.fieldType === 'boolean' ? (
-                      <label className="flex h-10 items-center justify-between rounded-md border border-slate-700 bg-slate-950 px-3 text-sm text-slate-200">
-                        <span>{field.placeholder ?? 'Enabled'}</span>
-                        <input
-                          type="checkbox"
-                          checked={Boolean(displayValue)}
-                          disabled={!field.editable}
-                          onChange={(event) => saveValue(event.target.checked)}
-                          className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-blue-500"
-                        />
-                      </label>
-                    ) : (
-                      <div className="relative">
-                        <input
-                          type={field.fieldType === 'number' ? 'number' : 'text'}
-                          value={String(displayValue)}
-                          disabled={!field.editable}
-                          onChange={(event) => saveValue(event.target.value)}
-                          placeholder={field.placeholder}
-                          className="h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 pr-16 text-sm outline-none focus:border-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-                        />
-                        {field.unitLabel ? (
-                          <span className="absolute right-3 top-2.5 text-xs text-slate-500">{field.unitLabel}</span>
-                        ) : null}
-                      </div>
+                        placeholder={field.placeholder}
+                        slotProps={{
+                          input: {
+                            endAdornment: field.unitLabel ? (
+                              <InputAdornment position="end">{field.unitLabel}</InputAdornment>
+                            ) : undefined,
+                          },
+                        }}
+                        sx={{
+                          '& .MuiOutlinedInput-root': {
+                            color: '#e2e8f0',
+                            backgroundColor: '#020617',
+                            '& fieldset': { borderColor: '#334155' },
+                            '&:hover fieldset': { borderColor: '#475569' },
+                            '&.Mui-focused fieldset': { borderColor: '#3b82f6' },
+                          },
+                          '& .MuiInputBase-input::placeholder': { color: '#64748b', opacity: 1 },
+                        }}
+                      />
                     )}
                   </div>
                 );
