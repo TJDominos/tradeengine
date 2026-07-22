@@ -2383,74 +2383,110 @@ interface JupiterTokenMetadata {
 async function fetchJupiterTokenMetadata(
   mint: string,
 ): Promise<JupiterTokenMetadata | null> {
+  const normalizedMint = mint.toLowerCase();
   try {
-    // Use Jupiter v2 search API which includes market data (FDV, liquidity, holders)
-    const response = await fetch(
-      `https://lite-api.jup.ag/tokens/v2/search?query=${encodeURIComponent(mint)}`,
+    console.log(`[fetchJupiterTokenMetadata] Searching for token: ${mint}`);
+    const searchResponse = await fetch(
+      `https://api.jup.ag/tokens/v2/search?query=${encodeURIComponent(mint)}`,
       { headers: { Accept: 'application/json' } },
     );
-    if (!response.ok) return null;
-    const body = await response.json<{
-      tokens?: Array<{
-        address?: string;
-        name?: string;
-        symbol?: string;
-        decimals?: number;
-        logoURI?: string;
-        tags?: string[];
-        asset?: {
-          fdv?: number;
-          mcap?: number;
-          liquidity?: {
-            usd?: number;
-            sol?: number;
+    console.log(`[fetchJupiterTokenMetadata] Search API response status: ${searchResponse.status}`);
+    
+    if (searchResponse.ok) {
+      const body = await searchResponse.json<any>();
+      console.log(`[fetchJupiterTokenMetadata] Response keys:`, Object.keys(body).slice(0, 5));
+
+      // Handle multiple possible response structures
+      let tokens = Array.isArray(body) ? body : (body.tokens || body.data || []);
+      console.log(`[fetchJupiterTokenMetadata] Found ${tokens.length} tokens in response`);
+      
+      if (!Array.isArray(tokens) || tokens.length === 0) {
+        console.log(`[fetchJupiterTokenMetadata] No tokens array found, trying fallback`);
+      } else {
+        // Log first token structure for debugging
+        if (tokens.length > 0) {
+          console.log(`[fetchJupiterTokenMetadata] First token keys:`, Object.keys(tokens[0]).slice(0, 10));
+        }
+
+        // Find the exact match - try multiple possible address fields
+        const tokenData = tokens.find((t: any) => {
+          const tokenAddress = (t.address || t.mint || t.pubkey || '').toLowerCase();
+          return tokenAddress === normalizedMint;
+        });
+        
+        if (tokenData) {
+          console.log(`[fetchJupiterTokenMetadata] Found token: ${tokenData.symbol || tokenData.name}`);
+          // Extract FDV from asset, fallback to mcap if fdv is missing
+          const fdv =
+            typeof tokenData.asset?.fdv === 'number'
+              ? tokenData.asset.fdv
+              : typeof tokenData.asset?.mcap === 'number'
+                ? tokenData.asset.mcap
+                : null;
+
+          // Extract liquidity in USD
+          const liquidityUsd =
+            typeof tokenData.asset?.liquidity?.usd === 'number'
+              ? tokenData.asset.liquidity.usd
+              : null;
+
+          // Extract total holders count (try 'holder' or 'holders')
+          const totalHolders =
+            typeof tokenData.asset?.holder === 'number'
+              ? tokenData.asset.holder
+              : typeof tokenData.asset?.holders === 'number'
+                ? tokenData.asset.holders
+                : null;
+
+          return {
+            address: (tokenData.address || tokenData.mint || mint),
+            name: typeof tokenData.name === 'string' ? tokenData.name : null,
+            symbol: typeof tokenData.symbol === 'string' ? tokenData.symbol : null,
+            decimals: typeof tokenData.decimals === 'number' ? tokenData.decimals : null,
+            logoUri: typeof (tokenData.logoURI || tokenData.logo) === 'string' ? (tokenData.logoURI || tokenData.logo) : null,
+            tags: Array.isArray(tokenData.tags) ? tokenData.tags : [],
+            fdv,
+            liquidityUsd,
+            totalHolders,
           };
-          holder?: number;
-          holders?: number;
-        };
-      }>;  
-    }>();
+        } else {
+          console.log(`[fetchJupiterTokenMetadata] Token ${normalizedMint} not found in ${tokens.length} results`);
+        }
+      }
+    } else {
+      console.log(`[fetchJupiterTokenMetadata] Search API error: ${searchResponse.status}`);
+    }
 
-    // Find the exact match for the mint address
-    const tokenData = body.tokens?.find(
-      (t) => t.address && t.address.toLowerCase() === mint.toLowerCase(),
+    // Fallback: Try tokens.jup.ag endpoint for basic metadata (name, symbol, decimals)
+    console.log(`[fetchJupiterTokenMetadata] Trying tokens.jup.ag fallback endpoint`);
+    const fallbackResponse = await fetch(
+      `https://tokens.jup.ag/token/${encodeURIComponent(mint)}`,
+      { headers: { Accept: 'application/json' } },
     );
-    if (!tokenData) return null;
+    console.log(`[fetchJupiterTokenMetadata] Fallback endpoint response status: ${fallbackResponse.status}`);
+    
+    if (fallbackResponse.ok) {
+      const fallback = await fallbackResponse.json<any>();
+      console.log(`[fetchJupiterTokenMetadata] Found token in fallback: ${fallback.symbol || fallback.name}`);
+      return {
+        address: fallback.address ?? mint,
+        name: typeof fallback.name === 'string' ? fallback.name : null,
+        symbol: typeof fallback.symbol === 'string' ? fallback.symbol : null,
+        decimals: typeof fallback.decimals === 'number' ? fallback.decimals : null,
+        logoUri: typeof fallback.logoURI === 'string' ? fallback.logoURI : null,
+        tags: Array.isArray(fallback.tags) ? fallback.tags : [],
+        fdv: null,
+        liquidityUsd: null,
+        totalHolders: null,
+      };
+    } else {
+      console.log(`[fetchJupiterTokenMetadata] Fallback endpoint error: ${fallbackResponse.status}`);
+    }
 
-    // Extract FDV from asset, fallback to mcap if fdv is missing
-    const fdv =
-      typeof tokenData.asset?.fdv === 'number'
-        ? tokenData.asset.fdv
-        : typeof tokenData.asset?.mcap === 'number'
-          ? tokenData.asset.mcap
-          : null;
-
-    // Extract liquidity in USD
-    const liquidityUsd =
-      typeof tokenData.asset?.liquidity?.usd === 'number'
-        ? tokenData.asset.liquidity.usd
-        : null;
-
-    // Extract total holders count (try 'holder' or 'holders')
-    const totalHolders =
-      typeof tokenData.asset?.holder === 'number'
-        ? tokenData.asset.holder
-        : typeof tokenData.asset?.holders === 'number'
-          ? tokenData.asset.holders
-          : null;
-
-    return {
-      address: tokenData.address ?? mint,
-      name: typeof tokenData.name === 'string' ? tokenData.name : null,
-      symbol: typeof tokenData.symbol === 'string' ? tokenData.symbol : null,
-      decimals: typeof tokenData.decimals === 'number' ? tokenData.decimals : null,
-      logoUri: typeof tokenData.logoURI === 'string' ? tokenData.logoURI : null,
-      tags: Array.isArray(tokenData.tags) ? (tokenData.tags as string[]) : [],
-      fdv,
-      liquidityUsd,
-      totalHolders,
-    };
-  } catch {
+    console.log(`[fetchJupiterTokenMetadata] Both APIs failed, returning null`);
+    return null;
+  } catch (err: unknown) {
+    console.error(`[fetchJupiterTokenMetadata] Exception:`, err);
     return null;
   }
 }
