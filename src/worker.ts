@@ -2746,8 +2746,15 @@ async function syncTokenMarketSnapshotForUser(
       fetchJupiterTokenMetadata(normalizedAddress),
     ]);
 
-    // Resolve decimals: DB → Jupiter metadata → null
-    const resolvedDecimals = storedDecimals ?? jupiterMeta?.decimals ?? null;
+    // Resolve decimals: DB → Jupiter metadata → Solana RPC (fallback)
+    let resolvedDecimals = storedDecimals ?? jupiterMeta?.decimals ?? null;
+    if (resolvedDecimals == null) {
+      try {
+        resolvedDecimals = await fetchSolanaMintDecimals(rpcUrls, normalizedAddress);
+      } catch {
+        // Non-fatal — quote-based price will be skipped
+      }
+    }
 
     // If Price API has no data, fall back to a quote-derived price
     let jupiterPrice = priceApiResult;
@@ -3650,7 +3657,7 @@ async function handleSaveSettings(
     const decimals = await fetchSolanaMintDecimals(
       rpcUrls,
       normalizedContractAddress,
-    );
+    ).catch(() => null);
     await dbCreateTradableToken(
       env.TRADINGBOT_DB,
       { network: 'solana', contractAddress: normalizedContractAddress },
@@ -3727,7 +3734,7 @@ async function handleSaveActiveToken(
         const decimals = await fetchSolanaMintDecimals(
           rpcUrls,
           normalizedContractAddress,
-        );
+        ).catch(() => null);
         await dbCreateTradableToken(
           env.TRADINGBOT_DB,
           {
@@ -3851,7 +3858,7 @@ async function handleAddTradableToken(
   const decimals = await fetchSolanaMintDecimals(
     rpcUrls,
     normalizedAddress,
-  );
+  ).catch(() => null);
   const token = await dbCreateTradableToken(
     env.TRADINGBOT_DB,
     { network: body.network, contractAddress: normalizedAddress },
