@@ -63,9 +63,14 @@ export type WebhookTransactionLog = {
   tokenContractAddress: string | null;
   tokenSymbol: string | null;
   walletAddress: string | null;
+  fromWalletAddress: string | null;
+  toWalletAddress: string | null;
+  action: 'BUY' | 'SELL' | null;
+  usdcAmount: number | null;
+  tokenAmount: number | null;
   eventType: string;
   txSignature: string | null;
-  status: 'PENDING' | 'SUCCESS' | 'FAILED';
+  status: 'PENDING' | 'CONFIRMED' | 'FAILED';
   errorMessage: string | null;
   createdAt: number;
 };

@@ -161,11 +161,28 @@ interface WebhookTransactionLogRecord {
   tokenContractAddress: string | null;
   tokenSymbol: string | null;
   walletAddress: string | null;
+  fromWalletAddress: string | null;
+  toWalletAddress: string | null;
+  action: 'BUY' | 'SELL' | null;
+  usdcAmount: number | null;
+  tokenAmount: number | null;
   eventType: string;
   txSignature: string | null;
-  status: 'PENDING' | 'SUCCESS' | 'FAILED';
+  status: 'PENDING' | 'CONFIRMED' | 'FAILED';
   errorMessage: string | null;
   createdAt: number;
+}
+
+interface StoredSignalTransactionDetails {
+  tokenContractAddress: string | null;
+  fromWalletAddress: string | null;
+  toWalletAddress: string | null;
+  primaryWalletAddress: string | null;
+  action: 'BUY' | 'SELL' | null;
+  usdcAmount: number | null;
+  tokenAmount: number | null;
+  transactionStatus: 'PENDING' | 'CONFIRMED' | 'FAILED';
+  detailSource: 'payload' | 'rpc' | 'payload+rpc' | 'unknown';
 }
 
 interface RpcEndpoint {
@@ -199,6 +216,7 @@ interface SignalRecord {
   walletAddress: string | null;
   txSignature: string | null;
   payload: string;
+  detailsJson: string | null;
   processed: boolean;
   processedState: number;
   processedAt: number | null;
@@ -214,6 +232,7 @@ interface SignalCreateRequest {
   walletAddress: string | null;
   txSignature: string | null;
   payload: string;
+  detailsJson?: string | null;
 }
 
 interface AlchemyWebhookPayload {
@@ -828,6 +847,195 @@ function extractStoredSignalContractAddresses(payloadText: string): string[] {
   ]);
 }
 
+function parseStoredSignalTransactionDetails(
+  detailsJson: string | null | undefined,
+): StoredSignalTransactionDetails | null {
+  if (!detailsJson) {
+    return null;
+  }
+
+  let payload: unknown;
+  try {
+    payload = parseJsonText<unknown>(detailsJson);
+  } catch {
+    return null;
+  }
+
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  const actionText = readNonEmptyString(payload.action)?.toUpperCase();
+  const statusText = readNonEmptyString(payload.transactionStatus)?.toUpperCase();
+  const detailSourceText = readNonEmptyString(payload.detailSource);
+
+  return {
+    tokenContractAddress: tryNormalizeSolanaPubkey(payload.tokenContractAddress),
+    fromWalletAddress: tryNormalizeSolanaPubkey(payload.fromWalletAddress),
+    toWalletAddress: tryNormalizeSolanaPubkey(payload.toWalletAddress),
+    primaryWalletAddress: tryNormalizeSolanaPubkey(payload.primaryWalletAddress),
+    action: actionText === 'BUY' || actionText === 'SELL' ? actionText : null,
+    usdcAmount: toFiniteNumber(payload.usdcAmount),
+    tokenAmount: toFiniteNumber(payload.tokenAmount),
+    transactionStatus:
+      statusText === 'CONFIRMED' || statusText === 'FAILED' || statusText === 'PENDING'
+        ? statusText
+        : 'PENDING',
+    detailSource:
+      detailSourceText === 'payload' ||
+      detailSourceText === 'rpc' ||
+      detailSourceText === 'payload+rpc' ||
+      detailSourceText === 'unknown'
+        ? detailSourceText
+        : 'unknown',
+  };
+}
+
+function mergeStoredSignalTransactionDetails(
+  ...detailsList: Array<Partial<StoredSignalTransactionDetails> | null | undefined>
+): StoredSignalTransactionDetails {
+  const merged: StoredSignalTransactionDetails = {
+    tokenContractAddress: null,
+    fromWalletAddress: null,
+    toWalletAddress: null,
+    primaryWalletAddress: null,
+    action: null,
+    usdcAmount: null,
+    tokenAmount: null,
+    transactionStatus: 'PENDING',
+    detailSource: 'unknown',
+  };
+
+  for (const details of detailsList) {
+    if (!details) continue;
+    merged.tokenContractAddress ??= details.tokenContractAddress ?? null;
+    merged.fromWalletAddress ??= details.fromWalletAddress ?? null;
+    merged.toWalletAddress ??= details.toWalletAddress ?? null;
+    merged.primaryWalletAddress ??= details.primaryWalletAddress ?? null;
+    merged.action ??= details.action ?? null;
+    merged.usdcAmount ??= details.usdcAmount ?? null;
+    merged.tokenAmount ??= details.tokenAmount ?? null;
+
+    if (details.transactionStatus === 'FAILED') {
+      merged.transactionStatus = 'FAILED';
+    } else if (
+      merged.transactionStatus !== 'FAILED' &&
+      details.transactionStatus === 'PENDING'
+    ) {
+      merged.transactionStatus = 'PENDING';
+    } else if (
+      merged.transactionStatus === 'PENDING' &&
+      details.transactionStatus === 'CONFIRMED'
+    ) {
+      merged.transactionStatus = 'CONFIRMED';
+    }
+
+    if (details.detailSource) {
+      merged.detailSource =
+        merged.detailSource === 'unknown'
+          ? details.detailSource
+          : merged.detailSource === details.detailSource
+            ? merged.detailSource
+            : 'payload+rpc';
+    }
+  }
+
+  return merged;
+}
+
+function extractWebhookTransactionDetailsFromPayload(
+  payloadText: string,
+  trackedContractAddress: string,
+): Partial<StoredSignalTransactionDetails> {
+  let payload: unknown;
+  try {
+    payload = parseJsonText<unknown>(payloadText);
+  } catch {
+    return {};
+  }
+
+  if (!isRecord(payload)) {
+    return {};
+  }
+
+  const activity = isRecord(payload.activity) ? payload.activity : null;
+  const log = isRecord(payload.log) ? payload.log : null;
+  const transaction = log && isRecord(log.transaction) ? log.transaction : null;
+  const from = transaction && isRecord(transaction.from) ? transaction.from : null;
+  const to = transaction && isRecord(transaction.to) ? transaction.to : null;
+  const rawContract = activity && isRecord(activity.rawContract)
+    ? activity.rawContract
+    : null;
+
+  const fromWalletAddress =
+    tryNormalizeSolanaPubkey(activity?.fromAddress) ??
+    tryNormalizeSolanaPubkey(from?.address) ??
+    null;
+  const toWalletAddress =
+    tryNormalizeSolanaPubkey(activity?.toAddress) ??
+    tryNormalizeSolanaPubkey(to?.address) ??
+    null;
+
+  const activityContractAddress =
+    tryNormalizeSolanaPubkey(rawContract?.address) ??
+    tryNormalizeSolanaPubkey(activity?.contractAddress) ??
+    tryNormalizeSolanaPubkey(activity?.tokenAddress) ??
+    tryNormalizeSolanaPubkey(activity?.mint) ??
+    null;
+  const logContractAddress =
+    tryNormalizeSolanaPubkey(log?.contractAddress) ??
+    tryNormalizeSolanaPubkey(log?.tokenAddress) ??
+    tryNormalizeSolanaPubkey(log?.mint) ??
+    tryNormalizeSolanaPubkey(log?.address) ??
+    null;
+  const tokenContractAddress =
+    [activityContractAddress, logContractAddress, trackedContractAddress]
+      .find((address) => address != null && address !== SOLANA_USDC_MINT) ??
+    trackedContractAddress;
+
+  const amountCandidate =
+    toFiniteNumber(activity?.amount) ??
+    toFiniteNumber(activity?.value) ??
+    toFiniteNumber(activity?.tokenAmount) ??
+    toFiniteNumber(log?.amount) ??
+    toFiniteNumber(log?.value) ??
+    toFiniteNumber(log?.tokenAmount);
+
+  const symbolHint = readNonEmptyString(activity?.asset)?.toUpperCase() ?? '';
+  const categoryHint = readNonEmptyString(activity?.category)?.toLowerCase() ?? '';
+  const action =
+    categoryHint.includes('buy')
+      ? 'BUY'
+      : categoryHint.includes('sell')
+        ? 'SELL'
+        : null;
+
+  const details: Partial<StoredSignalTransactionDetails> = {
+    tokenContractAddress,
+    fromWalletAddress,
+    toWalletAddress,
+    action,
+    detailSource: 'payload',
+  };
+
+  if (amountCandidate != null) {
+    if (
+      activityContractAddress === SOLANA_USDC_MINT ||
+      logContractAddress === SOLANA_USDC_MINT ||
+      symbolHint === 'USDC'
+    ) {
+      details.usdcAmount = Math.abs(amountCandidate);
+    } else if (
+      tokenContractAddress &&
+      (activityContractAddress === tokenContractAddress || logContractAddress === tokenContractAddress)
+    ) {
+      details.tokenAmount = Math.abs(amountCandidate);
+    }
+  }
+
+  return details;
+}
+
 // ─── input validation ─────────────────────────────────────────────────────────
 
 function validateLabel(label: string): void {
@@ -977,6 +1185,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     wallet_address TEXT,
     tx_signature TEXT,
     payload TEXT NOT NULL,
+    details_json TEXT,
     processed INTEGER NOT NULL DEFAULT 0,
     processed_at INTEGER,
     error_message TEXT,
@@ -1113,6 +1322,25 @@ interface CredentialsBody {
 let schemaInitPromise: Promise<void> | undefined;
 let tradeDomainSchemaInitPromise: Promise<void> | undefined;
 
+async function dbEnsureTableColumn(
+  db: D1Database,
+  tableName: string,
+  columnName: string,
+  columnDefinition: string,
+): Promise<void> {
+  const rows = await db
+    .prepare(`PRAGMA table_info(${tableName})`)
+    .all<{
+      name: string;
+    }>();
+  if (rows.results.some((row) => row.name === columnName)) {
+    return;
+  }
+  await db
+    .prepare(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`)
+    .run();
+}
+
 async function dbEnsureSchema(db: D1Database): Promise<void> {
   if (!schemaInitPromise) {
     schemaInitPromise = db
@@ -1135,7 +1363,9 @@ async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           db.prepare(statement),
         ),
       )
-      .then(() => undefined)
+      .then(async () => {
+        await dbEnsureTableColumn(db, 'signals', 'details_json', 'TEXT');
+      })
       .catch((err) => {
         tradeDomainSchemaInitPromise = undefined;
         throw err;
@@ -1809,13 +2039,14 @@ async function dbListWebhookTransactionLogs(
            wallet_address,
            tx_signature,
            payload,
+           details_json,
            processed,
            error_message,
            created_at
          FROM signals
          WHERE source LIKE ?1
          ORDER BY created_at DESC, id DESC
-         LIMIT 50`,
+         LIMIT 200`,
       )
       .bind(`%:user:${userId}`)
       .all<{
@@ -1824,6 +2055,7 @@ async function dbListWebhookTransactionLogs(
         wallet_address: string | null;
         tx_signature: string | null;
         payload: string;
+        details_json: string | null;
         processed: number;
         error_message: string | null;
         created_at: number;
@@ -1844,26 +2076,64 @@ async function dbListWebhookTransactionLogs(
     symbolByContract.set(normalizePubkey(token.contract_address), token.symbol);
   }
 
-  return rows.results.map((row) => {
-    const tokenContractAddress =
-      extractStoredSignalContractAddresses(row.payload)[0] ?? null;
+  const grouped = new Map<string, typeof rows.results>();
+  const orderedKeys: string[] = [];
+
+  for (const row of rows.results) {
+    const key = row.tx_signature?.trim() || `signal:${row.id}`;
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, [row]);
+      orderedKeys.push(key);
+    } else {
+      existing.push(row);
+    }
+  }
+
+  return orderedKeys.slice(0, 50).map((key) => {
+    const group = grouped.get(key) ?? [];
+    const firstRow = group[0];
+    const mergedDetails = mergeStoredSignalTransactionDetails(
+      ...group.map((row) => parseStoredSignalTransactionDetails(row.details_json)),
+      {
+        tokenContractAddress:
+          group
+            .flatMap((row) => extractStoredSignalContractAddresses(row.payload))
+            .find((address) => address !== SOLANA_USDC_MINT) ??
+          group.flatMap((row) => extractStoredSignalContractAddresses(row.payload))[0] ??
+          null,
+      },
+    );
+    const tokenContractAddress = mergedDetails.tokenContractAddress;
+    const hasFailed = group.some(
+      (row) => !!row.error_message || mergedDetails.transactionStatus === 'FAILED',
+    );
+    const hasPending = group.some(
+      (row) => !row.error_message && row.processed !== 1,
+    );
+    const status: WebhookTransactionLogRecord['status'] = hasFailed
+      ? 'FAILED'
+      : hasPending || mergedDetails.transactionStatus === 'PENDING'
+        ? 'PENDING'
+        : 'CONFIRMED';
+
     return {
-      id: row.id,
+      id: firstRow.id,
       tokenContractAddress,
       tokenSymbol: tokenContractAddress
         ? (symbolByContract.get(tokenContractAddress) ?? null)
         : null,
-      walletAddress: row.wallet_address,
-      eventType: row.event_type,
-      txSignature: row.tx_signature,
-      status:
-        row.processed === 1
-          ? 'SUCCESS'
-          : row.error_message
-            ? 'FAILED'
-            : 'PENDING',
-      errorMessage: row.error_message,
-      createdAt: row.created_at,
+      walletAddress: mergedDetails.primaryWalletAddress ?? firstRow.wallet_address,
+      fromWalletAddress: mergedDetails.fromWalletAddress,
+      toWalletAddress: mergedDetails.toWalletAddress,
+      action: mergedDetails.action,
+      usdcAmount: mergedDetails.usdcAmount,
+      tokenAmount: mergedDetails.tokenAmount,
+      eventType: firstRow.event_type,
+      txSignature: firstRow.tx_signature,
+      status,
+      errorMessage: firstRow.error_message,
+      createdAt: firstRow.created_at,
     };
   });
 }
@@ -2352,6 +2622,7 @@ async function dbCreateSignal(
          wallet_address,
          tx_signature,
          payload,
+        details_json,
          processed,
          processed_at,
          error_message,
@@ -2370,6 +2641,7 @@ async function dbCreateSignal(
       wallet_address: string | null;
       tx_signature: string | null;
       payload: string;
+      details_json: string | null;
       processed: number;
       processed_at: number | null;
       error_message: string | null;
@@ -2388,6 +2660,7 @@ async function dbCreateSignal(
         walletAddress: existing.wallet_address,
         txSignature: existing.tx_signature,
         payload: existing.payload,
+        detailsJson: existing.details_json,
         processed: existing.processed === 1,
         processedState: existing.processed,
         processedAt: existing.processed_at,
@@ -2408,12 +2681,13 @@ async function dbCreateSignal(
         wallet_address,
         tx_signature,
         payload,
+        details_json,
         processed,
         processed_at,
         error_message,
         retry_count,
         created_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, NULL, NULL, 0, ?7)`,
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 2, NULL, NULL, 0, ?8)`,
     )
     .bind(
       input.source,
@@ -2422,6 +2696,7 @@ async function dbCreateSignal(
       input.walletAddress,
       input.txSignature,
       input.payload,
+      input.detailsJson ?? null,
       createdAt,
     )
     .run();
@@ -2436,6 +2711,7 @@ async function dbCreateSignal(
       walletAddress: input.walletAddress,
       txSignature: input.txSignature,
       payload: input.payload,
+      detailsJson: input.detailsJson ?? null,
       processed: false,
       processedState: 2,
       processedAt: null,
@@ -2463,6 +2739,192 @@ async function dbClaimSignalProcessing(
     .bind(source, externalId)
     .run();
   return (result.meta?.changes ?? 0) > 0;
+}
+
+async function dbResolvePreferredSignalWalletAddress(
+  db: D1Database,
+  userId: number,
+  candidates: Array<string | null | undefined>,
+  fallbackWalletAddress: string | null,
+): Promise<string | null> {
+  const normalizedCandidates = uniqueSolanaPubkeys(candidates);
+  if (normalizedCandidates.length === 0) {
+    return fallbackWalletAddress;
+  }
+
+  const rows = await db
+    .prepare(
+      `SELECT wallet_address, type
+       FROM accounts
+       WHERE user_id = ?1 AND wallet_address IN (?2, ?3)
+       ORDER BY CASE type WHEN 'managed' THEN 0 ELSE 1 END, id ASC`,
+    )
+    .bind(userId, normalizedCandidates[0] ?? '', normalizedCandidates[1] ?? '')
+    .all<{
+      wallet_address: string;
+      type: string;
+    }>();
+  if (rows.results.length > 0) {
+    return rows.results[0].wallet_address;
+  }
+  return fallbackWalletAddress ?? normalizedCandidates[0] ?? null;
+}
+
+async function dbUpdateSignalTransactionDetails(
+  db: D1Database,
+  source: string,
+  externalId: string,
+  walletAddress: string | null,
+  details: StoredSignalTransactionDetails,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  await db
+    .prepare(
+      `UPDATE signals
+       SET wallet_address = ?3,
+           details_json = ?4
+       WHERE source = ?1 AND external_id = ?2`,
+    )
+    .bind(source, externalId, walletAddress, JSON.stringify(details))
+    .run();
+}
+
+async function fetchSolanaWebhookTransactionDetailsFromRpc(
+  rpcUrls: string | string[],
+  txSignature: string,
+  trackedContractAddress: string,
+  payloadDetails: Partial<StoredSignalTransactionDetails>,
+): Promise<Partial<StoredSignalTransactionDetails>> {
+  try {
+    const transaction = await solanaRpc<{
+      meta?: {
+        err?: unknown;
+        preTokenBalances?: Array<{
+          owner?: string;
+          mint?: string;
+          uiTokenAmount?: {
+            uiAmountString?: string;
+            amount?: string;
+            decimals?: number;
+          };
+        }>;
+        postTokenBalances?: Array<{
+          owner?: string;
+          mint?: string;
+          uiTokenAmount?: {
+            uiAmountString?: string;
+            amount?: string;
+            decimals?: number;
+          };
+        }>;
+      };
+    }>(rpcUrls, 'getTransaction', [
+      txSignature,
+      { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+    ]);
+
+    const deltaByOwner = new Map<string, { tracked: number; usdc: number }>();
+    const applyTokenBalances = (
+      balances:
+        | Array<{
+            owner?: string;
+            mint?: string;
+            uiTokenAmount?: {
+              uiAmountString?: string;
+              amount?: string;
+              decimals?: number;
+            };
+          }>
+        | undefined,
+      sign: -1 | 1,
+    ) => {
+      for (const balance of balances ?? []) {
+        const owner = tryNormalizeSolanaPubkey(balance.owner);
+        const mint = tryNormalizeSolanaPubkey(balance.mint);
+        if (!owner || !mint) {
+          continue;
+        }
+        const uiAmount =
+          balance.uiTokenAmount?.uiAmountString != null
+            ? Number.parseFloat(balance.uiTokenAmount.uiAmountString)
+            : typeof balance.uiTokenAmount?.amount === 'string' && typeof balance.uiTokenAmount?.decimals === 'number'
+              ? Number.parseFloat(balance.uiTokenAmount.amount) / 10 ** balance.uiTokenAmount.decimals
+              : null;
+        if (uiAmount == null || !Number.isFinite(uiAmount)) {
+          continue;
+        }
+        const current = deltaByOwner.get(owner) ?? { tracked: 0, usdc: 0 };
+        if (mint === trackedContractAddress) {
+          current.tracked += sign * uiAmount;
+        }
+        if (mint === SOLANA_USDC_MINT) {
+          current.usdc += sign * uiAmount;
+        }
+        deltaByOwner.set(owner, current);
+      }
+    };
+
+    applyTokenBalances(transaction.meta?.preTokenBalances, -1);
+    applyTokenBalances(transaction.meta?.postTokenBalances, 1);
+
+    const candidateWallets = uniqueSolanaPubkeys([
+      payloadDetails.primaryWalletAddress,
+      payloadDetails.fromWalletAddress,
+      payloadDetails.toWalletAddress,
+    ]);
+
+    let focusWallet: string | null = null;
+    for (const wallet of candidateWallets) {
+      const delta = deltaByOwner.get(wallet);
+      if (delta && (delta.tracked !== 0 || delta.usdc !== 0)) {
+        focusWallet = wallet;
+        break;
+      }
+    }
+    if (!focusWallet) {
+      const fallbackEntry = [...deltaByOwner.entries()].find(
+        ([, delta]) => delta.tracked !== 0 || delta.usdc !== 0,
+      );
+      focusWallet = fallbackEntry?.[0] ?? null;
+    }
+
+    const focusDelta = focusWallet ? deltaByOwner.get(focusWallet) ?? null : null;
+    const action =
+      focusDelta && focusDelta.tracked > 0 && focusDelta.usdc < 0
+        ? 'BUY'
+        : focusDelta && focusDelta.tracked < 0 && focusDelta.usdc > 0
+          ? 'SELL'
+          : null;
+
+    const trackedOwners = [...deltaByOwner.entries()].filter(([, delta]) => delta.tracked !== 0);
+    const fromWalletAddress =
+      payloadDetails.fromWalletAddress ??
+      trackedOwners.find(([, delta]) => delta.tracked < 0)?.[0] ??
+      null;
+    const toWalletAddress =
+      payloadDetails.toWalletAddress ??
+      trackedOwners.find(([, delta]) => delta.tracked > 0)?.[0] ??
+      null;
+
+    return {
+      tokenContractAddress: trackedContractAddress,
+      fromWalletAddress,
+      toWalletAddress,
+      primaryWalletAddress: focusWallet,
+      action,
+      usdcAmount: focusDelta && focusDelta.usdc !== 0 ? Math.abs(focusDelta.usdc) : null,
+      tokenAmount: focusDelta && focusDelta.tracked !== 0 ? Math.abs(focusDelta.tracked) : null,
+      transactionStatus: transaction.meta?.err ? 'FAILED' : 'CONFIRMED',
+      detailSource: 'rpc',
+    };
+  } catch (err: unknown) {
+    console.warn(`Failed to enrich webhook transaction ${txSignature} from RPC:`, err);
+    return {
+      tokenContractAddress: trackedContractAddress,
+      transactionStatus: 'PENDING',
+      detailSource: 'unknown',
+    };
+  }
 }
 
 async function dbMarkSignalProcessed(
@@ -4018,6 +4480,7 @@ async function processTokenActivitySignal(
     walletAddress: input.walletAddress,
     txSignature: input.txSignature,
     payload: input.payload,
+    detailsJson: null,
   });
 
   if (!inserted) {
@@ -4040,6 +4503,47 @@ async function processTokenActivitySignal(
       input.userId,
       env.SOLANA_RPC_URL,
     );
+    const payloadDetails = extractWebhookTransactionDetailsFromPayload(
+      input.payload,
+      normalizedContractAddress,
+    );
+    const rpcDetails = input.txSignature
+      ? await fetchSolanaWebhookTransactionDetailsFromRpc(
+          rpcUrls,
+          input.txSignature,
+          normalizedContractAddress,
+          payloadDetails,
+        )
+      : null;
+    const mergedDetails = mergeStoredSignalTransactionDetails(
+      {
+        tokenContractAddress: normalizedContractAddress,
+        primaryWalletAddress: input.walletAddress,
+        transactionStatus: 'PENDING',
+        detailSource: 'unknown',
+      },
+      payloadDetails,
+      rpcDetails,
+    );
+    const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
+      env.TRADINGBOT_DB,
+      input.userId,
+      [
+        mergedDetails.primaryWalletAddress,
+        mergedDetails.fromWalletAddress,
+        mergedDetails.toWalletAddress,
+      ],
+      input.walletAddress,
+    );
+    mergedDetails.primaryWalletAddress = preferredWalletAddress;
+    await dbUpdateSignalTransactionDetails(
+      env.TRADINGBOT_DB,
+      input.source,
+      input.externalId,
+      preferredWalletAddress,
+      mergedDetails,
+    );
+
     let marketSnapshot: TokenMarketSnapshot | null = null;
     try {
       marketSnapshot = await syncTokenMarketSnapshotForUser(

@@ -879,10 +879,15 @@ export default function App() {
       (log.tokenContractAddress ?? '').toLowerCase().includes(term) ||
       (log.tokenSymbol ?? '').toLowerCase().includes(term) ||
       (log.walletAddress ?? '').toLowerCase().includes(term) ||
+      (log.fromWalletAddress ?? '').toLowerCase().includes(term) ||
+      (log.toWalletAddress ?? '').toLowerCase().includes(term) ||
       accountLabel.includes(term) ||
       ownershipLabel.includes(term) ||
+      (log.action ?? '').toLowerCase().includes(term) ||
       log.eventType.toLowerCase().includes(term) ||
       log.status.toLowerCase().includes(term) ||
+      String(log.usdcAmount ?? '').includes(term) ||
+      String(log.tokenAmount ?? '').includes(term) ||
       (log.txSignature ?? '').toLowerCase().includes(term) ||
       (log.errorMessage ?? '').toLowerCase().includes(term)
     );
