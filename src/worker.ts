@@ -2295,6 +2295,7 @@ async function reconcileTokenTransactionsFromRpc(
   const candidateAddresses = dedupeStrings([
     ...managed,
     ...watched.map((account) => account.address),
+    contractAddress,
   ]);
 
   if (candidateAddresses.length === 0) {

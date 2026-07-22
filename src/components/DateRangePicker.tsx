@@ -41,8 +41,11 @@ export default function DateRangePicker({
                   size: 'small',
                   sx: {
                     width: 180,
+                    '& .MuiInputBase-input': { color: '#ffffff' },
+                    '& .MuiInputLabel-root': { color: '#cbd5e1' },
+                    '& .MuiInputLabel-root.Mui-focused': { color: '#ffffff' },
                     '& .MuiOutlinedInput-root': {
-                      color: '#e2e8f0',
+                      color: '#ffffff',
                       backgroundColor: '#020617',
                       '& fieldset': { borderColor: '#334155' },
                       '&:hover fieldset': { borderColor: '#475569' },
@@ -57,6 +60,13 @@ export default function DateRangePicker({
                       backgroundColor: '#0f172a',
                       color: '#e2e8f0',
                       border: '1px solid #334155',
+                    },
+                    '& .MuiPickersCalendarHeader-label': { color: '#ffffff' },
+                    '& .MuiDayCalendar-weekDayLabel': { color: '#cbd5e1' },
+                    '& .MuiPickersDay-root': { color: '#e2e8f0' },
+                    '& .MuiPickersDay-root.Mui-selected': {
+                      backgroundColor: '#2563eb',
+                      color: '#ffffff',
                     },
                   },
                 },
@@ -81,8 +91,11 @@ export default function DateRangePicker({
                   size: 'small',
                   sx: {
                     width: 180,
+                    '& .MuiInputBase-input': { color: '#ffffff' },
+                    '& .MuiInputLabel-root': { color: '#cbd5e1' },
+                    '& .MuiInputLabel-root.Mui-focused': { color: '#ffffff' },
                     '& .MuiOutlinedInput-root': {
-                      color: '#e2e8f0',
+                      color: '#ffffff',
                       backgroundColor: '#020617',
                       '& fieldset': { borderColor: '#334155' },
                       '&:hover fieldset': { borderColor: '#475569' },
@@ -97,6 +110,13 @@ export default function DateRangePicker({
                       backgroundColor: '#0f172a',
                       color: '#e2e8f0',
                       border: '1px solid #334155',
+                    },
+                    '& .MuiPickersCalendarHeader-label': { color: '#ffffff' },
+                    '& .MuiDayCalendar-weekDayLabel': { color: '#cbd5e1' },
+                    '& .MuiPickersDay-root': { color: '#e2e8f0' },
+                    '& .MuiPickersDay-root.Mui-selected': {
+                      backgroundColor: '#2563eb',
+                      color: '#ffffff',
                     },
                   },
                 },
