@@ -2378,6 +2378,7 @@ interface JupiterTokenMetadata {
   fdv: number | null;
   liquidityUsd: number | null;
   totalHolders: number | null;
+  usdPrice: number | null;
 }
 
 async function fetchJupiterTokenMetadata(
@@ -2400,26 +2401,48 @@ async function fetchJupiterTokenMetadata(
       if (Array.isArray(tokensArray) && tokensArray.length > 0) {
         // lite-api returns token directly as first item when querying by mint
         const tokenData = tokensArray[0];
-        console.log(`[fetchJupiterTokenMetadata] First token: ${tokenData.symbol || tokenData.name}`);
+        const assetData = tokenData.asset || {};
+        console.log(`[fetchJupiterTokenMetadata] First token: ${tokenData.symbol || tokenData.name}, asset keys: ${Object.keys(assetData).join(', ')}`);
 
-        // Extract FDV from fdv field, fallback to mcap
+        // Extract FDV from top-level or nested asset field, fallback to mcap
         const fdv = typeof tokenData.fdv === 'number' 
           ? tokenData.fdv 
-          : typeof tokenData.mcap === 'number' 
-            ? tokenData.mcap 
-            : null;
+          : typeof assetData.fdv === 'number'
+            ? assetData.fdv
+            : typeof tokenData.mcap === 'number' 
+              ? tokenData.mcap
+              : typeof assetData.mcap === 'number'
+                ? assetData.mcap
+                : null;
 
-        // Extract liquidity in USD
+        // Extract liquidity in USD (try multiple field paths)
         const liquidityUsd = typeof tokenData.liquidity?.usd === 'number'
           ? tokenData.liquidity.usd
-          : null;
+          : typeof assetData.liquidity?.usd === 'number'
+            ? assetData.liquidity.usd
+            : null;
 
-        // Extract total holders
+        // Extract total holders (try multiple field names)
         const totalHolders = typeof tokenData.holder === 'number'
           ? tokenData.holder
           : typeof tokenData.holders === 'number'
             ? tokenData.holders
-            : null;
+            : typeof assetData.holder === 'number'
+              ? assetData.holder
+              : typeof assetData.holders === 'number'
+                ? assetData.holders
+                : null;
+
+        // Extract USD price (try multiple field names)
+        const usdPrice = typeof tokenData.usdPrice === 'number' 
+          ? tokenData.usdPrice
+          : typeof tokenData.price === 'number'
+            ? tokenData.price
+            : typeof assetData.usdPrice === 'number'
+              ? assetData.usdPrice
+              : null;
+
+        console.log(`[fetchJupiterTokenMetadata] Extracted: price=${usdPrice}, fdv=${fdv}, holders=${totalHolders}, liquidity=${liquidityUsd}`);
 
         return {
           address: tokenData.address || tokenData.mint || mint,
@@ -2431,6 +2454,7 @@ async function fetchJupiterTokenMetadata(
           fdv,
           liquidityUsd,
           totalHolders,
+          usdPrice,
         };
       }
     } else {
@@ -2458,6 +2482,7 @@ async function fetchJupiterTokenMetadata(
         fdv: null,
         liquidityUsd: null,
         totalHolders: null,
+        usdPrice: null,
       };
     } else {
       console.log(`[fetchJupiterTokenMetadata] Fallback endpoint error: ${fallbackResponse.status}`);
@@ -2800,15 +2825,11 @@ async function syncTokenMarketSnapshotForUser(
         .first<{ decimals: number | null }>())?.decimals ?? null)
     : null;
 
-  // Fetch price and metadata from Jupiter APIs in parallel
+  // Fetch metadata from Jupiter lite API (includes price, FDV, liquidity, holders)
   let liveSnapshot: TokenMarketSnapshot | null = null;
   let jupiterMeta: JupiterTokenMetadata | null = null;
   try {
-    const [priceApiResult, meta] = await Promise.all([
-      fetchJupiterTokenPrice(normalizedAddress),
-      fetchJupiterTokenMetadata(normalizedAddress),
-    ]);
-    jupiterMeta = meta;
+    jupiterMeta = await fetchJupiterTokenMetadata(normalizedAddress);
 
     // Resolve decimals: DB → Jupiter metadata → Solana RPC (fallback)
     let resolvedDecimals = storedDecimals ?? jupiterMeta?.decimals ?? null;
@@ -2820,8 +2841,8 @@ async function syncTokenMarketSnapshotForUser(
       }
     }
 
-    // If Price API has no data, fall back to a quote-derived price
-    let jupiterPrice = priceApiResult;
+    // Use price from lite-api metadata, fall back to quote-derived price
+    let jupiterPrice = jupiterMeta?.usdPrice ?? null;
     if (jupiterPrice == null && resolvedDecimals != null) {
       jupiterPrice = await fetchJupiterPriceViaQuote(normalizedAddress, resolvedDecimals);
     }
@@ -2863,12 +2884,13 @@ async function syncTokenMarketSnapshotForUser(
       (await dbListManagedAccountAddresses(db, userId));
 
     // If Jupiter provides total holders count, calculate outsiders = total - internal
-    if (jupiterMeta?.totalHolders != null) {
+    if (jupiterMeta?.totalHolders != null && jupiterMeta.totalHolders > 0) {
       outsidersOverOneUsd = Math.max(
         0,
         jupiterMeta.totalHolders - managedAccountAddresses.length,
       );
-    } else {
+      console.log(`[syncTokenMarketSnapshotForUser] Outsiders from Jupiter: ${jupiterMeta.totalHolders} total - ${managedAccountAddresses.length} managed = ${outsidersOverOneUsd}`);
+    } else if (liveSnapshot?.priceUsd != null) {
       // Fallback: use RPC to scan for outsiders with balance > $1 USD
       outsidersOverOneUsd = await fetchSolanaOutsiderHolderCountOverOneUsd(
         rpcUrls,
@@ -2876,6 +2898,8 @@ async function syncTokenMarketSnapshotForUser(
         managedAccountAddresses,
         liveSnapshot.priceUsd,
       );
+    } else {
+      console.log(`[syncTokenMarketSnapshotForUser] Cannot calculate outsiders: no holders count from Jupiter and no price for RPC filtering`);
     }
   } catch (err: unknown) {
     console.warn(
