@@ -2252,16 +2252,56 @@ async function dbSignalExistsForUserTxSignature(
   return !!row;
 }
 
-async function fetchRecentSolanaSignaturesForAddress(
+async function fetchSolanaSignaturesForAddressInWindow(
   rpcUrls: string | string[],
   address: string,
-  limit: number,
+  options?: {
+    pageSize?: number;
+    maxPages?: number;
+    startTimeMs?: number | null;
+    endTimeMs?: number | null;
+  },
 ): Promise<Array<{ signature: string; blockTime?: number | null; err?: unknown }>> {
-  return solanaRpc<Array<{ signature: string; blockTime?: number | null; err?: unknown }>>(
-    rpcUrls,
-    'getSignaturesForAddress',
-    [address, { limit }],
-  );
+  const pageSize = options?.pageSize ?? 100;
+  const maxPages = options?.maxPages ?? 10;
+  const results: Array<{ signature: string; blockTime?: number | null; err?: unknown }> = [];
+  let beforeSignature: string | undefined;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const batch = await solanaRpc<Array<{ signature: string; blockTime?: number | null; err?: unknown }>>(
+      rpcUrls,
+      'getSignaturesForAddress',
+      [address, { limit: pageSize, ...(beforeSignature ? { before: beforeSignature } : {}) }],
+    );
+
+    if (batch.length === 0) {
+      break;
+    }
+
+    let shouldStop = false;
+    for (const entry of batch) {
+      const blockTimeMs = signatureBlockTimeToMs(entry.blockTime);
+      if (options?.endTimeMs != null && blockTimeMs != null && blockTimeMs > options.endTimeMs) {
+        continue;
+      }
+      if (options?.startTimeMs != null && blockTimeMs != null && blockTimeMs < options.startTimeMs) {
+        shouldStop = true;
+        break;
+      }
+      results.push(entry);
+    }
+
+    if (shouldStop) {
+      break;
+    }
+
+    beforeSignature = batch[batch.length - 1]?.signature;
+    if (!beforeSignature) {
+      break;
+    }
+  }
+
+  return results;
 }
 
 function signatureBlockTimeToMs(blockTime: number | null | undefined): number | null {
@@ -2278,6 +2318,7 @@ async function reconcileTokenTransactionsFromRpc(
   rpcUrls: string | string[],
   options?: {
     perAddressLimit?: number;
+    additionalAddresses?: Array<string | null | undefined>;
     startTimeMs?: number | null;
     endTimeMs?: number | null;
   },
@@ -2287,15 +2328,16 @@ async function reconcileTokenTransactionsFromRpc(
   duplicates: number;
   skippedIrrelevant: number;
 }> {
-  const perAddressLimit = options?.perAddressLimit ?? 15;
+  const perAddressLimit = options?.perAddressLimit ?? 100;
   const [managed, watched] = await Promise.all([
     dbListManagedAccountAddresses(db, userId),
     dbListAccounts(db, userId, 'watch'),
   ]);
   const candidateAddresses = dedupeStrings([
+    contractAddress,
+    ...(options?.additionalAddresses ?? []),
     ...managed,
     ...watched.map((account) => account.address),
-    contractAddress,
   ]);
 
   if (candidateAddresses.length === 0) {
@@ -2310,10 +2352,15 @@ async function reconcileTokenTransactionsFromRpc(
   const signaturePool = new Map<string, { address: string; blockTimeMs: number | null }>();
   for (const address of candidateAddresses) {
     try {
-      const signatures = await fetchRecentSolanaSignaturesForAddress(
+      const signatures = await fetchSolanaSignaturesForAddressInWindow(
         rpcUrls,
         address,
-        perAddressLimit,
+        {
+          pageSize: perAddressLimit,
+          maxPages: 10,
+          startTimeMs: options?.startTimeMs,
+          endTimeMs: options?.endTimeMs,
+        },
       );
       for (const entry of signatures) {
         if (!entry.signature || signaturePool.has(entry.signature)) continue;
@@ -5865,6 +5912,7 @@ async function handleForceRefreshMarketSnapshot(
     contractAddress,
     rpcUrls,
     {
+      additionalAddresses: [marketSnapshot?.pairAddress ?? null],
       startTimeMs: (() => {
         const raw = url.searchParams.get('startTime');
         const parsed = raw ? Number.parseInt(raw, 10) : NaN;
