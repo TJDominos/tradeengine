@@ -867,6 +867,23 @@ export default function App() {
     return createdAtDelta !== 0 ? createdAtDelta : right.id - left.id;
   });
 
+  const rangeTransactionLogs = combinedTransactionLogs.filter((log) =>
+    isInSelectedRange(log.createdAt),
+  );
+
+  const rangeTransactionVolumeUsd = rangeTransactionLogs.reduce((sum, log) => {
+    if (log.kind === 'webhook') {
+      return sum + (log.usdcAmount ?? 0);
+    }
+    if (log.action === 'BUY') {
+      return sum + log.requestedAmount;
+    }
+    if (log.executedAmount != null && log.executedPrice != null) {
+      return sum + log.executedAmount * log.executedPrice;
+    }
+    return sum;
+  }, 0);
+
   const filteredTransactionLogs = combinedTransactionLogs.filter((log) => {
     const term = transactionLogSearchTerm.toLowerCase();
     if (!isInSelectedRange(log.createdAt)) {
@@ -996,6 +1013,8 @@ export default function App() {
       profitUsdc={engineState.profitUsdc}
       dashboardSnapshot={dashboardSnapshot}
       tokenHolderAggregate={engineState.tokenHolderAggregate}
+      transactionCount={rangeTransactionLogs.length}
+      transactionVolumeUsd={rangeTransactionVolumeUsd}
       managedWalletsCount={managedWallets.length}
       logsSection={renderDashboardLogs()}
     />

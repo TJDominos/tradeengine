@@ -20,6 +20,8 @@ type DashboardPageProps = {
   profitUsdc: number;
   dashboardSnapshot: TokenMarketSnapshot | null;
   tokenHolderAggregate: TokenHolderAggregate | null;
+  transactionCount: number;
+  transactionVolumeUsd: number;
   managedWalletsCount: number;
   logsSection: React.ReactNode;
 };
@@ -38,9 +40,21 @@ export default function DashboardPage({
   profitUsdc,
   dashboardSnapshot,
   tokenHolderAggregate,
+  transactionCount,
+  transactionVolumeUsd,
   managedWalletsCount,
   logsSection,
 }: DashboardPageProps) {
+  const internalHolderCount = tokenHolderAggregate?.internalHolderCount ?? null;
+  const internalAmountHolding = tokenHolderAggregate?.internalAmountHolding ?? null;
+  const outsiderHolderCount = tokenHolderAggregate?.outsiderHolderCount ?? null;
+  const outsiderAmountHolding = tokenHolderAggregate
+    ? Math.max(
+        0,
+        tokenHolderAggregate.totalAmountHolding - tokenHolderAggregate.internalAmountHolding,
+      )
+    : null;
+
   return (
     <div className="space-y-6">
       <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
@@ -81,18 +95,18 @@ export default function DashboardPage({
         />
         <StatCard
           title="Number of Transaction and Volumes"
-          value={dashboardSnapshot?.totalTransactions24h != null ? formatNum(dashboardSnapshot.totalTransactions24h) : 'Unavailable'}
-          subtitle={dashboardSnapshot?.volume24h != null ? `24h volume ${formatUSD(dashboardSnapshot.volume24h)}` : marketSnapshotSubtitle}
+          value={formatNum(transactionCount)}
+          subtitle={`Selected range volume ${formatUSD(transactionVolumeUsd)}`}
         />
         <StatCard
-          title="Active Token Holders"
-          value={tokenHolderAggregate ? formatNum(tokenHolderAggregate.activeHolderCount) : 'Unavailable'}
-          subtitle={tokenHolderAggregate ? `Outsiders ${formatNum(tokenHolderAggregate.outsiderHolderCount)} | Internal ${formatNum(tokenHolderAggregate.internalHolderCount)}` : 'Holder aggregate unavailable'}
+          title="Internal Token Holders"
+          value={internalHolderCount != null ? formatNum(internalHolderCount) : 'Unavailable'}
+          subtitle={internalAmountHolding != null ? `Token total ${formatNum(internalAmountHolding)} ${activeTokenSymbol}` : 'Holder aggregate unavailable'}
         />
         <StatCard
-          title="Holder Amounts"
-          value={tokenHolderAggregate ? formatNum(tokenHolderAggregate.totalAmountHolding) : 'Unavailable'}
-          subtitle={tokenHolderAggregate ? `Internal ${formatNum(tokenHolderAggregate.internalAmountHolding)} | Watched ${formatNum(tokenHolderAggregate.watchedAmountHolding)}` : 'Holder amount aggregate unavailable'}
+          title="Outside Token Holders"
+          value={outsiderHolderCount != null ? formatNum(outsiderHolderCount) : 'Unavailable'}
+          subtitle={outsiderAmountHolding != null ? `Token total ${formatNum(outsiderAmountHolding)} ${activeTokenSymbol}` : 'Holder aggregate unavailable'}
         />
       </div>
 

@@ -6147,9 +6147,22 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
         env.TRADINGBOT_DB,
         settings.contractAddress,
       );
-      tokenHolderAggregate = tokenId
-        ? await dbGetTokenHolderAggregate(env.TRADINGBOT_DB, tokenId)
-        : null;
+      if (tokenId) {
+        tokenHolderAggregate = await dbGetTokenHolderAggregate(
+          env.TRADINGBOT_DB,
+          tokenId,
+        );
+        if (!tokenHolderAggregate) {
+          tokenHolderAggregate = await dbRecomputeTokenHolderAggregate(
+            env.TRADINGBOT_DB,
+            user.id,
+            tokenId,
+            {
+              source: 'state_recompute',
+            },
+          );
+        }
+      }
     } catch (err: unknown) {
       console.warn(
         `Failed to load token holder aggregate for ${settings.contractAddress}:`,
