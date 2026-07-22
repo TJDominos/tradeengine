@@ -115,6 +115,15 @@ export type TokenHolderAggregate = {
   source: string;
 };
 
+export type OutsideTokenHolder = {
+  address: string;
+  label: string | null;
+  amountHolding: number;
+  source: string;
+  ownership: 'watch' | 'outside';
+  updatedAt: number;
+};
+
 export type TradableToken = {
   id: number;
   network: string;
@@ -169,6 +178,7 @@ export type EngineState = {
   strategyVersions: StrategyVersionRecord[];
   strategyEvaluations: StrategyEvaluationRecord[];
   tokenHolderAggregate: TokenHolderAggregate | null;
+  outsideTokenHolders: OutsideTokenHolder[];
   rpcEndpoints: RpcEndpoint[];
   marketSnapshot: TokenMarketSnapshot | null;
   marketSnapshotHistory: TokenMarketSnapshot[];

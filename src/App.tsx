@@ -829,24 +829,23 @@ export default function App() {
   }
 
   const internalSummary = summarizeAccounts(engineState.internalAccs, walletBalances);
-  const outsiderSummary = summarizeAccounts(engineState.outsiderAccs, walletBalances);
 
   const filteredInternal = engineState.internalAccs.filter(
     (account) =>
       account.address.toLowerCase().includes(accountSearchTerm.toLowerCase()) ||
       account.label.toLowerCase().includes(accountSearchTerm.toLowerCase()),
   );
-  const filteredOutsider = engineState.outsiderAccs.filter(
-    (account) =>
-      account.address.toLowerCase().includes(accountSearchTerm.toLowerCase()) ||
-      account.label.toLowerCase().includes(accountSearchTerm.toLowerCase()),
+  const filteredOutsideHolders = engineState.outsideTokenHolders.filter(
+    (holder) =>
+      holder.address.toLowerCase().includes(accountSearchTerm.toLowerCase()) ||
+      (holder.label ?? '').toLowerCase().includes(accountSearchTerm.toLowerCase()),
   );
 
   const internalCurrentSlice = filteredInternal.slice(
     (internalPage - 1) * ITEMS_PER_PAGE,
     internalPage * ITEMS_PER_PAGE,
   );
-  const outsiderCurrentSlice = filteredOutsider.slice(
+  const outsiderCurrentSlice = filteredOutsideHolders.slice(
     (outsiderPage - 1) * ITEMS_PER_PAGE,
     outsiderPage * ITEMS_PER_PAGE,
   );
@@ -989,6 +988,14 @@ export default function App() {
   const managedWallets = engineState.internalAccs;
   const tokenHolderAggregateLoading =
     Boolean(activeTokenContractAddress) && !engineState.tokenHolderAggregate;
+  const outsideHolderCount = engineState.tokenHolderAggregate?.outsiderHolderCount ?? null;
+  const outsideHolderTotalAmount = engineState.tokenHolderAggregate
+    ? Math.max(
+        0,
+        engineState.tokenHolderAggregate.totalAmountHolding -
+          engineState.tokenHolderAggregate.internalAmountHolding,
+      )
+    : null;
 
   const renderDashboardLogs = () => (
     <DashboardLogsSection
@@ -1051,11 +1058,14 @@ export default function App() {
         setOutsiderPage(1);
       }}
       internalSummary={internalSummary}
-      outsiderSummary={outsiderSummary}
       filteredInternal={filteredInternal}
-      filteredOutsider={filteredOutsider}
       internalCurrentSlice={internalCurrentSlice}
-      outsiderCurrentSlice={outsiderCurrentSlice}
+      outsideHolderRows={outsiderCurrentSlice}
+      filteredOutsideHoldersCount={filteredOutsideHolders.length}
+      outsideHolderCount={outsideHolderCount}
+      outsideHolderTotalAmount={outsideHolderTotalAmount}
+      outsideHolderLoading={tokenHolderAggregateLoading}
+      activeTokenSymbol={activeTokenSymbol}
       walletBalances={walletBalances}
       walletBalanceErrors={walletBalanceErrors}
       walletBalancePending={walletBalancePending}

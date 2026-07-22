@@ -199,6 +199,15 @@ interface TokenHolderAggregateRecord {
   source: string;
 }
 
+interface OutsideTokenHolderRecord {
+  address: string;
+  label: string | null;
+  amountHolding: number;
+  source: string;
+  ownership: 'watch' | 'outside';
+  updatedAt: number;
+}
+
 type TokenHolderSyncStatus = 'idle' | 'running' | 'completed' | 'failed';
 
 interface TokenHolderSyncStateRecord {
@@ -3403,6 +3412,236 @@ async function dbHasTokenHolderRows(
   return row?.has_rows === 1;
 }
 
+async function dbComputeTokenHolderAggregateFromStage(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  runId: string,
+  updatedAt: number,
+): Promise<TokenHolderAggregateRecord | null> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      `WITH holder_rows AS (
+         SELECT wallet_address, SUM(amount_holding) AS amount_holding
+         FROM token_holder_sync_stage
+         WHERE token_id = ?2 AND run_id = ?3
+         GROUP BY wallet_address
+         HAVING SUM(amount_holding) > 0
+       )
+       SELECT
+         COUNT(CASE WHEN hr.amount_holding > 0 THEN 1 END) AS active_holder_count,
+         COUNT(CASE WHEN hr.amount_holding > 0 AND a.type = 'managed' THEN 1 END) AS internal_holder_count,
+         COUNT(CASE WHEN hr.amount_holding > 0 AND a.type = 'watch' THEN 1 END) AS watched_holder_count,
+         COALESCE(SUM(CASE WHEN hr.amount_holding > 0 THEN hr.amount_holding ELSE 0 END), 0) AS total_amount_holding,
+         COALESCE(SUM(CASE WHEN hr.amount_holding > 0 AND a.type = 'managed' THEN hr.amount_holding ELSE 0 END), 0) AS internal_amount_holding,
+         COALESCE(SUM(CASE WHEN hr.amount_holding > 0 AND a.type = 'watch' THEN hr.amount_holding ELSE 0 END), 0) AS watched_amount_holding
+       FROM holder_rows hr
+       LEFT JOIN accounts a
+         ON a.wallet_address = hr.wallet_address
+        AND a.user_id = ?1
+        AND a.type IN ('managed', 'watch')`,
+    )
+    .bind(userId, tokenId, runId)
+    .first<{
+      active_holder_count: number;
+      internal_holder_count: number;
+      watched_holder_count: number;
+      total_amount_holding: number;
+      internal_amount_holding: number;
+      watched_amount_holding: number;
+    }>();
+  if (!row || (row.active_holder_count ?? 0) === 0) {
+    return null;
+  }
+  return {
+    tokenId,
+    activeHolderCount: row.active_holder_count ?? 0,
+    internalHolderCount: row.internal_holder_count ?? 0,
+    watchedHolderCount: row.watched_holder_count ?? 0,
+    outsiderHolderCount: Math.max(
+      0,
+      (row.active_holder_count ?? 0) - (row.internal_holder_count ?? 0),
+    ),
+    totalAmountHolding: row.total_amount_holding ?? 0,
+    internalAmountHolding: row.internal_amount_holding ?? 0,
+    watchedAmountHolding: row.watched_amount_holding ?? 0,
+    lastFullSyncAt: null,
+    lastDeltaSyncAt: null,
+    updatedAt,
+    source: 'rpc_owner_prefix_shards_partial',
+  };
+}
+
+async function dbListOutsideTokenHoldersFromFinal(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  limit = 200,
+): Promise<OutsideTokenHolderRecord[]> {
+  await dbEnsureTradeDomainSchema(db);
+  const rows = await db
+    .prepare(
+      `SELECT
+         tha.wallet_address,
+         tha.amount_holding,
+         tha.source,
+         tha.last_seen_at,
+         a.type AS account_type,
+         a.label AS account_label
+       FROM token_holder_addresses tha
+       LEFT JOIN accounts a
+         ON a.user_id = ?1
+        AND a.wallet_address = tha.wallet_address
+       WHERE tha.token_id = ?2
+         AND tha.amount_holding > 0
+         AND COALESCE(a.type, '') != 'managed'
+       ORDER BY tha.amount_holding DESC, tha.last_seen_at DESC, tha.wallet_address ASC
+       LIMIT ?3`,
+    )
+    .bind(userId, tokenId, limit)
+    .all<{
+      wallet_address: string;
+      amount_holding: number;
+      source: string;
+      last_seen_at: number;
+      account_type: string | null;
+      account_label: string | null;
+    }>();
+  return rows.results.map((row) => ({
+    address: row.wallet_address,
+    label: row.account_label,
+    amountHolding: row.amount_holding,
+    source: row.source,
+    ownership: row.account_type === 'watch' ? 'watch' : 'outside',
+    updatedAt: row.last_seen_at,
+  }));
+}
+
+async function dbListOutsideTokenHoldersFromStage(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  runId: string,
+  limit = 200,
+): Promise<OutsideTokenHolderRecord[]> {
+  await dbEnsureTradeDomainSchema(db);
+  const rows = await db
+    .prepare(
+      `WITH holder_rows AS (
+         SELECT
+           wallet_address,
+           SUM(amount_holding) AS amount_holding,
+           MAX(updated_at) AS updated_at
+         FROM token_holder_sync_stage
+         WHERE token_id = ?2 AND run_id = ?3
+         GROUP BY wallet_address
+         HAVING SUM(amount_holding) > 0
+       )
+       SELECT
+         hr.wallet_address,
+         hr.amount_holding,
+         hr.updated_at,
+         a.type AS account_type,
+         a.label AS account_label
+       FROM holder_rows hr
+       LEFT JOIN accounts a
+         ON a.user_id = ?1
+        AND a.wallet_address = hr.wallet_address
+       WHERE COALESCE(a.type, '') != 'managed'
+       ORDER BY hr.amount_holding DESC, hr.updated_at DESC, hr.wallet_address ASC
+       LIMIT ?4`,
+    )
+    .bind(userId, tokenId, runId, limit)
+    .all<{
+      wallet_address: string;
+      amount_holding: number;
+      updated_at: number;
+      account_type: string | null;
+      account_label: string | null;
+    }>();
+  return rows.results.map((row) => ({
+    address: row.wallet_address,
+    label: row.account_label,
+    amountHolding: row.amount_holding,
+    source: 'rpc_owner_prefix_shards',
+    ownership: row.account_type === 'watch' ? 'watch' : 'outside',
+    updatedAt: row.updated_at,
+  }));
+}
+
+async function dbListOutsideTokenHolders(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  limit = 200,
+): Promise<OutsideTokenHolderRecord[]> {
+  const syncState = await dbGetTokenHolderSyncState(db, tokenId);
+  if (
+    syncState?.runId &&
+    syncState.stagedHolderCount > 0 &&
+    (syncState.status === 'running' || syncState.status === 'failed')
+  ) {
+    return dbListOutsideTokenHoldersFromStage(
+      db,
+      userId,
+      tokenId,
+      syncState.runId,
+      limit,
+    );
+  }
+  return dbListOutsideTokenHoldersFromFinal(db, userId, tokenId, limit);
+}
+
+function serializeStrategyVersionContent(
+  document: StrategyVersionDocument,
+): string {
+  return JSON.stringify({
+    schemaVersion: document.schemaVersion,
+    engineVersion: document.engineVersion,
+    strategyType: document.strategyType,
+    parameters: document.parameters,
+    triggers: document.triggers,
+    targets: document.targets,
+    riskControls: document.riskControls,
+    execution: document.execution,
+  });
+}
+
+function dedupeStrategyVersionsForDisplay(
+  versions: StrategyVersionRecord[],
+  activeVersion: StrategyVersionRecord | null,
+): {
+  versions: StrategyVersionRecord[];
+  activeVersion: StrategyVersionRecord | null;
+} {
+  const uniqueByContent = new Map<string, StrategyVersionRecord>();
+  for (const version of [...versions].reverse()) {
+    const signature = serializeStrategyVersionContent(version.document);
+    if (!uniqueByContent.has(signature)) {
+      uniqueByContent.set(signature, version);
+    }
+  }
+
+  const dedupedVersions = [...uniqueByContent.values()].sort(
+    (left, right) => right.versionNo - left.versionNo || right.id - left.id,
+  );
+
+  if (!activeVersion) {
+    return { versions: dedupedVersions, activeVersion: null };
+  }
+
+  const activeSignature = serializeStrategyVersionContent(activeVersion.document);
+  return {
+    versions: dedupedVersions,
+    activeVersion:
+      dedupedVersions.find(
+        (version) =>
+          serializeStrategyVersionContent(version.document) === activeSignature,
+      ) ?? activeVersion,
+  };
+}
+
 async function dbApplyTokenHolderTransactionDelta(
   db: D1Database,
   userId: number,
@@ -5206,12 +5445,15 @@ async function dbSaveActiveStrategyVersionDocument(
   await dbEnsureTradeDomainSchema(db);
   const definition = await dbGetOrCreatePrimaryStrategyDefinition(db, userId);
   const document = normalizeStrategyDocument(documentInput);
-  const checksum = await sha256Hex(JSON.stringify(document));
+  const checksum = await sha256Hex(serializeStrategyVersionContent(document));
   const currentVersion = definition.currentVersionId
     ? await dbGetStrategyVersionById(db, definition.currentVersionId)
     : null;
+  const currentVersionChecksum = currentVersion
+    ? await sha256Hex(serializeStrategyVersionContent(currentVersion.document))
+    : null;
 
-  if (currentVersion && currentVersion.checksum === checksum) {
+  if (currentVersion && currentVersionChecksum === checksum) {
     return { version: currentVersion, created: false };
   }
 
@@ -5338,6 +5580,7 @@ async function dbListStrategyVersions(
 ): Promise<StrategyVersionRecord[]> {
   await dbEnsureTradeDomainSchema(db);
   const definition = await dbGetOrCreatePrimaryStrategyDefinition(db, userId);
+  const fetchLimit = Math.max(limit * 10, 250);
   const rows = await db
     .prepare(
       `SELECT
@@ -5363,7 +5606,7 @@ async function dbListStrategyVersions(
        ORDER BY version_no DESC, id DESC
        LIMIT ?2`,
     )
-    .bind(definition.id, limit)
+     .bind(definition.id, fetchLimit)
     .all<{
       id: number;
       strategy_id: number;
@@ -5383,7 +5626,7 @@ async function dbListStrategyVersions(
       created_at: number;
       activated_at: number | null;
     }>();
-  return rows.results.map(mapStrategyVersionRow);
+  return rows.results.map(mapStrategyVersionRow).slice(0, fetchLimit);
 }
 
 async function dbListStrategyEvaluations(
@@ -6763,27 +7006,10 @@ async function handleLogout(request: Request, env: Env): Promise<Response> {
 async function handleGetState(request: Request, env: Env): Promise<Response> {
   const user = await requireUser(request, env);
   const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-  let activeStrategyVersion: StrategyVersionRecord | null = null;
-  try {
-    activeStrategyVersion = (
-      await dbSyncActiveStrategyVersionFromSettings(
-        env.TRADINGBOT_DB,
-        user.id,
-        settings,
-        {
-          author: user.username,
-          changeNote: 'Auto-synced strategy version during state load',
-          origin: 'migration',
-        },
-      )
-    ).version;
-  } catch (err: unknown) {
-    console.warn(`Failed to auto-sync active strategy version for user ${user.id}:`, err);
-    activeStrategyVersion = await dbGetActiveStrategyVersion(
-      env.TRADINGBOT_DB,
-      user.id,
-    ).catch(() => null);
-  }
+  let activeStrategyVersion = await dbGetActiveStrategyVersion(
+    env.TRADINGBOT_DB,
+    user.id,
+  ).catch(() => null);
   let [
     internalAccs,
     outsiderAccs,
@@ -6816,6 +7042,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
 
   let marketSnapshot: TokenMarketSnapshot | null = null;
   let tokenHolderAggregate: TokenHolderAggregateRecord | null = null;
+  let outsideTokenHolders: OutsideTokenHolderRecord[] = [];
   if (settings.contractAddress.trim()) {
     try {
       marketSnapshot = await syncTokenMarketSnapshotForUser(
@@ -6844,10 +7071,28 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
         settings.contractAddress,
       );
       if (tokenId) {
+        const holderSyncState = await dbGetTokenHolderSyncState(
+          env.TRADINGBOT_DB,
+          tokenId,
+        );
         tokenHolderAggregate = await dbGetTokenHolderAggregate(
           env.TRADINGBOT_DB,
           tokenId,
         );
+        if (
+          holderSyncState?.runId &&
+          holderSyncState.stagedHolderCount > 0 &&
+          (holderSyncState.status === 'running' || holderSyncState.status === 'failed')
+        ) {
+          tokenHolderAggregate =
+            (await dbComputeTokenHolderAggregateFromStage(
+              env.TRADINGBOT_DB,
+              user.id,
+              tokenId,
+              holderSyncState.runId,
+              holderSyncState.updatedAt,
+            )) ?? tokenHolderAggregate;
+        }
         if (
           !tokenHolderAggregate &&
           (await dbHasTokenHolderRows(env.TRADINGBOT_DB, tokenId))
@@ -6861,6 +7106,11 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
             },
           );
         }
+        outsideTokenHolders = await dbListOutsideTokenHolders(
+          env.TRADINGBOT_DB,
+          user.id,
+          tokenId,
+        );
       }
     } catch (err: unknown) {
       console.warn(
@@ -6869,6 +7119,13 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
       );
     }
   }
+
+  const dedupedStrategyDisplay = dedupeStrategyVersionsForDisplay(
+    strategyVersions,
+    activeStrategyVersion,
+  );
+  strategyVersions = dedupedStrategyDisplay.versions;
+  activeStrategyVersion = dedupedStrategyDisplay.activeVersion;
 
   const profitUsdc = settings.contractAddress.trim()
     ? await dbComputeManagedProfitUsdc(
@@ -6894,6 +7151,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     strategyVersions,
     strategyEvaluations,
     tokenHolderAggregate,
+    outsideTokenHolders,
     rpcEndpoints,
     marketSnapshot,
     marketSnapshotHistory: [],
