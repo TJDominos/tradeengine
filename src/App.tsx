@@ -286,7 +286,32 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 function formatDate(timestamp: number) {
-  return new Date(timestamp * 1000).toLocaleString();
+  const normalized = timestamp >= 1_000_000_000_000 ? timestamp : timestamp * 1000;
+  return new Date(normalized).toLocaleString();
+}
+
+function formatDateInputValue(date: Date) {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function createDefaultDateRange(): DateRangeState {
+  const end = new Date();
+  const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000);
+  return {
+    from: formatDateInputValue(start),
+    to: formatDateInputValue(end),
+  };
+}
+
+function toRangeStartMs(value: string) {
+  return new Date(`${value}T00:00:00.000`).getTime();
+}
+
+function toRangeEndMs(value: string) {
+  return new Date(`${value}T23:59:59.999`).getTime();
 }
 
 function compactAddress(address: string) {
@@ -408,7 +433,7 @@ function DateRangePicker({
         </div>
         {hasDateRange ? (
           <div className="flex h-10 items-center rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 text-xs font-medium text-emerald-400">
-            <CheckSquare size={14} className="mr-1.5" /> Difference metrics active
+            <CheckSquare size={14} className="mr-1.5" /> Time filter active
           </div>
         ) : null}
       </div>
@@ -688,7 +713,7 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = React.useState('-');
 
   const [activeTab, setActiveTab] = React.useState<TabId>('dashboard');
-  const [dateRange, setDateRange] = React.useState<DateRangeState>({ from: '', to: '' });
+  const [dateRange, setDateRange] = React.useState<DateRangeState>(() => createDefaultDateRange());
   const [accountSearchTerm, setAccountSearchTerm] = React.useState('');
   const [internalPage, setInternalPage] = React.useState(1);
   const [outsiderPage, setOutsiderPage] = React.useState(1);
@@ -740,9 +765,7 @@ export default function App() {
   const [adminMsg, setAdminMsg] = React.useState({ type: '', text: '' });
 
   const [isSimulationModalOpen, setIsSimulationModalOpen] = React.useState(false);
-  const [marketSnapshotTimeRange, setMarketSnapshotTimeRange] = React.useState<'24h' | '7d' | '30d' | 'custom'>('24h');
-  const [marketSnapshotCustomRange, setMarketSnapshotCustomRange] = React.useState<DateRangeState>({ from: '', to: '' });
-  const [loadingMarketHistory, setLoadingMarketHistory] = React.useState(false);
+  const [loadingMarketSnapshots, setLoadingMarketSnapshots] = React.useState(false);
   
   const settingsDirtyRef = React.useRef(false);
   // Tracks which token address we last attempted to auto-init, to avoid
@@ -942,46 +965,49 @@ export default function App() {
       await refresh();
     });
 
-  const loadMarketSnapshotHistory = async () => {
-    if (!auth?.authenticated || !engineState || !settings.contractAddress.trim()) {
+  const loadMarketSnapshotHistory = React.useCallback(async () => {
+    if (!auth?.authenticated || !settings.contractAddress.trim()) {
+      return;
+    }
+    if (!dateRange.from || !dateRange.to) {
+      setEngineState((current) =>
+        current
+          ? {
+              ...current,
+              marketSnapshotHistory: [],
+            }
+          : current,
+      );
       return;
     }
 
-    setLoadingMarketHistory(true);
+    const startTime = toRangeStartMs(dateRange.from);
+    const endTime = toRangeEndMs(dateRange.to);
+    if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime > endTime) {
+      setError('Invalid date range');
+      return;
+    }
+
+    setLoadingMarketSnapshots(true);
     try {
-      const now = Math.floor(Date.now() / 1000);
-      let startTime = now - 86400; // default: last 24 hours
-      let endTime = now;
-
-      if (marketSnapshotTimeRange === '7d') {
-        startTime = now - 7 * 86400;
-      } else if (marketSnapshotTimeRange === '30d') {
-        startTime = now - 30 * 86400;
-      } else if (marketSnapshotTimeRange === 'custom' && marketSnapshotCustomRange.from && marketSnapshotCustomRange.to) {
-        startTime = Math.floor(new Date(marketSnapshotCustomRange.from).getTime() / 1000);
-        endTime = Math.floor(new Date(marketSnapshotCustomRange.to).getTime() / 1000);
-      }
-
       const result = await api<{ snapshots: TokenMarketSnapshot[] }>(
         `/api/market-snapshots?startTime=${startTime}&endTime=${endTime}&limit=500`,
       );
 
-      if (result.snapshots && Array.isArray(result.snapshots)) {
-        setEngineState((current) =>
-          current
-            ? {
-                ...current,
-                marketSnapshotHistory: result.snapshots,
-              }
-            : current,
-        );
-      }
+      setEngineState((current) =>
+        current
+          ? {
+              ...current,
+              marketSnapshotHistory: Array.isArray(result.snapshots) ? result.snapshots : [],
+            }
+          : current,
+      );
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load market snapshot history');
     } finally {
-      setLoadingMarketHistory(false);
+      setLoadingMarketSnapshots(false);
     }
-  };
+  }, [auth?.authenticated, dateRange.from, dateRange.to, settings.contractAddress]);
 
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
@@ -1001,6 +1027,7 @@ export default function App() {
                 }
               : current,
           );
+          await loadMarketSnapshotHistory();
           setNotice(
             result.marketSnapshot.priceUsd != null
               ? 'Market data refreshed.'
@@ -1015,6 +1042,18 @@ export default function App() {
         setNotice('No active trading token. Select a token first to refresh market data.');
       }
     });
+
+  useEffect(() => {
+    if (!auth?.authenticated || activeTab !== 'dashboard') return;
+    if (!settings.contractAddress.trim() || !hasDateRange) return;
+    void loadMarketSnapshotHistory();
+  }, [
+    activeTab,
+    auth?.authenticated,
+    hasDateRange,
+    loadMarketSnapshotHistory,
+    settings.contractAddress,
+  ]);
 
   const handleStartTrading = () => {
     setNotice('Trade execution is intentionally disabled in the current backend release.');
@@ -1391,17 +1430,38 @@ export default function App() {
     outsiderPage * ITEMS_PER_PAGE,
   );
 
+  const selectedRangeStartMs = hasDateRange ? toRangeStartMs(dateRange.from) : null;
+  const selectedRangeEndMs = hasDateRange ? toRangeEndMs(dateRange.to) : null;
+  const isInSelectedRange = (timestamp: number) => {
+    const normalized = timestamp >= 1_000_000_000_000 ? timestamp : timestamp * 1000;
+    if (selectedRangeStartMs != null && normalized < selectedRangeStartMs) return false;
+    if (selectedRangeEndMs != null && normalized > selectedRangeEndMs) return false;
+    return true;
+  };
+
+  const filteredSnapshots = (engineState.marketSnapshotHistory ?? []).filter((snapshot) =>
+    isInSelectedRange(snapshot.fetchedAt),
+  );
+  const liveSnapshotInRange =
+    engineState.marketSnapshot && isInSelectedRange(engineState.marketSnapshot.fetchedAt)
+      ? engineState.marketSnapshot
+      : null;
+  const dashboardSnapshot = filteredSnapshots[0] ?? liveSnapshotInRange;
+
   const filteredTransactionLogs = engineState.tradeLogs.filter((log) => {
     const term = transactionLogSearchTerm.toLowerCase();
     return (
-      (log.tokenContractAddress ?? '').toLowerCase().includes(term) ||
-      (log.tokenSymbol ?? '').toLowerCase().includes(term) ||
-      log.walletAddress.toLowerCase().includes(term) ||
-      log.action.toLowerCase().includes(term) ||
-      log.status.toLowerCase().includes(term) ||
-      (log.txSignature ?? '').toLowerCase().includes(term) ||
-      (log.errorMessage ?? '').toLowerCase().includes(term) ||
-      String(log.requestedAmount).includes(term)
+      isInSelectedRange(log.createdAt) &&
+      (
+        (log.tokenContractAddress ?? '').toLowerCase().includes(term) ||
+        (log.tokenSymbol ?? '').toLowerCase().includes(term) ||
+        log.walletAddress.toLowerCase().includes(term) ||
+        log.action.toLowerCase().includes(term) ||
+        log.status.toLowerCase().includes(term) ||
+        (log.txSignature ?? '').toLowerCase().includes(term) ||
+        (log.errorMessage ?? '').toLowerCase().includes(term) ||
+        String(log.requestedAmount).includes(term)
+      )
     );
   });
   const currentTransactionLogs = filteredTransactionLogs.slice(
@@ -1411,9 +1471,11 @@ export default function App() {
 
   const filteredActivityLogs = engineState.activityLogs.filter(
     (log) =>
-      log.target.toLowerCase().includes(activityLogSearchTerm.toLowerCase()) ||
-      log.action.toLowerCase().includes(activityLogSearchTerm.toLowerCase()) ||
-      log.details.toLowerCase().includes(activityLogSearchTerm.toLowerCase()),
+      isInSelectedRange(log.createdAt) && (
+        log.target.toLowerCase().includes(activityLogSearchTerm.toLowerCase()) ||
+        log.action.toLowerCase().includes(activityLogSearchTerm.toLowerCase()) ||
+        log.details.toLowerCase().includes(activityLogSearchTerm.toLowerCase())
+      ),
   );
   const currentActivityLogs = filteredActivityLogs.slice(
     (activityLogCurrentPage - 1) * ITEMS_PER_PAGE,
@@ -1425,9 +1487,14 @@ export default function App() {
     (token) => token.contractAddress === activeTokenContractAddress,
   );
   const activeTokenSymbol =
-    activeTrackedToken?.symbol ?? engineState.marketSnapshot?.tokenSymbol ?? 'WLT';
+    activeTrackedToken?.symbol ?? dashboardSnapshot?.tokenSymbol ?? engineState.marketSnapshot?.tokenSymbol ?? 'WLT';
   const activeTokenName =
-    engineState.marketSnapshot?.tokenName ?? activeTrackedToken?.name ?? activeTokenSymbol;
+    dashboardSnapshot?.tokenName ?? engineState.marketSnapshot?.tokenName ?? activeTrackedToken?.name ?? activeTokenSymbol;
+  const marketSnapshotSubtitle = dashboardSnapshot?.fetchedAt
+    ? `Snapshot: ${formatDate(dashboardSnapshot.fetchedAt)}${dashboardSnapshot.dexId ? ` | Source: ${dashboardSnapshot.dexId}` : ''}`
+    : loadingMarketSnapshots
+      ? 'Loading selected range...'
+      : 'No market snapshot in the selected range';
   const totalInternalTokenAmount = activeTokenContractAddress
     ? engineState.internalAccs.reduce(
         (sum, account) =>
@@ -1604,7 +1671,11 @@ export default function App() {
 
   const renderDashboard = () => (
     <div className="space-y-6">
-      <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange} />
+      <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
+        <div className="text-right text-xs text-slate-400">
+          {marketSnapshotSubtitle}
+        </div>
+      </DateRangePicker>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <StatCard title="Token Contract Address" value={settings.contractAddress || CONTRACT_ADDRESS || 'Not Configured'} isAddress />
@@ -1614,108 +1685,33 @@ export default function App() {
           subtitle={`${engineState.stats.managedAccounts} internal wallet(s)`}
         />
         <StatCard title="Profit (USDC)" value={formatUSD(engineState.profitUsdc)} />
-        <StatCard title="FDV" value={formatOptionalUsd(engineState.marketSnapshot?.fdv)} />
+        <StatCard title="FDV" value={formatOptionalUsd(dashboardSnapshot?.fdv)} subtitle={marketSnapshotSubtitle} />
         <StatCard
-          title={`Price: ${activeTokenName} (Live)`}
-          value={formatLivePrice(engineState.marketSnapshot?.priceUsd)}
-          subtitle={engineState.marketSnapshot?.dexId ? `Source: ${engineState.marketSnapshot.dexId}` : 'Live market source unavailable'}
+          title={`Price: ${activeTokenName}`}
+          value={formatLivePrice(dashboardSnapshot?.priceUsd)}
+          subtitle={marketSnapshotSubtitle}
         />
         <StatCard
           title="Liquidity (USDC)"
-          value={formatOptionalUsd(engineState.marketSnapshot?.liquidityUsd)}
+          value={formatOptionalUsd(dashboardSnapshot?.liquidityUsd)}
+          subtitle={marketSnapshotSubtitle}
         />
         <StatCard
           title="Total Outsiders (>$1)"
-          value={engineState.marketSnapshot?.outsidersOverOneUsd != null ? String(engineState.marketSnapshot.outsidersOverOneUsd) : 'Unavailable'}
+          value={dashboardSnapshot?.outsidersOverOneUsd != null ? String(dashboardSnapshot.outsidersOverOneUsd) : 'Unavailable'}
           subtitle={
-            engineState.marketSnapshot?.outsidersOverOneUsd != null
+            dashboardSnapshot?.outsidersOverOneUsd != null
               ? managedWallets.length === 0
                 ? 'No internal wallets are configured, so all holders count as outsiders.'
                 : `Excludes ${managedWallets.length} internal wallet(s)`
-              : 'Holder scan unavailable'
+              : marketSnapshotSubtitle
           }
         />
         <StatCard
           title="Number of Transaction and Volumes"
-          value={engineState.marketSnapshot?.totalTransactions24h != null ? formatNum(engineState.marketSnapshot.totalTransactions24h) : 'Unavailable'}
-          subtitle={engineState.marketSnapshot?.volume24h != null ? `24h volume ${formatUSD(engineState.marketSnapshot.volume24h)}` : '24h volume unavailable'}
+          value={dashboardSnapshot?.totalTransactions24h != null ? formatNum(dashboardSnapshot.totalTransactions24h) : 'Unavailable'}
+          subtitle={dashboardSnapshot?.volume24h != null ? `24h volume ${formatUSD(dashboardSnapshot.volume24h)}` : marketSnapshotSubtitle}
         />
-      </div>
-
-      {/* Market Snapshot History Section */}
-      <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950 p-4">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-slate-200">Market Snapshot History</h3>
-          <div className="flex items-center gap-2">
-            <select
-              value={marketSnapshotTimeRange}
-              onChange={(e) => setMarketSnapshotTimeRange(e.target.value as any)}
-              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1 text-sm text-slate-300 outline-none focus:border-blue-500"
-            >
-              <option value="24h">Last 24 Hours</option>
-              <option value="7d">Last 7 Days</option>
-              <option value="30d">Last 30 Days</option>
-              <option value="custom">Custom Range</option>
-            </select>
-            <button
-              onClick={loadMarketSnapshotHistory}
-              disabled={loadingMarketHistory}
-              className="rounded-md border border-blue-500 bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
-            >
-              {loadingMarketHistory ? 'Loading...' : 'Load'}
-            </button>
-          </div>
-        </div>
-
-        {marketSnapshotTimeRange === 'custom' && (
-          <div className="flex gap-3">
-            <input
-              type="datetime-local"
-              value={marketSnapshotCustomRange.from}
-              onChange={(e) => setMarketSnapshotCustomRange((c) => ({ ...c, from: e.target.value }))}
-              className="flex-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-1 text-sm text-slate-300 outline-none focus:border-blue-500"
-            />
-            <input
-              type="datetime-local"
-              value={marketSnapshotCustomRange.to}
-              onChange={(e) => setMarketSnapshotCustomRange((c) => ({ ...c, to: e.target.value }))}
-              className="flex-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-1 text-sm text-slate-300 outline-none focus:border-blue-500"
-            />
-          </div>
-        )}
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-slate-700">
-                <th className="px-4 py-2 text-left font-medium text-slate-400">Time</th>
-                <th className="px-4 py-2 text-right font-medium text-slate-400">Price (USDC)</th>
-                <th className="px-4 py-2 text-right font-medium text-slate-400">FDV</th>
-                <th className="px-4 py-2 text-right font-medium text-slate-400">Liquidity</th>
-                <th className="px-4 py-2 text-right font-medium text-slate-400">Outsiders (&gt;$1)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {engineState?.marketSnapshotHistory && engineState.marketSnapshotHistory.length > 0 ? (
-                engineState.marketSnapshotHistory.map((snap, index) => (
-                  <tr key={index} className="border-b border-slate-700/50 hover:bg-slate-900">
-                    <td className="px-4 py-2 text-slate-300">{formatDate(snap.fetchedAt)}</td>
-                    <td className="px-4 py-2 text-right text-slate-300">{formatOptionalUsd(snap.priceUsd)}</td>
-                    <td className="px-4 py-2 text-right text-slate-300">{formatOptionalUsd(snap.fdv)}</td>
-                    <td className="px-4 py-2 text-right text-slate-300">{formatOptionalUsd(snap.liquidityUsd)}</td>
-                    <td className="px-4 py-2 text-right text-slate-300">{snap.outsidersOverOneUsd != null ? formatNum(snap.outsidersOverOneUsd) : 'N/A'}</td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={5} className="py-8 text-center text-sm text-slate-500">
-                    {loadingMarketHistory ? 'Loading...' : 'No snapshot history available. Click Load to fetch data.'}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
       </div>
 
       <div className="mt-8">{renderDashboardLogs()}</div>

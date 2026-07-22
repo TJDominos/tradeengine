@@ -302,6 +302,14 @@ function nowTs(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+function nowMs(): number {
+  return Date.now();
+}
+
+function normalizeTimestampMs(value: number): number {
+  return value >= 1_000_000_000_000 ? value : value * 1000;
+}
+
 async function sha256Hex(value: string): Promise<string> {
   const enc = new TextEncoder();
   const hash = await crypto.subtle.digest('SHA-256', enc.encode(value));
@@ -1956,7 +1964,10 @@ async function dbGetLatestTokenMarketSnapshot(
          fetched_at
        FROM token_market_snapshots
        WHERE token_id = ?1
-       ORDER BY fetched_at DESC, id DESC
+       ORDER BY CASE
+         WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
+         ELSE fetched_at
+       END DESC, id DESC
        LIMIT 1`,
     )
     .bind(tokenId)
@@ -1991,7 +2002,7 @@ async function dbGetLatestTokenMarketSnapshot(
     outsidersOverOneUsd: row.outsiders_over_one_usd,
     dexId: row.dex_id,
     pairAddress: row.pair_address,
-    fetchedAt: row.fetched_at,
+    fetchedAt: normalizeTimestampMs(row.fetched_at),
   };
 }
 
@@ -2065,8 +2076,19 @@ async function dbGetTokenMarketSnapshotsByTimeRange(
          pair_address,
          fetched_at
        FROM token_market_snapshots
-       WHERE token_id = ?1 AND fetched_at >= ?2 AND fetched_at <= ?3
-       ORDER BY fetched_at DESC
+       WHERE token_id = ?1
+         AND CASE
+           WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
+           ELSE fetched_at
+         END >= ?2
+         AND CASE
+           WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
+           ELSE fetched_at
+         END <= ?3
+       ORDER BY CASE
+         WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
+         ELSE fetched_at
+       END DESC, id DESC
        LIMIT ?4`,
     )
     .bind(tokenId, startTime, endTime, limit)
@@ -2099,7 +2121,7 @@ async function dbGetTokenMarketSnapshotsByTimeRange(
     outsidersOverOneUsd: row.outsiders_over_one_usd,
     dexId: row.dex_id,
     pairAddress: row.pair_address,
-    fetchedAt: row.fetched_at,
+    fetchedAt: normalizeTimestampMs(row.fetched_at),
   }));
 }
 
@@ -2443,6 +2465,10 @@ interface JupiterTokenMetadata {
   liquidityUsd: number | null;
   totalHolders: number | null;
   usdPrice: number | null;
+  volume24h: number | null;
+  totalTransactions24h: number | null;
+  dexId: string | null;
+  pairAddress: string | null;
 }
 
 async function fetchJupiterTokenMetadata(
@@ -2468,57 +2494,94 @@ async function fetchJupiterTokenMetadata(
         const assetData = tokenData.asset || {};
         console.log(`[fetchJupiterTokenMetadata] First token: ${tokenData.symbol || tokenData.name}, asset keys: ${Object.keys(assetData).join(', ')}`);
 
-        // Extract FDV from top-level or nested asset field, fallback to mcap
-        const fdv = typeof tokenData.fdv === 'number' 
-          ? tokenData.fdv 
-          : typeof assetData.fdv === 'number'
-            ? assetData.fdv
-            : typeof tokenData.mcap === 'number' 
-              ? tokenData.mcap
-              : typeof assetData.mcap === 'number'
-                ? assetData.mcap
-                : null;
+        const stats24h = tokenData.stats24h && typeof tokenData.stats24h === 'object'
+          ? tokenData.stats24h
+          : assetData.stats24h && typeof assetData.stats24h === 'object'
+            ? assetData.stats24h
+            : {};
 
-        // Extract liquidity in USD (try multiple field paths)
-        const liquidityUsd = typeof tokenData.liquidity?.usd === 'number'
-          ? tokenData.liquidity.usd
-          : typeof assetData.liquidity?.usd === 'number'
-            ? assetData.liquidity.usd
+        const fdv =
+          toFiniteNumber(tokenData.fdv) ??
+          toFiniteNumber(assetData.fdv) ??
+          toFiniteNumber(tokenData.mcap) ??
+          toFiniteNumber(assetData.mcap);
+
+        const liquidityUsd =
+          toFiniteNumber(tokenData.liquidity) ??
+          toFiniteNumber(tokenData.liquidity?.usd) ??
+          toFiniteNumber(assetData.liquidity) ??
+          toFiniteNumber(assetData.liquidity?.usd);
+
+        const totalHolders =
+          toFiniteNumber(tokenData.holderCount) ??
+          toFiniteNumber(tokenData.holder) ??
+          toFiniteNumber(tokenData.holders) ??
+          toFiniteNumber(assetData.holderCount) ??
+          toFiniteNumber(assetData.holder) ??
+          toFiniteNumber(assetData.holders);
+
+        const usdPrice =
+          toFiniteNumber(tokenData.usdPrice) ??
+          toFiniteNumber(tokenData.price) ??
+          toFiniteNumber(assetData.usdPrice) ??
+          toFiniteNumber(assetData.price);
+
+        const buyVolume24h =
+          toFiniteNumber(stats24h.buyVolume) ??
+          toFiniteNumber(stats24h.buy_volume);
+        const sellVolume24h =
+          toFiniteNumber(stats24h.sellVolume) ??
+          toFiniteNumber(stats24h.sell_volume);
+        const volume24h =
+          buyVolume24h != null || sellVolume24h != null
+            ? (buyVolume24h ?? 0) + (sellVolume24h ?? 0)
             : null;
 
-        // Extract total holders (try multiple field names)
-        const totalHolders = typeof tokenData.holder === 'number'
-          ? tokenData.holder
-          : typeof tokenData.holders === 'number'
-            ? tokenData.holders
-            : typeof assetData.holder === 'number'
-              ? assetData.holder
-              : typeof assetData.holders === 'number'
-                ? assetData.holders
-                : null;
+        const directTransactions24h =
+          toFiniteNumber(stats24h.numTransactions) ??
+          toFiniteNumber(stats24h.transactions);
+        const totalTransactions24hRaw =
+          (toFiniteNumber(stats24h.numBuys) ?? toFiniteNumber(stats24h.buys) ?? 0) +
+          (toFiniteNumber(stats24h.numSells) ?? toFiniteNumber(stats24h.sells) ?? 0);
+        const totalTransactions24h = directTransactions24h != null
+          ? Math.trunc(directTransactions24h)
+          : totalTransactions24hRaw > 0
+            ? Math.trunc(totalTransactions24hRaw)
+            : null;
 
-        // Extract USD price (try multiple field names)
-        const usdPrice = typeof tokenData.usdPrice === 'number' 
-          ? tokenData.usdPrice
-          : typeof tokenData.price === 'number'
-            ? tokenData.price
-            : typeof assetData.usdPrice === 'number'
-              ? assetData.usdPrice
-              : null;
+        const dexId =
+          readNonEmptyString(tokenData.dexId) ??
+          readNonEmptyString(tokenData.launchpad) ??
+          readNonEmptyString(tokenData.metaLaunchpad) ??
+          null;
+        const pairAddress =
+          readNonEmptyString(tokenData.firstPool?.id) ??
+          readNonEmptyString(tokenData.graduatedPool) ??
+          null;
 
-        console.log(`[fetchJupiterTokenMetadata] Extracted: price=${usdPrice}, fdv=${fdv}, holders=${totalHolders}, liquidity=${liquidityUsd}`);
+        console.log(
+          `[fetchJupiterTokenMetadata] Extracted: price=${usdPrice}, fdv=${fdv}, holders=${totalHolders}, liquidity=${liquidityUsd}, volume24h=${volume24h}, tx24h=${totalTransactions24h}`,
+        );
 
         return {
           address: tokenData.address || tokenData.mint || mint,
           name: typeof tokenData.name === 'string' ? tokenData.name : null,
           symbol: typeof tokenData.symbol === 'string' ? tokenData.symbol : null,
           decimals: typeof tokenData.decimals === 'number' ? tokenData.decimals : null,
-          logoUri: typeof tokenData.logoURI === 'string' ? tokenData.logoURI : null,
+          logoUri: typeof tokenData.logoURI === 'string'
+            ? tokenData.logoURI
+            : typeof tokenData.icon === 'string'
+              ? tokenData.icon
+              : null,
           tags: Array.isArray(tokenData.tags) ? tokenData.tags : [],
           fdv,
           liquidityUsd,
           totalHolders,
           usdPrice,
+          volume24h,
+          totalTransactions24h,
+          dexId,
+          pairAddress,
         };
       }
     } else {
@@ -2547,6 +2610,10 @@ async function fetchJupiterTokenMetadata(
         liquidityUsd: null,
         totalHolders: null,
         usdPrice: null,
+        volume24h: null,
+        totalTransactions24h: null,
+        dexId: null,
+        pairAddress: null,
       };
     } else {
       console.log(`[fetchJupiterTokenMetadata] Fallback endpoint error: ${fallbackResponse.status}`);
@@ -2868,13 +2935,13 @@ async function syncTokenMarketSnapshotForUser(
       return cachedSnapshot;
     }
 
-    const latestSnapshotAgeSeconds = latestStoredSnapshot
-      ? nowTs() - latestStoredSnapshot.fetchedAt
+    const latestSnapshotAgeMs = latestStoredSnapshot
+      ? nowMs() - latestStoredSnapshot.fetchedAt
       : null;
     if (
       latestStoredSnapshot &&
-      latestSnapshotAgeSeconds != null &&
-      latestSnapshotAgeSeconds <= Math.ceil(TOKEN_MARKET_CACHE_TTL_MS / 1000)
+      latestSnapshotAgeMs != null &&
+      latestSnapshotAgeMs <= TOKEN_MARKET_CACHE_TTL_MS
     ) {
       writeTokenMarketCache(cacheKey, latestStoredSnapshot);
       return latestStoredSnapshot;
@@ -2921,12 +2988,12 @@ async function syncTokenMarketSnapshotForUser(
         priceUsd: jupiterPrice,
         liquidityUsd: jupiterMeta?.liquidityUsd ?? null,
         fdv: jupiterMeta?.fdv ?? null,
-        volume24h: null,
-        totalTransactions24h: null,
+        volume24h: jupiterMeta?.volume24h ?? null,
+        totalTransactions24h: jupiterMeta?.totalTransactions24h ?? null,
         outsidersOverOneUsd: null,
-        dexId: null,
-        pairAddress: null,
-        fetchedAt: nowTs(),
+        dexId: jupiterMeta?.dexId ?? null,
+        pairAddress: jupiterMeta?.pairAddress ?? null,
+        fetchedAt: nowMs(),
       };
     }
   } catch (err: unknown) {
@@ -4131,22 +4198,22 @@ async function handleGetMarketSnapshotsByTimeRange(
   const endTimeParam = url.searchParams.get('endTime');
   const limitParam = url.searchParams.get('limit');
 
-  const now = Math.floor(Date.now() / 1000);
-  let startTime = now - 86400; // default: last 24 hours
+  const now = nowMs();
+  let startTime = now - 7 * 24 * 60 * 60 * 1000;
   let endTime = now;
   let limit = 100;
 
   if (startTimeParam) {
     const parsed = Number.parseInt(startTimeParam, 10);
     if (Number.isInteger(parsed) && parsed > 0) {
-      startTime = parsed;
+      startTime = normalizeTimestampMs(parsed);
     }
   }
 
   if (endTimeParam) {
     const parsed = Number.parseInt(endTimeParam, 10);
     if (Number.isInteger(parsed) && parsed > 0) {
-      endTime = parsed;
+      endTime = normalizeTimestampMs(parsed);
     }
   }
 
@@ -4158,18 +4225,18 @@ async function handleGetMarketSnapshotsByTimeRange(
   }
 
   // Find token by contract address
-  const token = await env.TRADINGBOT_DB
-    .prepare('SELECT id FROM tradable_tokens WHERE user_id = ?1 AND contract_address = ?2')
-    .bind(user.id, contractAddress)
-    .first<{ id: number }>();
+  const tokenId = await dbResolveTradableTokenId(
+    env.TRADINGBOT_DB,
+    contractAddress,
+  );
 
-  if (!token) {
+  if (!tokenId) {
     throw new ApiError(404, 'Token not found');
   }
 
   const snapshots = await dbGetTokenMarketSnapshotsByTimeRange(
     env.TRADINGBOT_DB,
-    token.id,
+    tokenId,
     startTime,
     endTime,
     limit,
