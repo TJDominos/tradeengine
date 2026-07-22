@@ -67,6 +67,14 @@ const SOLANA_SPL_TOKEN_PROGRAM_ID =
   'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const SOLANA_TOKEN_2022_PROGRAM_ID =
   'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+const TOKEN_HOLDER_SYNC_PROGRAM_IDS = [
+  SOLANA_SPL_TOKEN_PROGRAM_ID,
+  SOLANA_TOKEN_2022_PROGRAM_ID,
+] as const;
+const TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT = 256;
+const TOKEN_HOLDER_SYNC_TOTAL_SHARDS =
+  TOKEN_HOLDER_SYNC_PROGRAM_IDS.length * TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT;
+const TOKEN_HOLDER_SYNC_SHARDS_PER_REFRESH = 32;
 const WALLET_BALANCE_CACHE_TTL_MS = 30_000;
 const TOKEN_MARKET_CACHE_TTL_MS = 30_000;
 const BASE58_ALPHABET =
@@ -189,6 +197,43 @@ interface TokenHolderAggregateRecord {
   lastDeltaSyncAt: number | null;
   updatedAt: number;
   source: string;
+}
+
+type TokenHolderSyncStatus = 'idle' | 'running' | 'completed' | 'failed';
+
+interface TokenHolderSyncStateRecord {
+  tokenId: number;
+  runId: string | null;
+  status: TokenHolderSyncStatus;
+  source: string;
+  nextShardIndex: number;
+  processedShardCount: number;
+  totalShardCount: number;
+  stagedHolderCount: number;
+  lastProgramId: string | null;
+  lastOwnerPrefix: number | null;
+  errorMessage: string | null;
+  startedAt: number | null;
+  updatedAt: number;
+  lastCompletedAt: number | null;
+}
+
+interface TokenHolderSyncSummary {
+  status: TokenHolderSyncStatus;
+  mode: 'rpc_owner_prefix_shards';
+  runId: string | null;
+  processedShardCount: number;
+  totalShardCount: number;
+  remainingShardCount: number;
+  shardsProcessedThisRun: number;
+  stagedHolderCount: number;
+  activeHolderCount: number;
+  upsertedCount: number;
+  zeroedCount: number;
+  lastProgramId: string | null;
+  lastOwnerPrefix: number | null;
+  errorMessage: string | null;
+  lastCompletedAt: number | null;
 }
 
 interface StoredSignalTransactionDetails {
@@ -436,6 +481,75 @@ function base58Encode(bytes: Uint8Array): string {
     else break;
   }
   return result + digits.reverse().map((d) => BASE58_ALPHABET[d]).join('');
+}
+
+function decodeBase64Bytes(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+}
+
+function readUint64LittleEndian(bytes: Uint8Array, offset: number): bigint {
+  let value = 0n;
+  for (let index = 0; index < 8; index += 1) {
+    value |= BigInt(bytes[offset + index] ?? 0) << BigInt(index * 8);
+  }
+  return value;
+}
+
+function getTokenHolderSyncShardCursor(shardIndex: number): {
+  programId: (typeof TOKEN_HOLDER_SYNC_PROGRAM_IDS)[number];
+  ownerPrefix: number;
+} {
+  const normalizedIndex = Math.max(
+    0,
+    Math.min(shardIndex, TOKEN_HOLDER_SYNC_TOTAL_SHARDS - 1),
+  );
+  const programIndex = Math.floor(
+    normalizedIndex / TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT,
+  );
+  return {
+    programId:
+      TOKEN_HOLDER_SYNC_PROGRAM_IDS[programIndex] ??
+      TOKEN_HOLDER_SYNC_PROGRAM_IDS[0],
+    ownerPrefix: normalizedIndex % TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT,
+  };
+}
+
+function buildTokenHolderSyncSummary(
+  state: TokenHolderSyncStateRecord | null,
+  overrides: Partial<TokenHolderSyncSummary> = {},
+): TokenHolderSyncSummary {
+  const baseSummary: TokenHolderSyncSummary = {
+    status: state?.status ?? 'idle',
+    mode: 'rpc_owner_prefix_shards',
+    runId: state?.runId ?? null,
+    processedShardCount: state?.processedShardCount ?? 0,
+    totalShardCount: state?.totalShardCount ?? TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+    remainingShardCount: Math.max(
+      0,
+      (state?.totalShardCount ?? TOKEN_HOLDER_SYNC_TOTAL_SHARDS) -
+        (state?.processedShardCount ?? 0),
+    ),
+    shardsProcessedThisRun: 0,
+    stagedHolderCount: state?.stagedHolderCount ?? 0,
+    activeHolderCount: state?.stagedHolderCount ?? 0,
+    upsertedCount: 0,
+    zeroedCount: 0,
+    lastProgramId: state?.lastProgramId ?? null,
+    lastOwnerPrefix: state?.lastOwnerPrefix ?? null,
+    errorMessage: state?.errorMessage ?? null,
+    lastCompletedAt: state?.lastCompletedAt ?? null,
+  };
+  const merged = {
+    ...baseSummary,
+    ...overrides,
+  };
+  return {
+    ...merged,
+    remainingShardCount: Math.max(
+      0,
+      merged.totalShardCount - merged.processedShardCount,
+    ),
+  };
 }
 
 // ─── password hashing (PBKDF2 via SubtleCrypto) ───────────────────────────────
@@ -1369,6 +1483,35 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     source TEXT NOT NULL DEFAULT 'rpc_full_sync',
     FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
   )`,
+  `CREATE TABLE IF NOT EXISTS token_holder_sync_states (
+    token_id INTEGER PRIMARY KEY,
+    run_id TEXT,
+    status TEXT NOT NULL DEFAULT 'idle'
+      CHECK(status IN ('idle', 'running', 'completed', 'failed')),
+    source TEXT NOT NULL DEFAULT 'rpc_owner_prefix_shards',
+    next_shard_index INTEGER NOT NULL DEFAULT 0,
+    processed_shard_count INTEGER NOT NULL DEFAULT 0,
+    total_shard_count INTEGER NOT NULL DEFAULT 512,
+    staged_holder_count INTEGER NOT NULL DEFAULT 0,
+    last_program_id TEXT,
+    last_owner_prefix INTEGER,
+    error_message TEXT,
+    started_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    last_completed_at INTEGER,
+    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS token_holder_sync_stage (
+    token_id INTEGER NOT NULL,
+    run_id TEXT NOT NULL,
+    shard_index INTEGER NOT NULL,
+    wallet_address TEXT NOT NULL,
+    amount_holding REAL NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'rpc_owner_prefix_shards',
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(token_id, run_id, shard_index, wallet_address),
+    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
+  )`,
   `CREATE TABLE IF NOT EXISTS rpc_endpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -1393,6 +1536,8 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_amount ON token_holder_addresses(token_id, amount_holding DESC)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_transaction_deltas_token_sig ON token_holder_transaction_deltas(token_id, tx_signature)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_aggregates_updated ON token_holder_aggregates(updated_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_token_holder_sync_states_status_updated ON token_holder_sync_states(status, updated_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_token_holder_sync_stage_token_run_updated ON token_holder_sync_stage(token_id, run_id, shard_index, updated_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_user_network_created ON rpc_endpoints(user_id, network, created_at DESC)',
 ];
 
@@ -2430,6 +2575,62 @@ async function fetchSolanaTokenHolderBalances(
   return balances;
 }
 
+async function fetchSolanaTokenHolderBalanceShard(
+  rpcUrls: string | string[],
+  mint: string,
+  programId: (typeof TOKEN_HOLDER_SYNC_PROGRAM_IDS)[number],
+  ownerPrefix: number,
+  decimals: number,
+): Promise<Map<string, number>> {
+  const ownerPrefixFilter = base58Encode(Uint8Array.of(ownerPrefix));
+  const filters = [
+    { dataSize: 165 },
+    { memcmp: { offset: 0, bytes: mint } },
+    { memcmp: { offset: 32, bytes: ownerPrefixFilter } },
+  ];
+
+  const rows = await solanaRpc<
+    Array<{
+      account: {
+        data: [string, string] | string;
+      };
+    }>
+  >(rpcUrls, 'getProgramAccounts', [
+    programId,
+    {
+      filters,
+      encoding: 'base64',
+      dataSlice: { offset: 32, length: 40 },
+    },
+  ]);
+
+  const balances = new Map<string, number>();
+  for (const row of rows) {
+    const data = Array.isArray(row.account.data)
+      ? row.account.data[0]
+      : row.account.data;
+    if (typeof data !== 'string' || data.length === 0) {
+      continue;
+    }
+    const bytes = decodeBase64Bytes(data);
+    if (bytes.length < 40) {
+      continue;
+    }
+    const owner = base58Encode(bytes.slice(0, 32));
+    const rawAmount = readUint64LittleEndian(bytes, 32);
+    if (rawAmount <= 0n) {
+      continue;
+    }
+    const amountHolding = Number(rawAmount) / 10 ** decimals;
+    if (!Number.isFinite(amountHolding) || amountHolding <= 0) {
+      continue;
+    }
+    balances.set(owner, (balances.get(owner) ?? 0) + amountHolding);
+  }
+
+  return balances;
+}
+
 async function dbUpsertTokenHolderAddresses(
   db: D1Database,
   tokenId: number,
@@ -2524,6 +2725,484 @@ async function dbSyncTokenHolderBalances(
     upsertedCount: upserts.length,
     zeroedCount: zeroes.length,
   };
+}
+
+async function dbGetTokenHolderSyncState(
+  db: D1Database,
+  tokenId: number,
+): Promise<TokenHolderSyncStateRecord | null> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT
+         token_id,
+         run_id,
+         status,
+         source,
+         next_shard_index,
+         processed_shard_count,
+         total_shard_count,
+         staged_holder_count,
+         last_program_id,
+         last_owner_prefix,
+         error_message,
+         started_at,
+         updated_at,
+         last_completed_at
+       FROM token_holder_sync_states
+       WHERE token_id = ?1
+       LIMIT 1`,
+    )
+    .bind(tokenId)
+    .first<{
+      token_id: number;
+      run_id: string | null;
+      status: TokenHolderSyncStatus;
+      source: string;
+      next_shard_index: number;
+      processed_shard_count: number;
+      total_shard_count: number;
+      staged_holder_count: number;
+      last_program_id: string | null;
+      last_owner_prefix: number | null;
+      error_message: string | null;
+      started_at: number | null;
+      updated_at: number;
+      last_completed_at: number | null;
+    }>();
+  if (!row) {
+    return null;
+  }
+  return {
+    tokenId: row.token_id,
+    runId: row.run_id,
+    status: row.status,
+    source: row.source,
+    nextShardIndex: row.next_shard_index,
+    processedShardCount: row.processed_shard_count,
+    totalShardCount: row.total_shard_count,
+    stagedHolderCount: row.staged_holder_count,
+    lastProgramId: row.last_program_id,
+    lastOwnerPrefix: row.last_owner_prefix,
+    errorMessage: row.error_message,
+    startedAt: row.started_at,
+    updatedAt: row.updated_at,
+    lastCompletedAt: row.last_completed_at,
+  };
+}
+
+async function dbPutTokenHolderSyncState(
+  db: D1Database,
+  state: TokenHolderSyncStateRecord,
+): Promise<TokenHolderSyncStateRecord> {
+  await dbEnsureTradeDomainSchema(db);
+  await db
+    .prepare(
+      `INSERT INTO token_holder_sync_states (
+         token_id,
+         run_id,
+         status,
+         source,
+         next_shard_index,
+         processed_shard_count,
+         total_shard_count,
+         staged_holder_count,
+         last_program_id,
+         last_owner_prefix,
+         error_message,
+         started_at,
+         updated_at,
+         last_completed_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+       ON CONFLICT(token_id)
+       DO UPDATE SET
+         run_id = excluded.run_id,
+         status = excluded.status,
+         source = excluded.source,
+         next_shard_index = excluded.next_shard_index,
+         processed_shard_count = excluded.processed_shard_count,
+         total_shard_count = excluded.total_shard_count,
+         staged_holder_count = excluded.staged_holder_count,
+         last_program_id = excluded.last_program_id,
+         last_owner_prefix = excluded.last_owner_prefix,
+         error_message = excluded.error_message,
+         started_at = excluded.started_at,
+         updated_at = excluded.updated_at,
+         last_completed_at = excluded.last_completed_at`,
+    )
+    .bind(
+      state.tokenId,
+      state.runId,
+      state.status,
+      state.source,
+      state.nextShardIndex,
+      state.processedShardCount,
+      state.totalShardCount,
+      state.stagedHolderCount,
+      state.lastProgramId,
+      state.lastOwnerPrefix,
+      state.errorMessage,
+      state.startedAt,
+      state.updatedAt,
+      state.lastCompletedAt,
+    )
+    .run();
+  return state;
+}
+
+async function dbStartOrResumeTokenHolderSync(
+  db: D1Database,
+  tokenId: number,
+): Promise<TokenHolderSyncStateRecord> {
+  const existing = await dbGetTokenHolderSyncState(db, tokenId);
+  const timestamp = nowTs();
+  if (
+    existing?.runId &&
+    existing.nextShardIndex <= existing.totalShardCount &&
+    (existing.status === 'running' || existing.status === 'failed')
+  ) {
+    return await dbPutTokenHolderSyncState(db, {
+      ...existing,
+      status: 'running',
+      errorMessage: null,
+      updatedAt: timestamp,
+    });
+  }
+
+  await db
+    .prepare('DELETE FROM token_holder_sync_stage WHERE token_id = ?1')
+    .bind(tokenId)
+    .run();
+
+  return await dbPutTokenHolderSyncState(db, {
+    tokenId,
+    runId: crypto.randomUUID(),
+    status: 'running',
+    source: 'rpc_owner_prefix_shards',
+    nextShardIndex: 0,
+    processedShardCount: 0,
+    totalShardCount: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+    stagedHolderCount: 0,
+    lastProgramId: null,
+    lastOwnerPrefix: null,
+    errorMessage: null,
+    startedAt: timestamp,
+    updatedAt: timestamp,
+    lastCompletedAt: existing?.lastCompletedAt ?? null,
+  });
+}
+
+async function dbCountTokenHolderSyncStageHolders(
+  db: D1Database,
+  tokenId: number,
+  runId: string,
+): Promise<number> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS holder_count
+       FROM (
+         SELECT wallet_address
+         FROM token_holder_sync_stage
+         WHERE token_id = ?1 AND run_id = ?2
+         GROUP BY wallet_address
+         HAVING SUM(amount_holding) > 0
+       )`,
+    )
+    .bind(tokenId, runId)
+    .first<{ holder_count: number }>();
+  return row?.holder_count ?? 0;
+}
+
+async function dbStageTokenHolderBalanceShard(
+  db: D1Database,
+  tokenId: number,
+  runId: string,
+  shardIndex: number,
+  balances: Map<string, number>,
+  source = 'rpc_owner_prefix_shards',
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  if (balances.size === 0) {
+    return;
+  }
+  const timestamp = nowTs();
+  await db.batch(
+    [...balances.entries()].map(([address, amountHolding]) =>
+      db
+        .prepare(
+          `INSERT INTO token_holder_sync_stage (
+             token_id,
+             run_id,
+             shard_index,
+             wallet_address,
+             amount_holding,
+             source,
+             updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+           ON CONFLICT(token_id, run_id, shard_index, wallet_address)
+           DO UPDATE SET
+             amount_holding = excluded.amount_holding,
+             source = excluded.source,
+             updated_at = excluded.updated_at`,
+        )
+        .bind(
+          tokenId,
+          runId,
+          shardIndex,
+          address,
+          amountHolding,
+          source,
+          timestamp,
+        ),
+    ),
+  );
+}
+
+async function dbFinalizePagedTokenHolderSync(
+  db: D1Database,
+  userId: number,
+  state: TokenHolderSyncStateRecord,
+  source = 'rpc_owner_prefix_shards',
+): Promise<TokenHolderSyncSummary> {
+  await dbEnsureTradeDomainSchema(db);
+  if (!state.runId) {
+    return buildTokenHolderSyncSummary(state, {
+      status: 'failed',
+      errorMessage: 'Token holder sync run id is missing',
+    });
+  }
+
+  const timestamp = nowTs();
+  const activeHolderRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS active_holder_count
+       FROM (
+         SELECT wallet_address
+         FROM token_holder_sync_stage
+         WHERE token_id = ?1 AND run_id = ?2
+         GROUP BY wallet_address
+         HAVING SUM(amount_holding) > 0
+       )`,
+    )
+    .bind(state.tokenId, state.runId)
+    .first<{ active_holder_count: number }>();
+  const zeroedCountRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS zeroed_count
+       FROM token_holder_addresses
+       WHERE token_id = ?1
+         AND amount_holding > 0
+         AND wallet_address NOT IN (
+           SELECT wallet_address
+           FROM token_holder_sync_stage
+           WHERE token_id = ?1 AND run_id = ?2
+           GROUP BY wallet_address
+           HAVING SUM(amount_holding) > 0
+         )`,
+    )
+    .bind(state.tokenId, state.runId)
+    .first<{ zeroed_count: number }>();
+
+  await db
+    .prepare(
+      `INSERT INTO token_holder_addresses (
+         token_id,
+         wallet_address,
+         amount_holding,
+         source,
+         first_seen_at,
+         last_seen_at
+       )
+       SELECT
+         ?1,
+         wallet_address,
+         SUM(amount_holding) AS amount_holding,
+         ?3,
+         ?4,
+         ?4
+       FROM token_holder_sync_stage
+       WHERE token_id = ?1 AND run_id = ?2
+       GROUP BY wallet_address
+       HAVING SUM(amount_holding) > 0
+       ON CONFLICT(token_id, wallet_address)
+       DO UPDATE SET
+         amount_holding = excluded.amount_holding,
+         source = excluded.source,
+         last_seen_at = excluded.last_seen_at`,
+    )
+    .bind(state.tokenId, state.runId, source, timestamp)
+    .run();
+
+  await db
+    .prepare(
+      `UPDATE token_holder_addresses
+       SET amount_holding = 0,
+           source = ?3,
+           last_seen_at = ?4
+       WHERE token_id = ?1
+         AND amount_holding > 0
+         AND wallet_address NOT IN (
+           SELECT wallet_address
+           FROM token_holder_sync_stage
+           WHERE token_id = ?1 AND run_id = ?2
+           GROUP BY wallet_address
+           HAVING SUM(amount_holding) > 0
+         )`,
+    )
+    .bind(state.tokenId, state.runId, source, timestamp)
+    .run();
+
+  await dbRecomputeTokenHolderAggregate(db, userId, state.tokenId, {
+    source,
+    fullSyncAt: timestamp,
+  });
+
+  const activeHolderCount = activeHolderRow?.active_holder_count ?? 0;
+  const zeroedCount = zeroedCountRow?.zeroed_count ?? 0;
+  const completedState = await dbPutTokenHolderSyncState(db, {
+    ...state,
+    status: 'completed',
+    source,
+    nextShardIndex: state.totalShardCount,
+    processedShardCount: state.totalShardCount,
+    stagedHolderCount: activeHolderCount,
+    lastProgramId:
+      TOKEN_HOLDER_SYNC_PROGRAM_IDS[TOKEN_HOLDER_SYNC_PROGRAM_IDS.length - 1],
+    lastOwnerPrefix: TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT - 1,
+    errorMessage: null,
+    updatedAt: timestamp,
+    lastCompletedAt: timestamp,
+  });
+
+  await db
+    .prepare(
+      'DELETE FROM token_holder_sync_stage WHERE token_id = ?1 AND run_id = ?2',
+    )
+    .bind(state.tokenId, state.runId)
+    .run();
+
+  return buildTokenHolderSyncSummary(completedState, {
+    activeHolderCount,
+    stagedHolderCount: activeHolderCount,
+    upsertedCount: activeHolderCount,
+    zeroedCount,
+  });
+}
+
+async function syncSolanaTokenHolderBalancesPaged(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  mint: string,
+  rpcUrls: string | string[],
+  maxShards = TOKEN_HOLDER_SYNC_SHARDS_PER_REFRESH,
+): Promise<TokenHolderSyncSummary> {
+  const state = await dbStartOrResumeTokenHolderSync(db, tokenId);
+  const decimals = await fetchSolanaMintDecimals(rpcUrls, mint);
+  if (decimals == null) {
+    const failedState = await dbPutTokenHolderSyncState(db, {
+      ...state,
+      status: 'failed',
+      errorMessage: 'Failed to resolve token mint decimals for holder sync',
+      updatedAt: nowTs(),
+    });
+    return buildTokenHolderSyncSummary(failedState);
+  }
+
+  let currentState = state;
+  let shardsProcessedThisRun = 0;
+  try {
+    while (
+      shardsProcessedThisRun < maxShards &&
+      currentState.nextShardIndex < currentState.totalShardCount
+    ) {
+      const shardIndex = currentState.nextShardIndex;
+      const cursor = getTokenHolderSyncShardCursor(shardIndex);
+      const balances = await fetchSolanaTokenHolderBalanceShard(
+        rpcUrls,
+        mint,
+        cursor.programId,
+        cursor.ownerPrefix,
+        decimals,
+      );
+      if (currentState.runId) {
+        await dbStageTokenHolderBalanceShard(
+          db,
+          tokenId,
+          currentState.runId,
+          shardIndex,
+          balances,
+        );
+      }
+      shardsProcessedThisRun += 1;
+      currentState = await dbPutTokenHolderSyncState(db, {
+        ...currentState,
+        status: 'running',
+        source: 'rpc_owner_prefix_shards',
+        nextShardIndex: shardIndex + 1,
+        processedShardCount: Math.min(
+          currentState.totalShardCount,
+          shardIndex + 1,
+        ),
+        lastProgramId: cursor.programId,
+        lastOwnerPrefix: cursor.ownerPrefix,
+        errorMessage: null,
+        updatedAt: nowTs(),
+      });
+    }
+  } catch (err: unknown) {
+    const stagedHolderCount = currentState.runId
+      ? await dbCountTokenHolderSyncStageHolders(
+          db,
+          tokenId,
+          currentState.runId,
+        )
+      : 0;
+    const failedState = await dbPutTokenHolderSyncState(db, {
+      ...currentState,
+      status: 'failed',
+      stagedHolderCount,
+      errorMessage: err instanceof Error ? err.message : String(err),
+      updatedAt: nowTs(),
+    });
+    return buildTokenHolderSyncSummary(failedState, {
+      shardsProcessedThisRun,
+      stagedHolderCount,
+      activeHolderCount: stagedHolderCount,
+    });
+  }
+
+  const stagedHolderCount = currentState.runId
+    ? await dbCountTokenHolderSyncStageHolders(
+        db,
+        tokenId,
+        currentState.runId,
+      )
+    : 0;
+  currentState = await dbPutTokenHolderSyncState(db, {
+    ...currentState,
+    stagedHolderCount,
+    updatedAt: nowTs(),
+  });
+
+  if (currentState.nextShardIndex >= currentState.totalShardCount) {
+    const completedSummary = await dbFinalizePagedTokenHolderSync(
+      db,
+      userId,
+      currentState,
+    );
+    return buildTokenHolderSyncSummary(null, {
+      ...completedSummary,
+      shardsProcessedThisRun,
+    });
+  }
+
+  return buildTokenHolderSyncSummary(currentState, {
+    shardsProcessedThisRun,
+    stagedHolderCount,
+    activeHolderCount: stagedHolderCount,
+  });
 }
 
 async function dbRecomputeTokenHolderAggregate(
@@ -6744,46 +7423,46 @@ async function handleForceRefreshMarketSnapshot(
     env.TRADINGBOT_DB,
     contractAddress,
   );
-  let holderSyncSummary = {
-    activeHolderCount: 0,
-    upsertedCount: 0,
-    zeroedCount: 0,
-  };
+  let holderSyncSummary = buildTokenHolderSyncSummary(null);
   if (tokenId) {
-    const holderBalances = await fetchSolanaTokenHolderBalances(
-      rpcUrls,
+    holderSyncSummary = await syncSolanaTokenHolderBalancesPaged(
+      env.TRADINGBOT_DB,
+      user.id,
+      tokenId,
       contractAddress,
+      rpcUrls,
     ).catch((err) => {
-      console.warn(`Failed to fetch holder balances for ${contractAddress}:`, err);
-      return null;
-    });
-    if (holderBalances) {
-      holderSyncSummary = await dbSyncTokenHolderBalances(
-        env.TRADINGBOT_DB,
-        tokenId,
-        holderBalances,
-        'rpc_full_sync',
-      ).catch((err) => {
-        console.warn(`Failed to sync holder balances for ${contractAddress}:`, err);
-        return {
-          activeHolderCount: 0,
-          upsertedCount: 0,
-          zeroedCount: 0,
-        };
-      });
-      await dbRecomputeTokenHolderAggregate(
-        env.TRADINGBOT_DB,
-        user.id,
-        tokenId,
+      console.warn(
+        `Failed to page holder balances for ${contractAddress}:`,
+        err,
+      );
+      return buildTokenHolderSyncSummary(
         {
-          source: 'rpc_full_sync',
-          fullSyncAt: nowTs(),
+          tokenId,
+          runId: null,
+          status: 'failed',
+          source: 'rpc_owner_prefix_shards',
+          nextShardIndex: 0,
+          processedShardCount: 0,
+          totalShardCount: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+          stagedHolderCount: 0,
+          lastProgramId: null,
+          lastOwnerPrefix: null,
+          errorMessage: err instanceof Error ? err.message : String(err),
+          startedAt: null,
+          updatedAt: nowTs(),
+          lastCompletedAt: null,
         },
-      ).catch((err) => {
-        console.warn(`Failed to recompute holder aggregate for ${contractAddress}:`, err);
-      });
-    }
+      );
+    });
   }
+
+  const holderSyncAuditDetails =
+    holderSyncSummary.status === 'completed'
+      ? `Holder sync completed with ${holderSyncSummary.activeHolderCount} active holders, upserted ${holderSyncSummary.upsertedCount}, zeroed ${holderSyncSummary.zeroedCount}.`
+      : holderSyncSummary.status === 'failed'
+        ? `Holder sync failed after ${holderSyncSummary.processedShardCount}/${holderSyncSummary.totalShardCount} shards. ${holderSyncSummary.errorMessage ?? 'Unknown error'}.`
+        : `Holder sync is running ${holderSyncSummary.processedShardCount}/${holderSyncSummary.totalShardCount} shards, processed ${holderSyncSummary.shardsProcessedThisRun} shard(s) this refresh, staged ${holderSyncSummary.stagedHolderCount} holders so far.`;
 
   const windowCompleteness = await reconcileWebhookTransactionDetailsInWindow(
     env.TRADINGBOT_DB,
@@ -6859,8 +7538,8 @@ async function handleForceRefreshMarketSnapshot(
     'market_snapshot.force_refreshed',
     contractAddress,
     strategyEvaluationSummary
-      ? `Forced a live market snapshot refresh and stored a new historical record. ${strategyEvaluationSummary} Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions.`
-      : `Forced a live market snapshot refresh and stored a new historical record. Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions. Holder sync active ${holderSyncSummary.activeHolderCount}, upserted ${holderSyncSummary.upsertedCount}, zeroed ${holderSyncSummary.zeroedCount}.`,
+      ? `Forced a live market snapshot refresh and stored a new historical record. ${strategyEvaluationSummary} Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions. ${holderSyncAuditDetails}`
+      : `Forced a live market snapshot refresh and stored a new historical record. Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions. ${holderSyncAuditDetails}`,
   );
 
   return jsonResponse({

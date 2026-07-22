@@ -413,6 +413,14 @@ export default function App() {
             duplicates: number;
             skippedIrrelevant: number;
           };
+          holderSyncSummary?: {
+            status: 'idle' | 'running' | 'completed' | 'failed';
+            processedShardCount: number;
+            totalShardCount: number;
+            stagedHolderCount: number;
+            activeHolderCount: number;
+            errorMessage: string | null;
+          };
         }>(
           `/api/market-snapshot/refresh${refreshQuery}`,
           { method: 'POST' },
@@ -430,10 +438,19 @@ export default function App() {
           );
           await loadState();
           await loadMarketSnapshotHistory();
+          const holderSyncMessage = result.holderSyncSummary
+            ? result.holderSyncSummary.status === 'completed'
+              ? ` Holder sync completed with ${result.holderSyncSummary.activeHolderCount} holders.`
+              : result.holderSyncSummary.status === 'failed'
+                ? ` Holder sync failed: ${result.holderSyncSummary.errorMessage ?? 'unknown error'}.`
+                : result.holderSyncSummary.status === 'running'
+                  ? ` Holder sync ${result.holderSyncSummary.processedShardCount}/${result.holderSyncSummary.totalShardCount} shards, staged ${result.holderSyncSummary.stagedHolderCount} holders so far.`
+                  : ''
+            : '';
           setNotice(
             result.marketSnapshot.priceUsd != null
               ? result.rpcReconciliation || result.windowCompleteness
-                ? `Market data refreshed. Window transactions ${result.windowCompleteness?.expectedTransactions ?? 0}, complete before ${result.windowCompleteness?.completeTransactionsBefore ?? 0}, enriched ${result.windowCompleteness?.enrichedTransactions ?? 0}, complete after ${result.windowCompleteness?.completeTransactionsAfter ?? 0}. RPC reconciliation scanned ${result.rpcReconciliation?.scannedSignatures ?? 0} signatures and inserted ${result.rpcReconciliation?.insertedSignals ?? 0} transaction record(s).`
+                ? `Market data refreshed. Window transactions ${result.windowCompleteness?.expectedTransactions ?? 0}, complete before ${result.windowCompleteness?.completeTransactionsBefore ?? 0}, enriched ${result.windowCompleteness?.enrichedTransactions ?? 0}, complete after ${result.windowCompleteness?.completeTransactionsAfter ?? 0}. RPC reconciliation scanned ${result.rpcReconciliation?.scannedSignatures ?? 0} signatures and inserted ${result.rpcReconciliation?.insertedSignals ?? 0} transaction record(s).${holderSyncMessage}`
                 : 'Market data refreshed.'
               : 'Token metadata loaded. Price data not yet available in Jupiter.',
           );
