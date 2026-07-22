@@ -941,7 +941,7 @@ export default function App() {
     });
 
   const handleRefresh = () =>
-    void submitWithFeedback('force-refresh', async () => {
+    void submitWithFeedback('refresh', async () => {
       if (auth?.authenticated && settings.contractAddress.trim()) {
         const result = await api<{ marketSnapshot: TokenMarketSnapshot | null }>(
           '/api/market-snapshot/refresh',
@@ -982,13 +982,18 @@ export default function App() {
 
   const handleUseToken = (contractAddress: string) =>
     submitWithFeedback('use-token', async () => {
-      await api('/api/settings/active-token', {
-        method: 'POST',
-        body: JSON.stringify({ contractAddress }),
-      });
-      setSettings((current) => ({ ...current, contractAddress }));
-      setNotice('Tracked token saved as active. Loading market data.');
-      await refresh();
+      const result = await api<{ contractAddress: string; marketSnapshot: TokenMarketSnapshot | null }>(
+        '/api/settings/active-token',
+        { method: 'POST', body: JSON.stringify({ contractAddress }) },
+      );
+      const activated = result.contractAddress || contractAddress;
+      setSettings((current) => ({ ...current, contractAddress: activated }));
+      if (result.marketSnapshot) {
+        setEngineState((current) =>
+          current ? { ...current, marketSnapshot: result.marketSnapshot } : current,
+        );
+      }
+      setNotice(result.marketSnapshot ? 'Token activated with live market data.' : 'Token activated.');
     });
 
   const handleAddRpcEndpoint = () =>
@@ -1037,30 +1042,37 @@ export default function App() {
           : current,
       );
 
+      let activeMarketSnapshot: TokenMarketSnapshot | null = null;
+
       if (!hadActiveContract) {
-        await api('/api/settings/active-token', {
-          method: 'POST',
-          body: JSON.stringify({
-            contractAddress: response.token.contractAddress,
-          }),
-        });
+        const activeResult = await api<{ contractAddress: string; marketSnapshot: TokenMarketSnapshot | null }>(
+          '/api/settings/active-token',
+          {
+            method: 'POST',
+            body: JSON.stringify({ contractAddress: response.token.contractAddress }),
+          },
+        );
         setSettings((current) => ({
           ...current,
           contractAddress: response.token.contractAddress,
         }));
+        activeMarketSnapshot = activeResult.marketSnapshot ?? response.marketSnapshot;
+      }
+
+      if (activeMarketSnapshot) {
+        setEngineState((current) =>
+          current ? { ...current, marketSnapshot: activeMarketSnapshot } : current,
+        );
       }
 
       setTradableTokenForm((current) => ({ ...current, contractAddress: '' }));
       setNotice(
-        response.marketSnapshot
-          ? hadActiveContract
-            ? 'Tracked token added and initialized with live market data.'
-            : 'Tracked token added, saved as the active token, and initialized with live market data.'
-          : hadActiveContract
-            ? 'Tracked token added. Live market data will appear after the next successful refresh.'
-            : 'Tracked token added and saved as the active token. Live market data will appear after the next successful refresh.',
+        hadActiveContract
+          ? 'Tracked token added.'
+          : activeMarketSnapshot
+            ? 'Token saved as active with live market data.'
+            : 'Token saved as active.',
       );
-      await refresh();
     });
 
   const handleImportAccount = () =>
@@ -2033,7 +2045,7 @@ export default function App() {
             onClick={handleRefresh}
             className="flex h-10 cursor-pointer items-center gap-2 rounded-md bg-blue-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-blue-700"
           >
-            <RefreshCw size={16} /> Force Sync
+            <RefreshCw size={16} /> Refresh
           </button>
           <button
             onClick={handleLogout}

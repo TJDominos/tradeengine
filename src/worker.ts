@@ -2552,95 +2552,6 @@ async function sendSolanaTransaction(
   return signature;
 }
 
-async function fetchDexScreenerTokenMarketSnapshot(
-  network: string,
-  contractAddress: string,
-): Promise<TokenMarketSnapshot | null> {
-  const normalizedNetwork = network.trim().toLowerCase();
-  if (normalizedNetwork !== 'solana') {
-    return null;
-  }
-
-  const normalizedAddress = normalizePubkey(contractAddress);
-  const response = await fetch(
-    `https://api.dexscreener.com/latest/dex/tokens/${normalizedAddress}`,
-    {
-      headers: { Accept: 'application/json' },
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error(`DexScreener request failed with ${response.status}`);
-  }
-
-  const body = await response.json<{
-    pairs?: Array<{
-      chainId?: string;
-      dexId?: string;
-      pairAddress?: string;
-      baseToken?: { address?: string; name?: string; symbol?: string };
-      quoteToken?: { address?: string; name?: string; symbol?: string };
-      priceUsd?: string;
-      fdv?: number | string;
-      liquidity?: { usd?: number | string };
-      volume?: { h24?: number | string };
-      txns?: { h24?: { buys?: number | string; sells?: number | string } };
-    }>;
-  }>();
-
-  const targetAddress = normalizedAddress.toLowerCase();
-  const candidatePairs = (body.pairs ?? []).filter((pair) => {
-    if ((pair.chainId ?? '').toLowerCase() !== normalizedNetwork) {
-      return false;
-    }
-    return (
-      pair.baseToken?.address?.toLowerCase() === targetAddress ||
-      pair.quoteToken?.address?.toLowerCase() === targetAddress
-    );
-  });
-
-  if (candidatePairs.length === 0) {
-    return null;
-  }
-
-  const baseSidePairs = candidatePairs.filter(
-    (pair) => pair.baseToken?.address?.toLowerCase() === targetAddress,
-  );
-  const rankedPairs = (baseSidePairs.length > 0 ? baseSidePairs : candidatePairs)
-    .slice()
-    .sort(
-      (left, right) =>
-        (toFiniteNumber(right.liquidity?.usd) ?? -1) -
-        (toFiniteNumber(left.liquidity?.usd) ?? -1),
-    );
-  const bestPair = rankedPairs[0];
-
-  const tokenSide =
-    bestPair.baseToken?.address?.toLowerCase() === targetAddress
-      ? bestPair.baseToken
-      : bestPair.quoteToken;
-  const totalTransactions24h =
-    (toFiniteNumber(bestPair.txns?.h24?.buys) ?? 0) +
-    (toFiniteNumber(bestPair.txns?.h24?.sells) ?? 0);
-
-  const snapshot: TokenMarketSnapshot = {
-    network: normalizedNetwork,
-    contractAddress: normalizedAddress,
-    tokenName: tokenSide?.name ?? null,
-    tokenSymbol: tokenSide?.symbol ?? null,
-    priceUsd: toFiniteNumber(bestPair.priceUsd),
-    liquidityUsd: toFiniteNumber(bestPair.liquidity?.usd),
-    fdv: toFiniteNumber(bestPair.fdv),
-    volume24h: toFiniteNumber(bestPair.volume?.h24),
-    totalTransactions24h,
-    outsidersOverOneUsd: null,
-    dexId: bestPair.dexId ?? null,
-    pairAddress: bestPair.pairAddress ?? null,
-    fetchedAt: nowTs(),
-  };
-
-  return snapshot;
-}
 
 async function fetchSolanaOutsiderHolderCountOverOneUsd(
   rpcUrls: string | string[],
@@ -2782,43 +2693,32 @@ async function syncTokenMarketSnapshotForUser(
     }
   }
 
-  // Try DexScreener first (richer data: liquidity, FDV, volume, txns)
+  // Fetch price and metadata from Jupiter APIs in parallel
   let liveSnapshot: TokenMarketSnapshot | null = null;
   try {
-    liveSnapshot = await fetchDexScreenerTokenMarketSnapshot(
-      normalizedNetwork,
-      normalizedAddress,
-    );
-  } catch (err: unknown) {
-    console.warn(`DexScreener snapshot failed for ${normalizedAddress}:`, err);
-  }
-
-  // Fall back to Jupiter Price API when DexScreener returns nothing or errors
-  if (!liveSnapshot) {
-    try {
-      const jupiterPrice = await fetchJupiterTokenPrice(normalizedAddress);
-      if (jupiterPrice != null) {
-        // Build a minimal snapshot from Jupiter price + stored metadata
-        const jupiterMeta = await fetchJupiterTokenMetadata(normalizedAddress);
-        liveSnapshot = {
-          network: normalizedNetwork,
-          contractAddress: normalizedAddress,
-          tokenName: jupiterMeta?.name ?? latestStoredSnapshot?.tokenName ?? null,
-          tokenSymbol: jupiterMeta?.symbol ?? latestStoredSnapshot?.tokenSymbol ?? null,
-          priceUsd: jupiterPrice,
-          liquidityUsd: latestStoredSnapshot?.liquidityUsd ?? null,
-          fdv: latestStoredSnapshot?.fdv ?? null,
-          volume24h: latestStoredSnapshot?.volume24h ?? null,
-          totalTransactions24h: latestStoredSnapshot?.totalTransactions24h ?? null,
-          outsidersOverOneUsd: null,
-          dexId: latestStoredSnapshot?.dexId ?? null,
-          pairAddress: latestStoredSnapshot?.pairAddress ?? null,
-          fetchedAt: nowTs(),
-        };
-      }
-    } catch (err: unknown) {
-      console.warn(`Jupiter price fallback failed for ${normalizedAddress}:`, err);
+    const [jupiterPrice, jupiterMeta] = await Promise.all([
+      fetchJupiterTokenPrice(normalizedAddress),
+      fetchJupiterTokenMetadata(normalizedAddress),
+    ]);
+    if (jupiterPrice != null) {
+      liveSnapshot = {
+        network: normalizedNetwork,
+        contractAddress: normalizedAddress,
+        tokenName: jupiterMeta?.name ?? latestStoredSnapshot?.tokenName ?? null,
+        tokenSymbol: jupiterMeta?.symbol ?? latestStoredSnapshot?.tokenSymbol ?? null,
+        priceUsd: jupiterPrice,
+        liquidityUsd: null,
+        fdv: null,
+        volume24h: null,
+        totalTransactions24h: null,
+        outsidersOverOneUsd: null,
+        dexId: null,
+        pairAddress: null,
+        fetchedAt: nowTs(),
+      };
     }
+  } catch (err: unknown) {
+    console.warn(`Jupiter market fetch failed for ${normalizedAddress}:`, err);
   }
 
   if (!liveSnapshot) {
