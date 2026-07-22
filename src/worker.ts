@@ -1320,10 +1320,23 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id INTEGER NOT NULL,
     wallet_address TEXT NOT NULL,
+    amount_holding REAL NOT NULL DEFAULT 0,
     source TEXT NOT NULL DEFAULT 'rpc_scan',
     first_seen_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
     UNIQUE(token_id, wallet_address),
+    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS token_holder_transaction_deltas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id INTEGER NOT NULL,
+    tx_signature TEXT NOT NULL,
+    wallet_from TEXT,
+    wallet_to TEXT,
+    token_amount REAL NOT NULL,
+    source TEXT NOT NULL DEFAULT 'tx_delta',
+    applied_at INTEGER NOT NULL,
+    UNIQUE(token_id, tx_signature),
     FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
   )`,
   `CREATE TABLE IF NOT EXISTS rpc_endpoints (
@@ -1347,6 +1360,8 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_version_created ON strategy_evaluations(strategy_version_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_user_created ON strategy_evaluations(user_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_wallet ON token_holder_addresses(token_id, wallet_address)',
+  'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_amount ON token_holder_addresses(token_id, amount_holding DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_token_holder_transaction_deltas_token_sig ON token_holder_transaction_deltas(token_id, tx_signature)',
   'CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_user_network_created ON rpc_endpoints(user_id, network, created_at DESC)',
 ];
 
@@ -2288,6 +2303,65 @@ async function fetchSolanaTokenHolderAddresses(
   return [...owners];
 }
 
+async function fetchSolanaTokenHolderBalances(
+  rpcUrls: string | string[],
+  mint: string,
+): Promise<Map<string, number>> {
+  const filters = [{ dataSize: 165 }, { memcmp: { offset: 0, bytes: mint } }];
+  const programResults = await Promise.allSettled(
+    [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID].map((programId) =>
+      solanaRpc<
+        Array<{
+          account: {
+            data: {
+              parsed?: {
+                info?: {
+                  owner?: string;
+                  tokenAmount?: {
+                    uiAmountString?: string;
+                    amount?: string;
+                    decimals?: number;
+                  };
+                };
+              };
+            };
+          };
+        }>
+      >(rpcUrls, 'getProgramAccounts', [
+        programId,
+        { filters, encoding: 'jsonParsed' },
+      ]),
+    ),
+  );
+
+  const balances = new Map<string, number>();
+  for (const result of programResults) {
+    if (result.status !== 'fulfilled') {
+      continue;
+    }
+    for (const account of result.value) {
+      const owner = tryNormalizeSolanaPubkey(
+        account.account.data.parsed?.info?.owner,
+      );
+      const tokenAmount = account.account.data.parsed?.info?.tokenAmount;
+      if (!owner || !tokenAmount) {
+        continue;
+      }
+      const uiAmount =
+        tokenAmount.uiAmountString != null
+          ? Number.parseFloat(tokenAmount.uiAmountString)
+          : typeof tokenAmount.amount === 'string' && typeof tokenAmount.decimals === 'number'
+            ? Number.parseFloat(tokenAmount.amount) / 10 ** tokenAmount.decimals
+            : null;
+      if (uiAmount == null || !Number.isFinite(uiAmount)) {
+        continue;
+      }
+      balances.set(owner, (balances.get(owner) ?? 0) + uiAmount);
+    }
+  }
+  return balances;
+}
+
 async function dbUpsertTokenHolderAddresses(
   db: D1Database,
   tokenId: number,
@@ -2318,6 +2392,154 @@ async function dbUpsertTokenHolderAddresses(
         .bind(tokenId, address, source, timestamp),
     ),
   );
+}
+
+async function dbSyncTokenHolderBalances(
+  db: D1Database,
+  tokenId: number,
+  balances: Map<string, number>,
+  source = 'rpc_full_sync',
+): Promise<{
+  activeHolderCount: number;
+  upsertedCount: number;
+  zeroedCount: number;
+}> {
+  await dbEnsureTradeDomainSchema(db);
+  const timestamp = nowTs();
+  const existingRows = await db
+    .prepare(
+      'SELECT wallet_address FROM token_holder_addresses WHERE token_id = ?1 AND amount_holding > 0',
+    )
+    .bind(tokenId)
+    .all<{ wallet_address: string }>();
+  const existingAddresses = new Set(existingRows.results.map((row) => row.wallet_address));
+  const nextAddresses = new Set([...balances.keys()]);
+  const zeroedAddresses = [...existingAddresses].filter((address) => !nextAddresses.has(address));
+
+  const upserts = [...balances.entries()].map(([address, amountHolding]) =>
+    db
+      .prepare(
+        `INSERT INTO token_holder_addresses (
+           token_id,
+           wallet_address,
+           amount_holding,
+           source,
+           first_seen_at,
+           last_seen_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+         ON CONFLICT(token_id, wallet_address)
+         DO UPDATE SET
+           amount_holding = excluded.amount_holding,
+           source = excluded.source,
+           last_seen_at = excluded.last_seen_at`,
+      )
+      .bind(tokenId, address, amountHolding, source, timestamp),
+  );
+  const zeroes = zeroedAddresses.map((address) =>
+    db
+      .prepare(
+        `UPDATE token_holder_addresses
+         SET amount_holding = 0,
+             source = ?3,
+             last_seen_at = ?4
+         WHERE token_id = ?1 AND wallet_address = ?2`,
+      )
+      .bind(tokenId, address, source, timestamp),
+  );
+
+  if (upserts.length > 0 || zeroes.length > 0) {
+    await db.batch([...upserts, ...zeroes]);
+  }
+
+  return {
+    activeHolderCount: [...balances.entries()].filter(([, amount]) => amount > 0).length,
+    upsertedCount: upserts.length,
+    zeroedCount: zeroes.length,
+  };
+}
+
+async function dbApplyTokenHolderTransactionDelta(
+  db: D1Database,
+  tokenId: number,
+  txSignature: string,
+  details: StoredSignalTransactionDetails,
+): Promise<boolean> {
+  await dbEnsureTradeDomainSchema(db);
+  if (!details.fromWalletAddress || !details.toWalletAddress || details.tokenAmount == null || details.tokenAmount <= 0) {
+    return false;
+  }
+  const existingDelta = await db
+    .prepare(
+      'SELECT id FROM token_holder_transaction_deltas WHERE token_id = ?1 AND tx_signature = ?2 LIMIT 1',
+    )
+    .bind(tokenId, txSignature)
+    .first<{ id: number }>();
+  if (existingDelta) {
+    return false;
+  }
+
+  const timestamp = nowTs();
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO token_holder_addresses (
+           token_id,
+           wallet_address,
+           amount_holding,
+           source,
+           first_seen_at,
+           last_seen_at
+         ) VALUES (?1, ?2, 0, 'tx_delta', ?3, ?3)
+         ON CONFLICT(token_id, wallet_address)
+         DO UPDATE SET
+           amount_holding = CASE
+             WHEN token_holder_addresses.amount_holding - ?4 < 0 THEN 0
+             ELSE token_holder_addresses.amount_holding - ?4
+           END,
+           source = 'tx_delta',
+           last_seen_at = ?3`,
+      )
+      .bind(tokenId, details.fromWalletAddress, timestamp, details.tokenAmount),
+    db
+      .prepare(
+        `INSERT INTO token_holder_addresses (
+           token_id,
+           wallet_address,
+           amount_holding,
+           source,
+           first_seen_at,
+           last_seen_at
+         ) VALUES (?1, ?2, ?3, 'tx_delta', ?4, ?4)
+         ON CONFLICT(token_id, wallet_address)
+         DO UPDATE SET
+           amount_holding = token_holder_addresses.amount_holding + excluded.amount_holding,
+           source = 'tx_delta',
+           last_seen_at = excluded.last_seen_at`,
+      )
+      .bind(tokenId, details.toWalletAddress, details.tokenAmount, timestamp),
+    db
+      .prepare(
+        `INSERT INTO token_holder_transaction_deltas (
+           token_id,
+           tx_signature,
+           wallet_from,
+           wallet_to,
+           token_amount,
+           source,
+           applied_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'tx_delta', ?6)`,
+      )
+      .bind(
+        tokenId,
+        txSignature,
+        details.fromWalletAddress,
+        details.toWalletAddress,
+        details.tokenAmount,
+        timestamp,
+      ),
+  ]);
+
+  return true;
 }
 
 async function dbUpdateSignalsByTxSignatureForUser(
@@ -5128,6 +5350,10 @@ async function processTokenActivitySignal(
       input.userId,
       env.SOLANA_RPC_URL,
     );
+    const tokenId = await dbResolveTradableTokenId(
+      env.TRADINGBOT_DB,
+      normalizedContractAddress,
+    );
     const payloadDetails = extractWebhookTransactionDetailsFromPayload(
       input.payload,
       normalizedContractAddress,
@@ -5168,6 +5394,16 @@ async function processTokenActivitySignal(
       preferredWalletAddress,
       mergedDetails,
     );
+    if (tokenId && input.txSignature) {
+      await dbApplyTokenHolderTransactionDelta(
+        env.TRADINGBOT_DB,
+        tokenId,
+        input.txSignature,
+        mergedDetails,
+      ).catch((err) => {
+        console.warn(`Failed to apply token holder delta for ${input.txSignature}:`, err);
+      });
+    }
 
     let marketSnapshot: TokenMarketSnapshot | null = null;
     try {
@@ -6202,21 +6438,31 @@ async function handleForceRefreshMarketSnapshot(
     env.TRADINGBOT_DB,
     contractAddress,
   );
+  let holderSyncSummary = {
+    activeHolderCount: 0,
+    upsertedCount: 0,
+    zeroedCount: 0,
+  };
   if (tokenId) {
-    const holderAddresses = await fetchSolanaTokenHolderAddresses(
+    const holderBalances = await fetchSolanaTokenHolderBalances(
       rpcUrls,
       contractAddress,
     ).catch((err) => {
-      console.warn(`Failed to scan holder addresses for ${contractAddress}:`, err);
-      return [];
+      console.warn(`Failed to fetch holder balances for ${contractAddress}:`, err);
+      return new Map<string, number>();
     });
-    await dbUpsertTokenHolderAddresses(
+    holderSyncSummary = await dbSyncTokenHolderBalances(
       env.TRADINGBOT_DB,
       tokenId,
-      holderAddresses,
-      'rpc_scan',
+      holderBalances,
+      'rpc_full_sync',
     ).catch((err) => {
-      console.warn(`Failed to store holder addresses for ${contractAddress}:`, err);
+      console.warn(`Failed to sync holder balances for ${contractAddress}:`, err);
+      return {
+        activeHolderCount: 0,
+        upsertedCount: 0,
+        zeroedCount: 0,
+      };
     });
   }
 
@@ -6295,7 +6541,7 @@ async function handleForceRefreshMarketSnapshot(
     contractAddress,
     strategyEvaluationSummary
       ? `Forced a live market snapshot refresh and stored a new historical record. ${strategyEvaluationSummary} Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions.`
-      : `Forced a live market snapshot refresh and stored a new historical record. Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions.`,
+      : `Forced a live market snapshot refresh and stored a new historical record. Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions. Holder sync active ${holderSyncSummary.activeHolderCount}, upserted ${holderSyncSummary.upsertedCount}, zeroed ${holderSyncSummary.zeroedCount}.`,
   );
 
   return jsonResponse({
@@ -6303,6 +6549,7 @@ async function handleForceRefreshMarketSnapshot(
     strategyEvaluation: strategyEvaluationPayload,
     rpcReconciliation,
     windowCompleteness,
+    holderSyncSummary,
   });
 }
 
