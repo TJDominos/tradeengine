@@ -2376,13 +2376,15 @@ interface JupiterTokenMetadata {
   logoUri: string | null;
   tags: string[];
   fdv: number | null;
+  liquidityUsd: number | null;
+  totalHolders: number | null;
 }
 
 async function fetchJupiterTokenMetadata(
   mint: string,
 ): Promise<JupiterTokenMetadata | null> {
   try {
-    // Use Jupiter v2 search API which includes market data like FDV
+    // Use Jupiter v2 search API which includes market data (FDV, liquidity, holders)
     const response = await fetch(
       `https://lite-api.jup.ag/tokens/v2/search?query=${encodeURIComponent(mint)}`,
       { headers: { Accept: 'application/json' } },
@@ -2399,8 +2401,14 @@ async function fetchJupiterTokenMetadata(
         asset?: {
           fdv?: number;
           mcap?: number;
+          liquidity?: {
+            usd?: number;
+            sol?: number;
+          };
+          holder?: number;
+          holders?: number;
         };
-      }>;
+      }>;  
     }>();
 
     // Find the exact match for the mint address
@@ -2417,6 +2425,20 @@ async function fetchJupiterTokenMetadata(
           ? tokenData.asset.mcap
           : null;
 
+    // Extract liquidity in USD
+    const liquidityUsd =
+      typeof tokenData.asset?.liquidity?.usd === 'number'
+        ? tokenData.asset.liquidity.usd
+        : null;
+
+    // Extract total holders count (try 'holder' or 'holders')
+    const totalHolders =
+      typeof tokenData.asset?.holder === 'number'
+        ? tokenData.asset.holder
+        : typeof tokenData.asset?.holders === 'number'
+          ? tokenData.asset.holders
+          : null;
+
     return {
       address: tokenData.address ?? mint,
       name: typeof tokenData.name === 'string' ? tokenData.name : null,
@@ -2425,6 +2447,8 @@ async function fetchJupiterTokenMetadata(
       logoUri: typeof tokenData.logoURI === 'string' ? tokenData.logoURI : null,
       tags: Array.isArray(tokenData.tags) ? (tokenData.tags as string[]) : [],
       fdv,
+      liquidityUsd,
+      totalHolders,
     };
   } catch {
     return null;
@@ -2762,11 +2786,13 @@ async function syncTokenMarketSnapshotForUser(
 
   // Fetch price and metadata from Jupiter APIs in parallel
   let liveSnapshot: TokenMarketSnapshot | null = null;
+  let jupiterMeta: JupiterTokenMetadata | null = null;
   try {
-    const [priceApiResult, jupiterMeta] = await Promise.all([
+    const [priceApiResult, meta] = await Promise.all([
       fetchJupiterTokenPrice(normalizedAddress),
       fetchJupiterTokenMetadata(normalizedAddress),
     ]);
+    jupiterMeta = meta;
 
     // Resolve decimals: DB → Jupiter metadata → Solana RPC (fallback)
     let resolvedDecimals = storedDecimals ?? jupiterMeta?.decimals ?? null;
@@ -2792,7 +2818,7 @@ async function syncTokenMarketSnapshotForUser(
         tokenName: jupiterMeta?.name ?? latestStoredSnapshot?.tokenName ?? null,
         tokenSymbol: jupiterMeta?.symbol ?? latestStoredSnapshot?.tokenSymbol ?? null,
         priceUsd: jupiterPrice,
-        liquidityUsd: null,
+        liquidityUsd: jupiterMeta?.liquidityUsd ?? null,
         fdv: jupiterMeta?.fdv ?? null,
         volume24h: null,
         totalTransactions24h: null,
@@ -2819,12 +2845,22 @@ async function syncTokenMarketSnapshotForUser(
     const managedAccountAddresses =
       options?.managedAccountAddresses ??
       (await dbListManagedAccountAddresses(db, userId));
-    outsidersOverOneUsd = await fetchSolanaOutsiderHolderCountOverOneUsd(
-      rpcUrls,
-      normalizedAddress,
-      managedAccountAddresses,
-      liveSnapshot.priceUsd,
-    );
+
+    // If Jupiter provides total holders count, calculate outsiders = total - internal
+    if (jupiterMeta?.totalHolders != null) {
+      outsidersOverOneUsd = Math.max(
+        0,
+        jupiterMeta.totalHolders - managedAccountAddresses.length,
+      );
+    } else {
+      // Fallback: use RPC to scan for outsiders with balance > $1 USD
+      outsidersOverOneUsd = await fetchSolanaOutsiderHolderCountOverOneUsd(
+        rpcUrls,
+        normalizedAddress,
+        managedAccountAddresses,
+        liveSnapshot.priceUsd,
+      );
+    }
   } catch (err: unknown) {
     console.warn(
       `Failed to compute outsider holder count for ${normalizedAddress}:`,
