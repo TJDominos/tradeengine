@@ -809,14 +809,6 @@ export default function App() {
     void refresh();
   }, [refresh]);
 
-  useEffect(() => {
-    if (!auth?.authenticated) return;
-    const interval = window.setInterval(() => {
-      void loadState();
-    }, 3000);
-    return () => window.clearInterval(interval);
-  }, [auth?.authenticated, loadState]);
-
   const refreshWalletBalances = React.useCallback(async () => {
     if (!engineState) return;
     const accounts = [...engineState.internalAccs, ...engineState.outsiderAccs];

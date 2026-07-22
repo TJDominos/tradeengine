@@ -2385,79 +2385,59 @@ async function fetchJupiterTokenMetadata(
 ): Promise<JupiterTokenMetadata | null> {
   const normalizedMint = mint.toLowerCase();
   try {
+    // Use lite-api which returns array directly: [{address, symbol, name, decimals, usdPrice, fdv, mcap, stats24h: {priceChange}, ...}]
     console.log(`[fetchJupiterTokenMetadata] Searching for token: ${mint}`);
     const searchResponse = await fetch(
-      `https://api.jup.ag/tokens/v2/search?query=${encodeURIComponent(mint)}`,
+      `https://lite-api.jup.ag/tokens/v2/search?query=${encodeURIComponent(mint)}`,
       { headers: { Accept: 'application/json' } },
     );
     console.log(`[fetchJupiterTokenMetadata] Search API response status: ${searchResponse.status}`);
     
     if (searchResponse.ok) {
-      const body = await searchResponse.json<any>();
-      console.log(`[fetchJupiterTokenMetadata] Response keys:`, Object.keys(body).slice(0, 5));
+      const tokensArray = await searchResponse.json<any[]>();
+      console.log(`[fetchJupiterTokenMetadata] Search API returned array with ${tokensArray?.length ?? 0} items`);
 
-      // Handle multiple possible response structures
-      let tokens = Array.isArray(body) ? body : (body.tokens || body.data || []);
-      console.log(`[fetchJupiterTokenMetadata] Found ${tokens.length} tokens in response`);
-      
-      if (!Array.isArray(tokens) || tokens.length === 0) {
-        console.log(`[fetchJupiterTokenMetadata] No tokens array found, trying fallback`);
-      } else {
-        // Log first token structure for debugging
-        if (tokens.length > 0) {
-          console.log(`[fetchJupiterTokenMetadata] First token keys:`, Object.keys(tokens[0]).slice(0, 10));
-        }
+      if (Array.isArray(tokensArray) && tokensArray.length > 0) {
+        // lite-api returns token directly as first item when querying by mint
+        const tokenData = tokensArray[0];
+        console.log(`[fetchJupiterTokenMetadata] First token: ${tokenData.symbol || tokenData.name}`);
 
-        // Find the exact match - try multiple possible address fields
-        const tokenData = tokens.find((t: any) => {
-          const tokenAddress = (t.address || t.mint || t.pubkey || '').toLowerCase();
-          return tokenAddress === normalizedMint;
-        });
-        
-        if (tokenData) {
-          console.log(`[fetchJupiterTokenMetadata] Found token: ${tokenData.symbol || tokenData.name}`);
-          // Extract FDV from asset, fallback to mcap if fdv is missing
-          const fdv =
-            typeof tokenData.asset?.fdv === 'number'
-              ? tokenData.asset.fdv
-              : typeof tokenData.asset?.mcap === 'number'
-                ? tokenData.asset.mcap
-                : null;
+        // Extract FDV from fdv field, fallback to mcap
+        const fdv = typeof tokenData.fdv === 'number' 
+          ? tokenData.fdv 
+          : typeof tokenData.mcap === 'number' 
+            ? tokenData.mcap 
+            : null;
 
-          // Extract liquidity in USD
-          const liquidityUsd =
-            typeof tokenData.asset?.liquidity?.usd === 'number'
-              ? tokenData.asset.liquidity.usd
-              : null;
+        // Extract liquidity in USD
+        const liquidityUsd = typeof tokenData.liquidity?.usd === 'number'
+          ? tokenData.liquidity.usd
+          : null;
 
-          // Extract total holders count (try 'holder' or 'holders')
-          const totalHolders =
-            typeof tokenData.asset?.holder === 'number'
-              ? tokenData.asset.holder
-              : typeof tokenData.asset?.holders === 'number'
-                ? tokenData.asset.holders
-                : null;
+        // Extract total holders
+        const totalHolders = typeof tokenData.holder === 'number'
+          ? tokenData.holder
+          : typeof tokenData.holders === 'number'
+            ? tokenData.holders
+            : null;
 
-          return {
-            address: (tokenData.address || tokenData.mint || mint),
-            name: typeof tokenData.name === 'string' ? tokenData.name : null,
-            symbol: typeof tokenData.symbol === 'string' ? tokenData.symbol : null,
-            decimals: typeof tokenData.decimals === 'number' ? tokenData.decimals : null,
-            logoUri: typeof (tokenData.logoURI || tokenData.logo) === 'string' ? (tokenData.logoURI || tokenData.logo) : null,
-            tags: Array.isArray(tokenData.tags) ? tokenData.tags : [],
-            fdv,
-            liquidityUsd,
-            totalHolders,
-          };
-        } else {
-          console.log(`[fetchJupiterTokenMetadata] Token ${normalizedMint} not found in ${tokens.length} results`);
-        }
+        return {
+          address: tokenData.address || tokenData.mint || mint,
+          name: typeof tokenData.name === 'string' ? tokenData.name : null,
+          symbol: typeof tokenData.symbol === 'string' ? tokenData.symbol : null,
+          decimals: typeof tokenData.decimals === 'number' ? tokenData.decimals : null,
+          logoUri: typeof tokenData.logoURI === 'string' ? tokenData.logoURI : null,
+          tags: Array.isArray(tokenData.tags) ? tokenData.tags : [],
+          fdv,
+          liquidityUsd,
+          totalHolders,
+        };
       }
     } else {
       console.log(`[fetchJupiterTokenMetadata] Search API error: ${searchResponse.status}`);
     }
 
-    // Fallback: Try tokens.jup.ag endpoint for basic metadata (name, symbol, decimals)
+    // Fallback: Try tokens.jup.ag endpoint for basic metadata
     console.log(`[fetchJupiterTokenMetadata] Trying tokens.jup.ag fallback endpoint`);
     const fallbackResponse = await fetch(
       `https://tokens.jup.ag/token/${encodeURIComponent(mint)}`,
@@ -3504,15 +3484,69 @@ async function handleAlchemyNotifyWebhook(
     contractFromQuery,
   );
 
+  // Background processing: handle webhook and update market snapshots
   ctx.waitUntil(
-    processAlchemyNotifyWebhookPayload(
-      env,
-      payload,
-      contractFromQuery,
-      derivedSignals,
-    ).catch((err) => {
-      console.error('Alchemy webhook background processing failed:', err);
-    }),
+    (async () => {
+      try {
+        const result = await processAlchemyNotifyWebhookPayload(
+          env,
+          payload,
+          contractFromQuery,
+          derivedSignals,
+        );
+        
+        // After webhook processing, refresh market snapshots for affected tokens
+        if (result.processed > 0 || result.routedTargets > 0) {
+          console.log(`[webhook] Processed ${result.processed} signals, updating market snapshots`);
+          // Collect unique (userId, contractAddress) pairs for market refresh
+          const tokensToRefresh = new Set<string>();
+          
+          for (const signal of derivedSignals) {
+            const contractAddresses = signal.contractAddresses.length > 0
+              ? signal.contractAddresses
+              : contractFromQuery
+                ? [contractFromQuery]
+                : [];
+            
+            for (const contractAddress of contractAddresses) {
+              const userIds = await dbListUserIdsByActiveContractAddress(
+                env.TRADINGBOT_DB,
+                contractAddress,
+              );
+              for (const userId of userIds) {
+                tokensToRefresh.add(`${userId}:${contractAddress}`);
+              }
+            }
+          }
+          
+          // Refresh market snapshots for affected tokens
+          const rpcUrl = env.SOLANA_RPC_URL ?? '';
+          for (const pair of tokensToRefresh) {
+            const [userIdStr, contractAddress] = pair.split(':');
+            const userId = parseInt(userIdStr, 10);
+            if (!isNaN(userId)) {
+              const rpcUrls = await dbResolveSolanaRpcUrls(
+                env.TRADINGBOT_DB,
+                userId,
+                rpcUrl,
+              );
+              await syncTokenMarketSnapshotForUser(
+                env.TRADINGBOT_DB,
+                userId,
+                'solana',
+                contractAddress,
+                rpcUrls,
+                { force: true },
+              ).catch((err) => {
+                console.warn(`Failed to refresh market snapshot for ${contractAddress}:`, err);
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Alchemy webhook background processing failed:', err);
+      }
+    })(),
   );
 
   return jsonResponse({ ok: true, accepted: true }, 200);
