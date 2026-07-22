@@ -176,6 +176,21 @@ interface WebhookTransactionLogRecord {
   createdAt: number;
 }
 
+interface TokenHolderAggregateRecord {
+  tokenId: number;
+  activeHolderCount: number;
+  internalHolderCount: number;
+  watchedHolderCount: number;
+  outsiderHolderCount: number;
+  totalAmountHolding: number;
+  internalAmountHolding: number;
+  watchedAmountHolding: number;
+  lastFullSyncAt: number | null;
+  lastDeltaSyncAt: number | null;
+  updatedAt: number;
+  source: string;
+}
+
 interface StoredSignalTransactionDetails {
   tokenContractAddress: string | null;
   fromWalletAddress: string | null;
@@ -1339,6 +1354,21 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     UNIQUE(token_id, tx_signature),
     FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
   )`,
+  `CREATE TABLE IF NOT EXISTS token_holder_aggregates (
+    token_id INTEGER PRIMARY KEY,
+    active_holder_count INTEGER NOT NULL DEFAULT 0,
+    internal_holder_count INTEGER NOT NULL DEFAULT 0,
+    watched_holder_count INTEGER NOT NULL DEFAULT 0,
+    outsider_holder_count INTEGER NOT NULL DEFAULT 0,
+    total_amount_holding REAL NOT NULL DEFAULT 0,
+    internal_amount_holding REAL NOT NULL DEFAULT 0,
+    watched_amount_holding REAL NOT NULL DEFAULT 0,
+    last_full_sync_at INTEGER,
+    last_delta_sync_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    source TEXT NOT NULL DEFAULT 'rpc_full_sync',
+    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
+  )`,
   `CREATE TABLE IF NOT EXISTS rpc_endpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -1362,6 +1392,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_wallet ON token_holder_addresses(token_id, wallet_address)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_amount ON token_holder_addresses(token_id, amount_holding DESC)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_transaction_deltas_token_sig ON token_holder_transaction_deltas(token_id, tx_signature)',
+  'CREATE INDEX IF NOT EXISTS idx_token_holder_aggregates_updated ON token_holder_aggregates(updated_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_user_network_created ON rpc_endpoints(user_id, network, created_at DESC)',
 ];
 
@@ -2458,8 +2489,190 @@ async function dbSyncTokenHolderBalances(
   };
 }
 
+async function dbRecomputeTokenHolderAggregate(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  options?: {
+    source?: string;
+    fullSyncAt?: number | null;
+    deltaSyncAt?: number | null;
+  },
+): Promise<TokenHolderAggregateRecord> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT
+         COUNT(CASE WHEN tha.amount_holding > 0 THEN 1 END) AS active_holder_count,
+         COUNT(CASE WHEN tha.amount_holding > 0 AND a.type = 'managed' THEN 1 END) AS internal_holder_count,
+         COUNT(CASE WHEN tha.amount_holding > 0 AND a.type = 'watch' THEN 1 END) AS watched_holder_count,
+         COALESCE(SUM(CASE WHEN tha.amount_holding > 0 THEN tha.amount_holding ELSE 0 END), 0) AS total_amount_holding,
+         COALESCE(SUM(CASE WHEN tha.amount_holding > 0 AND a.type = 'managed' THEN tha.amount_holding ELSE 0 END), 0) AS internal_amount_holding,
+         COALESCE(SUM(CASE WHEN tha.amount_holding > 0 AND a.type = 'watch' THEN tha.amount_holding ELSE 0 END), 0) AS watched_amount_holding
+       FROM token_holder_addresses tha
+       LEFT JOIN accounts a
+         ON a.wallet_address = tha.wallet_address
+        AND a.user_id = ?1
+        AND a.type IN ('managed', 'watch')
+       WHERE tha.token_id = ?2`,
+    )
+    .bind(userId, tokenId)
+    .first<{
+      active_holder_count: number;
+      internal_holder_count: number;
+      watched_holder_count: number;
+      total_amount_holding: number;
+      internal_amount_holding: number;
+      watched_amount_holding: number;
+    }>();
+
+  const aggregate: TokenHolderAggregateRecord = {
+    tokenId,
+    activeHolderCount: row?.active_holder_count ?? 0,
+    internalHolderCount: row?.internal_holder_count ?? 0,
+    watchedHolderCount: row?.watched_holder_count ?? 0,
+    outsiderHolderCount: Math.max(0, (row?.active_holder_count ?? 0) - (row?.internal_holder_count ?? 0)),
+    totalAmountHolding: row?.total_amount_holding ?? 0,
+    internalAmountHolding: row?.internal_amount_holding ?? 0,
+    watchedAmountHolding: row?.watched_amount_holding ?? 0,
+    lastFullSyncAt: options?.fullSyncAt ?? null,
+    lastDeltaSyncAt: options?.deltaSyncAt ?? null,
+    updatedAt: nowTs(),
+    source: options?.source ?? 'recompute',
+  };
+
+  const existing = await db
+    .prepare(
+      `SELECT last_full_sync_at, last_delta_sync_at
+       FROM token_holder_aggregates
+       WHERE token_id = ?1
+       LIMIT 1`,
+    )
+    .bind(tokenId)
+    .first<{
+      last_full_sync_at: number | null;
+      last_delta_sync_at: number | null;
+    }>();
+
+  const nextLastFullSyncAt =
+    options?.fullSyncAt ?? existing?.last_full_sync_at ?? null;
+  const nextLastDeltaSyncAt =
+    options?.deltaSyncAt ?? existing?.last_delta_sync_at ?? null;
+
+  await db
+    .prepare(
+      `INSERT INTO token_holder_aggregates (
+         token_id,
+         active_holder_count,
+         internal_holder_count,
+         watched_holder_count,
+         outsider_holder_count,
+         total_amount_holding,
+         internal_amount_holding,
+         watched_amount_holding,
+         last_full_sync_at,
+         last_delta_sync_at,
+         updated_at,
+         source
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+       ON CONFLICT(token_id)
+       DO UPDATE SET
+         active_holder_count = excluded.active_holder_count,
+         internal_holder_count = excluded.internal_holder_count,
+         watched_holder_count = excluded.watched_holder_count,
+         outsider_holder_count = excluded.outsider_holder_count,
+         total_amount_holding = excluded.total_amount_holding,
+         internal_amount_holding = excluded.internal_amount_holding,
+         watched_amount_holding = excluded.watched_amount_holding,
+         last_full_sync_at = excluded.last_full_sync_at,
+         last_delta_sync_at = excluded.last_delta_sync_at,
+         updated_at = excluded.updated_at,
+         source = excluded.source`,
+    )
+    .bind(
+      aggregate.tokenId,
+      aggregate.activeHolderCount,
+      aggregate.internalHolderCount,
+      aggregate.watchedHolderCount,
+      aggregate.outsiderHolderCount,
+      aggregate.totalAmountHolding,
+      aggregate.internalAmountHolding,
+      aggregate.watchedAmountHolding,
+      nextLastFullSyncAt,
+      nextLastDeltaSyncAt,
+      aggregate.updatedAt,
+      aggregate.source,
+    )
+    .run();
+
+  return {
+    ...aggregate,
+    lastFullSyncAt: nextLastFullSyncAt,
+    lastDeltaSyncAt: nextLastDeltaSyncAt,
+  };
+}
+
+async function dbGetTokenHolderAggregate(
+  db: D1Database,
+  tokenId: number,
+): Promise<TokenHolderAggregateRecord | null> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT
+         token_id,
+         active_holder_count,
+         internal_holder_count,
+         watched_holder_count,
+         outsider_holder_count,
+         total_amount_holding,
+         internal_amount_holding,
+         watched_amount_holding,
+         last_full_sync_at,
+         last_delta_sync_at,
+         updated_at,
+         source
+       FROM token_holder_aggregates
+       WHERE token_id = ?1
+       LIMIT 1`,
+    )
+    .bind(tokenId)
+    .first<{
+      token_id: number;
+      active_holder_count: number;
+      internal_holder_count: number;
+      watched_holder_count: number;
+      outsider_holder_count: number;
+      total_amount_holding: number;
+      internal_amount_holding: number;
+      watched_amount_holding: number;
+      last_full_sync_at: number | null;
+      last_delta_sync_at: number | null;
+      updated_at: number;
+      source: string;
+    }>();
+  if (!row) {
+    return null;
+  }
+  return {
+    tokenId: row.token_id,
+    activeHolderCount: row.active_holder_count,
+    internalHolderCount: row.internal_holder_count,
+    watchedHolderCount: row.watched_holder_count,
+    outsiderHolderCount: row.outsider_holder_count,
+    totalAmountHolding: row.total_amount_holding,
+    internalAmountHolding: row.internal_amount_holding,
+    watchedAmountHolding: row.watched_amount_holding,
+    lastFullSyncAt: row.last_full_sync_at,
+    lastDeltaSyncAt: row.last_delta_sync_at,
+    updatedAt: row.updated_at,
+    source: row.source,
+  };
+}
+
 async function dbApplyTokenHolderTransactionDelta(
   db: D1Database,
+  userId: number,
   tokenId: number,
   txSignature: string,
   details: StoredSignalTransactionDetails,
@@ -2538,6 +2751,11 @@ async function dbApplyTokenHolderTransactionDelta(
         timestamp,
       ),
   ]);
+
+  await dbRecomputeTokenHolderAggregate(db, userId, tokenId, {
+    source: 'tx_delta',
+    deltaSyncAt: timestamp,
+  });
 
   return true;
 }
@@ -5397,6 +5615,7 @@ async function processTokenActivitySignal(
     if (tokenId && input.txSignature) {
       await dbApplyTokenHolderTransactionDelta(
         env.TRADINGBOT_DB,
+        input.userId,
         tokenId,
         input.txSignature,
         mergedDetails,
@@ -5863,6 +6082,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
   ]);
 
   let marketSnapshot: TokenMarketSnapshot | null = null;
+  let tokenHolderAggregate: TokenHolderAggregateRecord | null = null;
   if (settings.contractAddress.trim()) {
     try {
       marketSnapshot = await syncTokenMarketSnapshotForUser(
@@ -5881,6 +6101,21 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     } catch (err: unknown) {
       console.warn(
         `Failed to load token market snapshot for ${settings.contractAddress}:`,
+        err,
+      );
+    }
+
+    try {
+      const tokenId = await dbResolveTradableTokenId(
+        env.TRADINGBOT_DB,
+        settings.contractAddress,
+      );
+      tokenHolderAggregate = tokenId
+        ? await dbGetTokenHolderAggregate(env.TRADINGBOT_DB, tokenId)
+        : null;
+    } catch (err: unknown) {
+      console.warn(
+        `Failed to load token holder aggregate for ${settings.contractAddress}:`,
         err,
       );
     }
@@ -5909,6 +6144,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     activeStrategyVersion,
     strategyVersions,
     strategyEvaluations,
+    tokenHolderAggregate,
     rpcEndpoints,
     marketSnapshot,
     marketSnapshotHistory: [],
@@ -6463,6 +6699,17 @@ async function handleForceRefreshMarketSnapshot(
         upsertedCount: 0,
         zeroedCount: 0,
       };
+    });
+    await dbRecomputeTokenHolderAggregate(
+      env.TRADINGBOT_DB,
+      user.id,
+      tokenId,
+      {
+        source: 'rpc_full_sync',
+        fullSyncAt: nowTs(),
+      },
+    ).catch((err) => {
+      console.warn(`Failed to recompute holder aggregate for ${contractAddress}:`, err);
     });
   }
 

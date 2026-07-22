@@ -1,7 +1,7 @@
 import React from 'react';
 
 import { CONTRACT_ADDRESS } from '../app/constants';
-import type { DateRangeState, TokenMarketSnapshot } from '../app/types';
+import type { DateRangeState, TokenHolderAggregate, TokenMarketSnapshot } from '../app/types';
 import { formatLivePrice, formatNum, formatOptionalUsd, formatUSD } from '../app/utils';
 import DateRangePicker from '../components/DateRangePicker';
 import StatCard from '../components/StatCard';
@@ -19,6 +19,7 @@ type DashboardPageProps = {
   managedAccountsCount: number;
   profitUsdc: number;
   dashboardSnapshot: TokenMarketSnapshot | null;
+  tokenHolderAggregate: TokenHolderAggregate | null;
   managedWalletsCount: number;
   logsSection: React.ReactNode;
 };
@@ -36,6 +37,7 @@ export default function DashboardPage({
   managedAccountsCount,
   profitUsdc,
   dashboardSnapshot,
+  tokenHolderAggregate,
   managedWalletsCount,
   logsSection,
 }: DashboardPageProps) {
@@ -81,6 +83,16 @@ export default function DashboardPage({
           title="Number of Transaction and Volumes"
           value={dashboardSnapshot?.totalTransactions24h != null ? formatNum(dashboardSnapshot.totalTransactions24h) : 'Unavailable'}
           subtitle={dashboardSnapshot?.volume24h != null ? `24h volume ${formatUSD(dashboardSnapshot.volume24h)}` : marketSnapshotSubtitle}
+        />
+        <StatCard
+          title="Active Token Holders"
+          value={tokenHolderAggregate ? formatNum(tokenHolderAggregate.activeHolderCount) : 'Unavailable'}
+          subtitle={tokenHolderAggregate ? `Outsiders ${formatNum(tokenHolderAggregate.outsiderHolderCount)} | Internal ${formatNum(tokenHolderAggregate.internalHolderCount)}` : 'Holder aggregate unavailable'}
+        />
+        <StatCard
+          title="Holder Amounts"
+          value={tokenHolderAggregate ? formatNum(tokenHolderAggregate.totalAmountHolding) : 'Unavailable'}
+          subtitle={tokenHolderAggregate ? `Internal ${formatNum(tokenHolderAggregate.internalAmountHolding)} | Watched ${formatNum(tokenHolderAggregate.watchedAmountHolding)}` : 'Holder amount aggregate unavailable'}
         />
       </div>
 

@@ -100,6 +100,21 @@ export type TokenMarketSnapshot = {
   fetchedAt: number;
 };
 
+export type TokenHolderAggregate = {
+  tokenId: number;
+  activeHolderCount: number;
+  internalHolderCount: number;
+  watchedHolderCount: number;
+  outsiderHolderCount: number;
+  totalAmountHolding: number;
+  internalAmountHolding: number;
+  watchedAmountHolding: number;
+  lastFullSyncAt: number | null;
+  lastDeltaSyncAt: number | null;
+  updatedAt: number;
+  source: string;
+};
+
 export type TradableToken = {
   id: number;
   network: string;
@@ -153,6 +168,7 @@ export type EngineState = {
   activeStrategyVersion: StrategyVersionRecord | null;
   strategyVersions: StrategyVersionRecord[];
   strategyEvaluations: StrategyEvaluationRecord[];
+  tokenHolderAggregate: TokenHolderAggregate | null;
   rpcEndpoints: RpcEndpoint[];
   marketSnapshot: TokenMarketSnapshot | null;
   marketSnapshotHistory: TokenMarketSnapshot[];

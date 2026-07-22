@@ -995,6 +995,7 @@ export default function App() {
       managedAccountsCount={engineState.stats.managedAccounts}
       profitUsdc={engineState.profitUsdc}
       dashboardSnapshot={dashboardSnapshot}
+      tokenHolderAggregate={engineState.tokenHolderAggregate}
       managedWalletsCount={managedWallets.length}
       logsSection={renderDashboardLogs()}
     />
