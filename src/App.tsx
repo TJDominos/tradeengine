@@ -167,6 +167,8 @@ type DateRangeState = {
   to: string;
 };
 
+type DateRangePreset = '24h' | '7d' | '30d' | 'custom';
+
 type AccountSummary = {
   total: number;
   activeAssets: number;
@@ -297,13 +299,23 @@ function formatDateInputValue(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
-function createDefaultDateRange(): DateRangeState {
+function createPresetDateRange(preset: Exclude<DateRangePreset, 'custom'>): DateRangeState {
   const end = new Date();
-  const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const durationMs =
+    preset === '24h'
+      ? 24 * 60 * 60 * 1000
+      : preset === '30d'
+        ? 30 * 24 * 60 * 60 * 1000
+        : 7 * 24 * 60 * 60 * 1000;
+  const start = new Date(end.getTime() - durationMs);
   return {
     from: formatDateInputValue(start),
     to: formatDateInputValue(end),
   };
+}
+
+function createDefaultDateRange(): DateRangeState {
+  return createPresetDateRange('7d');
 }
 
 function toRangeStartMs(value: string) {
@@ -394,12 +406,22 @@ function saveStoredString(key: string, value: string) {
 function DateRangePicker({
   dateRange,
   setDateRange,
+  dateRangePreset,
+  onPresetChange,
   hasDateRange,
+  hasPendingChanges,
+  onApply,
+  onReset,
   children,
 }: {
   dateRange: DateRangeState;
   setDateRange: React.Dispatch<React.SetStateAction<DateRangeState>>;
+  dateRangePreset: DateRangePreset;
+  onPresetChange: (preset: DateRangePreset) => void;
   hasDateRange: boolean;
+  hasPendingChanges: boolean;
+  onApply: () => void;
+  onReset: () => void;
   children?: React.ReactNode;
 }) {
   return (
@@ -407,29 +429,69 @@ function DateRangePicker({
       <div className="flex flex-wrap items-end gap-4">
         <div className="flex flex-col gap-1.5">
           <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            From Date
+            Time Filter
           </label>
-          <input
-            type="date"
-            value={dateRange.from}
-            className="h-10 w-[160px] cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-            onChange={(event) =>
-              setDateRange((current) => ({ ...current, from: event.target.value }))
-            }
-          />
+          <select
+            value={dateRangePreset}
+            className="h-10 w-[180px] cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+            onChange={(event) => onPresetChange(event.target.value as DateRangePreset)}
+          >
+            <option value="24h">Last 24 Hours</option>
+            <option value="7d">Last 7 Days</option>
+            <option value="30d">Last 30 Days</option>
+            <option value="custom">Custom Range</option>
+          </select>
         </div>
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            To Date
-          </label>
-          <input
-            type="date"
-            value={dateRange.to}
-            className="h-10 w-[160px] cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-            onChange={(event) =>
-              setDateRange((current) => ({ ...current, to: event.target.value }))
-            }
-          />
+        {dateRangePreset === 'custom' ? (
+          <>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                From Date
+              </label>
+              <input
+                type="date"
+                value={dateRange.from}
+                className="h-10 w-[160px] cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                onChange={(event) =>
+                  setDateRange((current) => ({ ...current, from: event.target.value }))
+                }
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                To Date
+              </label>
+              <input
+                type="date"
+                value={dateRange.to}
+                className="h-10 w-[160px] cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                onChange={(event) =>
+                  setDateRange((current) => ({ ...current, to: event.target.value }))
+                }
+              />
+            </div>
+          </>
+        ) : (
+          <div className="flex h-10 items-center rounded-md border border-slate-700 bg-slate-950 px-3 text-xs text-slate-300">
+            {dateRange.from} to {dateRange.to}
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onApply}
+            disabled={!hasPendingChanges}
+            className="h-10 rounded-md border border-blue-500 bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-800 disabled:text-slate-500"
+          >
+            Confirm
+          </button>
+          <button
+            type="button"
+            onClick={onReset}
+            className="h-10 rounded-md border border-slate-700 bg-slate-950 px-4 text-sm font-semibold text-slate-200 hover:border-slate-600 hover:bg-slate-900"
+          >
+            Reset
+          </button>
         </div>
         {hasDateRange ? (
           <div className="flex h-10 items-center rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 text-xs font-medium text-emerald-400">
@@ -714,6 +776,9 @@ export default function App() {
 
   const [activeTab, setActiveTab] = React.useState<TabId>('dashboard');
   const [dateRange, setDateRange] = React.useState<DateRangeState>(() => createDefaultDateRange());
+  const [dateRangeDraft, setDateRangeDraft] = React.useState<DateRangeState>(() => createDefaultDateRange());
+  const [dateRangePreset, setDateRangePreset] = React.useState<DateRangePreset>('7d');
+  const [dateRangeDraftPreset, setDateRangeDraftPreset] = React.useState<DateRangePreset>('7d');
   const [accountSearchTerm, setAccountSearchTerm] = React.useState('');
   const [internalPage, setInternalPage] = React.useState(1);
   const [outsiderPage, setOutsiderPage] = React.useState(1);
@@ -773,6 +838,48 @@ export default function App() {
   const marketInitAttemptedRef = React.useRef('');
 
   const hasDateRange = dateRange.from !== '' && dateRange.to !== '';
+  const hasPendingDateRangeChanges =
+    dateRange.from !== dateRangeDraft.from ||
+    dateRange.to !== dateRangeDraft.to ||
+    dateRangePreset !== dateRangeDraftPreset;
+
+  const handleDateRangePresetChange = React.useCallback((preset: DateRangePreset) => {
+    setDateRangeDraftPreset(preset);
+    if (preset !== 'custom') {
+      setDateRangeDraft(createPresetDateRange(preset));
+    }
+  }, []);
+
+  const handleApplyDateRange = React.useCallback(() => {
+    if (!dateRangeDraft.from || !dateRangeDraft.to) {
+      setError('Choose a complete date range before confirming');
+      return;
+    }
+    if (toRangeStartMs(dateRangeDraft.from) > toRangeEndMs(dateRangeDraft.to)) {
+      setError('Invalid date range');
+      return;
+    }
+    setError('');
+    setDateRange(dateRangeDraft);
+    setDateRangePreset(dateRangeDraftPreset);
+    setTransactionLogCurrentPage(1);
+    setActivityLogCurrentPage(1);
+    setInternalPage(1);
+    setOutsiderPage(1);
+  }, [dateRangeDraft, dateRangeDraftPreset]);
+
+  const handleResetDateRange = React.useCallback(() => {
+    const nextRange = createDefaultDateRange();
+    setError('');
+    setDateRange(nextRange);
+    setDateRangeDraft(nextRange);
+    setDateRangePreset('7d');
+    setDateRangeDraftPreset('7d');
+    setTransactionLogCurrentPage(1);
+    setActivityLogCurrentPage(1);
+    setInternalPage(1);
+    setOutsiderPage(1);
+  }, []);
 
   useEffect(() => {
     setTradingAlgorithm(loadStoredString('tradeengine.tradingAlgorithm', workerAlgorithmTemplate));
@@ -1494,7 +1601,7 @@ export default function App() {
     ? `Snapshot: ${formatDate(dashboardSnapshot.fetchedAt)}${dashboardSnapshot.dexId ? ` | Source: ${dashboardSnapshot.dexId}` : ''}`
     : loadingMarketSnapshots
       ? 'Loading selected range...'
-      : 'No market snapshot in the selected range';
+      : 'No stored market snapshot in the selected range. Historical prices only exist after init, refresh, or webhook updates write snapshots to D1.';
   const totalInternalTokenAmount = activeTokenContractAddress
     ? engineState.internalAccs.reduce(
         (sum, account) =>
@@ -1671,7 +1778,16 @@ export default function App() {
 
   const renderDashboard = () => (
     <div className="space-y-6">
-      <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
+      <DateRangePicker
+        dateRange={dateRangeDraft}
+        setDateRange={setDateRangeDraft}
+        dateRangePreset={dateRangeDraftPreset}
+        onPresetChange={handleDateRangePresetChange}
+        hasDateRange={hasDateRange}
+        hasPendingChanges={hasPendingDateRangeChanges}
+        onApply={handleApplyDateRange}
+        onReset={handleResetDateRange}
+      >
         <div className="text-right text-xs text-slate-400">
           {marketSnapshotSubtitle}
         </div>
@@ -1720,7 +1836,16 @@ export default function App() {
 
   const renderAccounts = () => (
     <div className="space-y-6">
-      <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
+      <DateRangePicker
+        dateRange={dateRangeDraft}
+        setDateRange={setDateRangeDraft}
+        dateRangePreset={dateRangeDraftPreset}
+        onPresetChange={handleDateRangePresetChange}
+        hasDateRange={hasDateRange}
+        hasPendingChanges={hasPendingDateRangeChanges}
+        onApply={handleApplyDateRange}
+        onReset={handleResetDateRange}
+      >
         <div className="flex w-full flex-col gap-1.5 md:w-[400px]">
           <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
             Global Address Search
