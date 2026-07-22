@@ -26,7 +26,6 @@ const COOKIE_NAME = 'te_session';
 const SESSION_TTL_HOURS = 12;
 const PBKDF2_ITERATIONS = 100_000; // Max supported by Cloudflare Workers
 const DEFAULT_SOLANA_DERIVATION_PATH = "m/44'/501'/0'/0'";
-const DEFAULT_SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com';
 const SOLANA_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const SOLANA_SPL_TOKEN_PROGRAM_ID =
   'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
@@ -1724,7 +1723,6 @@ async function dbResolveSolanaRpcUrls(
   return dedupeStrings([
     ...endpoints.map((endpoint) => endpoint.url),
     envRpcUrl ?? '',
-    DEFAULT_SOLANA_RPC_URL,
   ]);
 }
 
@@ -3575,7 +3573,6 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
   const rpcUrls = dedupeStrings([
     ...rpcEndpoints.map((endpoint) => endpoint.url),
     env.SOLANA_RPC_URL ?? '',
-    DEFAULT_SOLANA_RPC_URL,
   ]);
 
   let marketSnapshot: TokenMarketSnapshot | null = null;
