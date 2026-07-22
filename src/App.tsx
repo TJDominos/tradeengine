@@ -74,6 +74,18 @@ type TradeLog = {
   updatedAt: number;
 };
 
+type WebhookTransactionLog = {
+  id: number;
+  tokenContractAddress: string | null;
+  tokenSymbol: string | null;
+  walletAddress: string | null;
+  eventType: string;
+  txSignature: string | null;
+  status: 'PENDING' | 'SUCCESS' | 'FAILED';
+  errorMessage: string | null;
+  createdAt: number;
+};
+
 type RpcEndpoint = {
   id: number;
   network: string;
@@ -144,6 +156,7 @@ type EngineState = {
   outsiderAccs: AccountRecord[];
   activityLogs: AuditLog[];
   tradeLogs: TradeLog[];
+  webhookTransactionLogs: WebhookTransactionLog[];
   tradableTokens: TradableToken[];
   historicalSetups: HistoricalSetup[];
   rpcEndpoints: RpcEndpoint[];
@@ -167,8 +180,6 @@ type DateRangeState = {
   to: string;
 };
 
-type DateRangePreset = '24h' | '7d' | '30d' | 'custom';
-
 type AccountSummary = {
   total: number;
   activeAssets: number;
@@ -180,8 +191,20 @@ type AccountSummary = {
 
 type DashboardLogTab = 'transaction' | 'activity';
 
+type DashboardTransactionLog =
+  | ({ kind: 'trade' } & TradeLog)
+  | ({ kind: 'webhook' } & WebhookTransactionLog);
+
+type WalletOwnership = 'internal' | 'external' | 'system' | 'untracked';
+
+type WalletOwnershipMeta = {
+  ownership: WalletOwnership;
+  accountLabel: string | null;
+};
+
 const CONTRACT_ADDRESS = '';
 const ITEMS_PER_PAGE = 20;
+const DASHBOARD_AUTO_REFRESH_INTERVAL_MS = 10_000;
 const workerAlgorithmTemplate = `// Cloudflare Worker trade execution sketch
 // This editor is stored locally in the browser for planning only.
 
@@ -292,6 +315,52 @@ function formatDate(timestamp: number) {
   return new Date(normalized).toLocaleString();
 }
 
+function normalizeTimestampMs(timestamp: number) {
+  return timestamp >= 1_000_000_000_000 ? timestamp : timestamp * 1000;
+}
+
+function formatWebhookEventLabel(eventType: string) {
+  const segments = eventType
+    .split(':')
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const label = segments[segments.length - 1] ?? eventType;
+  return label.replace(/[_-]+/g, ' ').trim().toUpperCase() || 'WEBHOOK';
+}
+
+function buildWalletOwnershipLookup(engineState: EngineState): Map<string, WalletOwnershipMeta> {
+  const lookup = new Map<string, WalletOwnershipMeta>();
+
+  for (const account of engineState.outsiderAccs) {
+    lookup.set(account.address, {
+      ownership: 'external',
+      accountLabel: account.label,
+    });
+  }
+
+  for (const account of engineState.internalAccs) {
+    lookup.set(account.address, {
+      ownership: 'internal',
+      accountLabel: account.label,
+    });
+  }
+
+  return lookup;
+}
+
+function resolveWalletOwnershipMeta(
+  walletAddress: string | null | undefined,
+  ownershipLookup: Map<string, WalletOwnershipMeta>,
+): WalletOwnershipMeta {
+  if (!walletAddress || walletAddress === 'system') {
+    return { ownership: 'system', accountLabel: null };
+  }
+  return ownershipLookup.get(walletAddress) ?? {
+    ownership: 'untracked',
+    accountLabel: null,
+  };
+}
+
 function formatDateInputValue(date: Date) {
   const year = date.getFullYear();
   const month = `${date.getMonth() + 1}`.padStart(2, '0');
@@ -299,23 +368,13 @@ function formatDateInputValue(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
-function createPresetDateRange(preset: Exclude<DateRangePreset, 'custom'>): DateRangeState {
+function createDefaultDateRange(): DateRangeState {
   const end = new Date();
-  const durationMs =
-    preset === '24h'
-      ? 24 * 60 * 60 * 1000
-      : preset === '30d'
-        ? 30 * 24 * 60 * 60 * 1000
-        : 7 * 24 * 60 * 60 * 1000;
-  const start = new Date(end.getTime() - durationMs);
+  const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000);
   return {
     from: formatDateInputValue(start),
     to: formatDateInputValue(end),
   };
-}
-
-function createDefaultDateRange(): DateRangeState {
-  return createPresetDateRange('7d');
 }
 
 function toRangeStartMs(value: string) {
@@ -406,22 +465,12 @@ function saveStoredString(key: string, value: string) {
 function DateRangePicker({
   dateRange,
   setDateRange,
-  dateRangePreset,
-  onPresetChange,
   hasDateRange,
-  hasPendingChanges,
-  onApply,
-  onReset,
   children,
 }: {
   dateRange: DateRangeState;
   setDateRange: React.Dispatch<React.SetStateAction<DateRangeState>>;
-  dateRangePreset: DateRangePreset;
-  onPresetChange: (preset: DateRangePreset) => void;
   hasDateRange: boolean;
-  hasPendingChanges: boolean;
-  onApply: () => void;
-  onReset: () => void;
   children?: React.ReactNode;
 }) {
   return (
@@ -429,69 +478,29 @@ function DateRangePicker({
       <div className="flex flex-wrap items-end gap-4">
         <div className="flex flex-col gap-1.5">
           <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Time Filter
+            From Date
           </label>
-          <select
-            value={dateRangePreset}
-            className="h-10 w-[180px] cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-            onChange={(event) => onPresetChange(event.target.value as DateRangePreset)}
-          >
-            <option value="24h">Last 24 Hours</option>
-            <option value="7d">Last 7 Days</option>
-            <option value="30d">Last 30 Days</option>
-            <option value="custom">Custom Range</option>
-          </select>
+          <input
+            type="date"
+            value={dateRange.from}
+            className="h-10 w-[160px] cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+            onChange={(event) =>
+              setDateRange((current) => ({ ...current, from: event.target.value }))
+            }
+          />
         </div>
-        {dateRangePreset === 'custom' ? (
-          <>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                From Date
-              </label>
-              <input
-                type="date"
-                value={dateRange.from}
-                className="h-10 w-[160px] cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-                onChange={(event) =>
-                  setDateRange((current) => ({ ...current, from: event.target.value }))
-                }
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                To Date
-              </label>
-              <input
-                type="date"
-                value={dateRange.to}
-                className="h-10 w-[160px] cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
-                onChange={(event) =>
-                  setDateRange((current) => ({ ...current, to: event.target.value }))
-                }
-              />
-            </div>
-          </>
-        ) : (
-          <div className="flex h-10 items-center rounded-md border border-slate-700 bg-slate-950 px-3 text-xs text-slate-300">
-            {dateRange.from} to {dateRange.to}
-          </div>
-        )}
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onApply}
-            disabled={!hasPendingChanges}
-            className="h-10 rounded-md border border-blue-500 bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-800 disabled:text-slate-500"
-          >
-            Confirm
-          </button>
-          <button
-            type="button"
-            onClick={onReset}
-            className="h-10 rounded-md border border-slate-700 bg-slate-950 px-4 text-sm font-semibold text-slate-200 hover:border-slate-600 hover:bg-slate-900"
-          >
-            Reset
-          </button>
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            To Date
+          </label>
+          <input
+            type="date"
+            value={dateRange.to}
+            className="h-10 w-[160px] cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+            onChange={(event) =>
+              setDateRange((current) => ({ ...current, to: event.target.value }))
+            }
+          />
         </div>
         {hasDateRange ? (
           <div className="flex h-10 items-center rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 text-xs font-medium text-emerald-400">
@@ -776,9 +785,6 @@ export default function App() {
 
   const [activeTab, setActiveTab] = React.useState<TabId>('dashboard');
   const [dateRange, setDateRange] = React.useState<DateRangeState>(() => createDefaultDateRange());
-  const [dateRangeDraft, setDateRangeDraft] = React.useState<DateRangeState>(() => createDefaultDateRange());
-  const [dateRangePreset, setDateRangePreset] = React.useState<DateRangePreset>('7d');
-  const [dateRangeDraftPreset, setDateRangeDraftPreset] = React.useState<DateRangePreset>('7d');
   const [accountSearchTerm, setAccountSearchTerm] = React.useState('');
   const [internalPage, setInternalPage] = React.useState(1);
   const [outsiderPage, setOutsiderPage] = React.useState(1);
@@ -836,50 +842,9 @@ export default function App() {
   // Tracks which token address we last attempted to auto-init, to avoid
   // re-firing every 3-second polling cycle when the snapshot stays null.
   const marketInitAttemptedRef = React.useRef('');
+  const dashboardAutoRefreshInFlightRef = React.useRef(false);
 
   const hasDateRange = dateRange.from !== '' && dateRange.to !== '';
-  const hasPendingDateRangeChanges =
-    dateRange.from !== dateRangeDraft.from ||
-    dateRange.to !== dateRangeDraft.to ||
-    dateRangePreset !== dateRangeDraftPreset;
-
-  const handleDateRangePresetChange = React.useCallback((preset: DateRangePreset) => {
-    setDateRangeDraftPreset(preset);
-    if (preset !== 'custom') {
-      setDateRangeDraft(createPresetDateRange(preset));
-    }
-  }, []);
-
-  const handleApplyDateRange = React.useCallback(() => {
-    if (!dateRangeDraft.from || !dateRangeDraft.to) {
-      setError('Choose a complete date range before confirming');
-      return;
-    }
-    if (toRangeStartMs(dateRangeDraft.from) > toRangeEndMs(dateRangeDraft.to)) {
-      setError('Invalid date range');
-      return;
-    }
-    setError('');
-    setDateRange(dateRangeDraft);
-    setDateRangePreset(dateRangeDraftPreset);
-    setTransactionLogCurrentPage(1);
-    setActivityLogCurrentPage(1);
-    setInternalPage(1);
-    setOutsiderPage(1);
-  }, [dateRangeDraft, dateRangeDraftPreset]);
-
-  const handleResetDateRange = React.useCallback(() => {
-    const nextRange = createDefaultDateRange();
-    setError('');
-    setDateRange(nextRange);
-    setDateRangeDraft(nextRange);
-    setDateRangePreset('7d');
-    setDateRangeDraftPreset('7d');
-    setTransactionLogCurrentPage(1);
-    setActivityLogCurrentPage(1);
-    setInternalPage(1);
-    setOutsiderPage(1);
-  }, []);
 
   useEffect(() => {
     setTradingAlgorithm(loadStoredString('tradeengine.tradingAlgorithm', workerAlgorithmTemplate));
@@ -1072,7 +1037,7 @@ export default function App() {
       await refresh();
     });
 
-  const loadMarketSnapshotHistory = React.useCallback(async () => {
+  const loadMarketSnapshotHistory = React.useCallback(async (options?: { silent?: boolean }) => {
     if (!auth?.authenticated || !settings.contractAddress.trim()) {
       return;
     }
@@ -1091,11 +1056,15 @@ export default function App() {
     const startTime = toRangeStartMs(dateRange.from);
     const endTime = toRangeEndMs(dateRange.to);
     if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime > endTime) {
-      setError('Invalid date range');
+      if (!options?.silent) {
+        setError('Invalid date range');
+      }
       return;
     }
 
-    setLoadingMarketSnapshots(true);
+    if (!options?.silent) {
+      setLoadingMarketSnapshots(true);
+    }
     try {
       const result = await api<{ snapshots: TokenMarketSnapshot[] }>(
         `/api/market-snapshots?startTime=${startTime}&endTime=${endTime}&limit=500`,
@@ -1110,9 +1079,15 @@ export default function App() {
           : current,
       );
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to load market snapshot history');
+      if (!options?.silent) {
+        setError(err instanceof Error ? err.message : 'Failed to load market snapshot history');
+      } else {
+        console.warn('Dashboard snapshot history auto-refresh failed:', err);
+      }
     } finally {
-      setLoadingMarketSnapshots(false);
+      if (!options?.silent) {
+        setLoadingMarketSnapshots(false);
+      }
     }
   }, [auth?.authenticated, dateRange.from, dateRange.to, settings.contractAddress]);
 
@@ -1159,6 +1134,47 @@ export default function App() {
     auth?.authenticated,
     hasDateRange,
     loadMarketSnapshotHistory,
+    settings.contractAddress,
+  ]);
+
+  useEffect(() => {
+    if (!auth?.authenticated || activeTab !== 'dashboard') return;
+
+    let disposed = false;
+
+    const pollDashboard = async () => {
+      if (dashboardAutoRefreshInFlightRef.current) {
+        return;
+      }
+      dashboardAutoRefreshInFlightRef.current = true;
+      try {
+        await loadState();
+        if (!disposed && settings.contractAddress.trim() && hasDateRange) {
+          await loadMarketSnapshotHistory({ silent: true });
+        }
+      } catch (err: unknown) {
+        if (!disposed) {
+          console.warn('Dashboard auto-refresh failed:', err);
+        }
+      } finally {
+        dashboardAutoRefreshInFlightRef.current = false;
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void pollDashboard();
+    }, DASHBOARD_AUTO_REFRESH_INTERVAL_MS);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+    };
+  }, [
+    activeTab,
+    auth?.authenticated,
+    hasDateRange,
+    loadMarketSnapshotHistory,
+    loadState,
     settings.contractAddress,
   ]);
 
@@ -1553,22 +1569,61 @@ export default function App() {
     engineState.marketSnapshot && isInSelectedRange(engineState.marketSnapshot.fetchedAt)
       ? engineState.marketSnapshot
       : null;
-  const dashboardSnapshot = filteredSnapshots[0] ?? liveSnapshotInRange;
+  const latestHistoricalSnapshot = filteredSnapshots[0] ?? null;
+  const dashboardSnapshot =
+    latestHistoricalSnapshot && liveSnapshotInRange
+      ? normalizeTimestampMs(liveSnapshotInRange.fetchedAt) >= normalizeTimestampMs(latestHistoricalSnapshot.fetchedAt)
+        ? liveSnapshotInRange
+        : latestHistoricalSnapshot
+      : latestHistoricalSnapshot ?? liveSnapshotInRange;
+  const walletOwnershipLookup = buildWalletOwnershipLookup(engineState);
 
-  const filteredTransactionLogs = engineState.tradeLogs.filter((log) => {
+  const combinedTransactionLogs: DashboardTransactionLog[] = [
+    ...engineState.tradeLogs.map((log) => ({ kind: 'trade' as const, ...log })),
+    ...((engineState.webhookTransactionLogs ?? []).map((log) => ({ kind: 'webhook' as const, ...log }))),
+  ].sort((left, right) => {
+    const createdAtDelta = normalizeTimestampMs(right.createdAt) - normalizeTimestampMs(left.createdAt);
+    return createdAtDelta !== 0 ? createdAtDelta : right.id - left.id;
+  });
+
+  const filteredTransactionLogs = combinedTransactionLogs.filter((log) => {
     const term = transactionLogSearchTerm.toLowerCase();
-    return (
-      isInSelectedRange(log.createdAt) &&
-      (
+    if (!isInSelectedRange(log.createdAt)) {
+      return false;
+    }
+    if (!term) {
+      return true;
+    }
+
+    const walletOwnershipMeta = resolveWalletOwnershipMeta(log.walletAddress, walletOwnershipLookup);
+    const accountLabel = (walletOwnershipMeta.accountLabel ?? '').toLowerCase();
+    const ownershipLabel = walletOwnershipMeta.ownership.toLowerCase();
+
+    if (log.kind === 'trade') {
+      return (
         (log.tokenContractAddress ?? '').toLowerCase().includes(term) ||
         (log.tokenSymbol ?? '').toLowerCase().includes(term) ||
         log.walletAddress.toLowerCase().includes(term) ||
+        accountLabel.includes(term) ||
+        ownershipLabel.includes(term) ||
         log.action.toLowerCase().includes(term) ||
         log.status.toLowerCase().includes(term) ||
         (log.txSignature ?? '').toLowerCase().includes(term) ||
         (log.errorMessage ?? '').toLowerCase().includes(term) ||
         String(log.requestedAmount).includes(term)
-      )
+      );
+    }
+
+    return (
+      (log.tokenContractAddress ?? '').toLowerCase().includes(term) ||
+      (log.tokenSymbol ?? '').toLowerCase().includes(term) ||
+      (log.walletAddress ?? '').toLowerCase().includes(term) ||
+      accountLabel.includes(term) ||
+      ownershipLabel.includes(term) ||
+      log.eventType.toLowerCase().includes(term) ||
+      log.status.toLowerCase().includes(term) ||
+      (log.txSignature ?? '').toLowerCase().includes(term) ||
+      (log.errorMessage ?? '').toLowerCase().includes(term)
     );
   });
   const currentTransactionLogs = filteredTransactionLogs.slice(
@@ -1601,7 +1656,7 @@ export default function App() {
     ? `Snapshot: ${formatDate(dashboardSnapshot.fetchedAt)}${dashboardSnapshot.dexId ? ` | Source: ${dashboardSnapshot.dexId}` : ''}`
     : loadingMarketSnapshots
       ? 'Loading selected range...'
-      : 'No stored market snapshot in the selected range. Historical prices only exist after init, refresh, or webhook updates write snapshots to D1.';
+      : 'No market snapshot in the selected range';
   const totalInternalTokenAmount = activeTokenContractAddress
     ? engineState.internalAccs.reduce(
         (sum, account) =>
@@ -1642,51 +1697,85 @@ export default function App() {
               <th className="px-4 py-2 font-medium">Time</th>
               <th className="px-4 py-2 font-medium">Token</th>
               <th className="px-4 py-2 font-medium">Wallet</th>
-              <th className="px-4 py-2 font-medium">Action</th>
+              <th className="px-4 py-2 font-medium">Action / Event</th>
               <th className="px-4 py-2 font-medium">Requested</th>
               <th className="px-4 py-2 text-center font-medium">Status</th>
               <th className="px-4 py-2 font-medium">Tx / Error</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800">
-            {currentTransactionLogs.map((log) => (
-              <tr key={log.id} className="transition-colors hover:bg-slate-800/50">
-                <td className="px-4 py-1.5 text-xs text-slate-400">{formatDate(log.createdAt)}</td>
-                <td className="px-4 py-1.5">
-                  <div className="text-xs font-semibold text-slate-200">
-                    {log.tokenSymbol ?? 'Tracked Token'}
-                  </div>
-                  <div className="font-mono text-[11px] text-slate-500">
-                    {log.tokenContractAddress ? compactAddress(log.tokenContractAddress) : 'Unknown'}
-                  </div>
-                </td>
-                <td className="px-4 py-1.5 font-mono text-xs text-slate-500">
-                  {log.walletAddress === 'system' ? 'system' : compactAddress(log.walletAddress)}
-                </td>
-                <td className={`px-4 py-1.5 text-xs font-bold ${log.action === 'BUY' ? 'text-emerald-400' : 'text-amber-300'}`}>{log.action}</td>
-                <td className="px-4 py-1.5 text-xs text-slate-300">{formatNum(log.requestedAmount)}</td>
-                <td className="px-4 py-1.5 text-center">
-                  <span
-                    className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
-                      log.status === 'SUCCESS'
-                        ? 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
-                        : log.status === 'FAILED'
-                          ? 'border border-rose-500/20 bg-rose-500/10 text-rose-400'
-                          : 'border border-amber-500/20 bg-amber-500/10 text-amber-300'
-                    }`}
-                  >
-                    <CheckSquare size={10} /> {log.status.toLowerCase()}
-                  </span>
-                </td>
-                <td className="max-w-[320px] px-4 py-1.5 text-xs text-slate-300">
-                  {log.txSignature ? compactAddress(log.txSignature) : log.errorMessage ?? '-'}
-                </td>
-              </tr>
-            ))}
+            {currentTransactionLogs.map((log) => {
+              const walletAddress = log.walletAddress ?? 'system';
+              const walletOwnershipMeta = resolveWalletOwnershipMeta(log.walletAddress, walletOwnershipLookup);
+              const actionLabel = log.kind === 'webhook' ? formatWebhookEventLabel(log.eventType) : log.action;
+              const actionClass =
+                log.kind === 'webhook'
+                  ? 'text-sky-300'
+                  : log.action === 'BUY'
+                    ? 'text-emerald-400'
+                    : 'text-amber-300';
+              const ownershipBadgeClass =
+                walletOwnershipMeta.ownership === 'internal'
+                  ? 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+                  : walletOwnershipMeta.ownership === 'external'
+                    ? 'border border-amber-500/20 bg-amber-500/10 text-amber-300'
+                    : walletOwnershipMeta.ownership === 'system'
+                      ? 'border border-slate-700 bg-slate-800 text-slate-300'
+                      : 'border border-slate-700 bg-slate-900 text-slate-400';
+              const requestedAmount = log.kind === 'webhook' ? '-' : formatNum(log.requestedAmount);
+              const txOrError = log.txSignature
+                ? compactAddress(log.txSignature)
+                : log.errorMessage ?? (log.kind === 'webhook' ? 'Tracked by webhook' : '-');
+
+              return (
+                <tr key={`${log.kind}-${log.id}`} className="transition-colors hover:bg-slate-800/50">
+                  <td className="px-4 py-1.5 text-xs text-slate-400">{formatDate(log.createdAt)}</td>
+                  <td className="px-4 py-1.5">
+                    <div className="text-xs font-semibold text-slate-200">
+                      {log.tokenSymbol ?? (log.kind === 'webhook' ? 'Tracked Activity' : 'Tracked Token')}
+                    </div>
+                    <div className="font-mono text-[11px] text-slate-500">
+                      {log.tokenContractAddress ? compactAddress(log.tokenContractAddress) : 'Unknown'}
+                    </div>
+                  </td>
+                  <td className="px-4 py-1.5">
+                    <div className="font-mono text-xs text-slate-500">
+                      {walletAddress === 'system' ? 'system' : compactAddress(walletAddress)}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${ownershipBadgeClass}`}>
+                        {walletOwnershipMeta.ownership}
+                      </span>
+                      {walletOwnershipMeta.accountLabel ? (
+                        <span className="rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 text-[10px] text-slate-300">
+                          {walletOwnershipMeta.accountLabel}
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
+                  <td className={`px-4 py-1.5 text-xs font-bold ${actionClass}`}>{actionLabel}</td>
+                  <td className="px-4 py-1.5 text-xs text-slate-300">{requestedAmount}</td>
+                  <td className="px-4 py-1.5 text-center">
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                        log.status === 'SUCCESS'
+                          ? 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+                          : log.status === 'FAILED'
+                            ? 'border border-rose-500/20 bg-rose-500/10 text-rose-400'
+                            : 'border border-amber-500/20 bg-amber-500/10 text-amber-300'
+                      }`}
+                    >
+                      <CheckSquare size={10} /> {log.status.toLowerCase()}
+                    </span>
+                  </td>
+                  <td className="max-w-[320px] px-4 py-1.5 text-xs text-slate-300">{txOrError}</td>
+                </tr>
+              );
+            })}
             {currentTransactionLogs.length === 0 ? (
               <tr>
                 <td colSpan={7} className="py-8 text-center text-sm text-slate-500">
-                  No transaction records yet.
+                  No trade or webhook records yet.
                 </td>
               </tr>
             ) : null}
@@ -1778,16 +1867,7 @@ export default function App() {
 
   const renderDashboard = () => (
     <div className="space-y-6">
-      <DateRangePicker
-        dateRange={dateRangeDraft}
-        setDateRange={setDateRangeDraft}
-        dateRangePreset={dateRangeDraftPreset}
-        onPresetChange={handleDateRangePresetChange}
-        hasDateRange={hasDateRange}
-        hasPendingChanges={hasPendingDateRangeChanges}
-        onApply={handleApplyDateRange}
-        onReset={handleResetDateRange}
-      >
+      <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
         <div className="text-right text-xs text-slate-400">
           {marketSnapshotSubtitle}
         </div>
@@ -1836,16 +1916,7 @@ export default function App() {
 
   const renderAccounts = () => (
     <div className="space-y-6">
-      <DateRangePicker
-        dateRange={dateRangeDraft}
-        setDateRange={setDateRangeDraft}
-        dateRangePreset={dateRangeDraftPreset}
-        onPresetChange={handleDateRangePresetChange}
-        hasDateRange={hasDateRange}
-        hasPendingChanges={hasPendingDateRangeChanges}
-        onApply={handleApplyDateRange}
-        onReset={handleResetDateRange}
-      >
+      <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
         <div className="flex w-full flex-col gap-1.5 md:w-[400px]">
           <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
             Global Address Search

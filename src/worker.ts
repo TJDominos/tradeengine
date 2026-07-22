@@ -121,6 +121,18 @@ interface TradeLogRecord {
   updatedAt: number;
 }
 
+interface WebhookTransactionLogRecord {
+  id: number;
+  tokenContractAddress: string | null;
+  tokenSymbol: string | null;
+  walletAddress: string | null;
+  eventType: string;
+  txSignature: string | null;
+  status: 'PENDING' | 'SUCCESS' | 'FAILED';
+  errorMessage: string | null;
+  createdAt: number;
+}
+
 interface RpcEndpoint {
   id: number;
   network: string;
@@ -742,6 +754,66 @@ function toFiniteNumber(value: unknown): number | null {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function extractStoredSignalContractAddresses(payloadText: string): string[] {
+  let payload: unknown;
+  try {
+    payload = parseJsonText<unknown>(payloadText);
+  } catch {
+    return [];
+  }
+
+  if (!isRecord(payload)) {
+    return [];
+  }
+
+  const activity = isRecord(payload.activity) ? payload.activity : null;
+  const rawContract = activity && isRecord(activity.rawContract)
+    ? activity.rawContract
+    : null;
+  const log = isRecord(payload.log) ? payload.log : null;
+  const event = isRecord(payload.event) ? payload.event : null;
+  const firstActivity =
+    event && Array.isArray(event.activity)
+      ? event.activity.find((item): item is Record<string, unknown> => isRecord(item)) ?? null
+      : null;
+  const firstRawContract = firstActivity && isRecord(firstActivity.rawContract)
+    ? firstActivity.rawContract
+    : null;
+  const data = event && isRecord(event.data) ? event.data : null;
+  const block = data && isRecord(data.block) ? data.block : null;
+  const firstLog =
+    block && Array.isArray(block.logs)
+      ? block.logs.find((item): item is Record<string, unknown> => isRecord(item)) ?? null
+      : null;
+
+  return uniqueSolanaPubkeys([
+    rawContract?.address,
+    activity?.contractAddress,
+    activity?.tokenAddress,
+    activity?.mint,
+    log?.address,
+    log?.contractAddress,
+    log?.tokenAddress,
+    log?.mint,
+    firstRawContract?.address,
+    firstActivity?.contractAddress,
+    firstActivity?.tokenAddress,
+    firstActivity?.mint,
+    firstLog?.address,
+    firstLog?.contractAddress,
+    firstLog?.tokenAddress,
+    firstLog?.mint,
+    event?.contractAddress,
+    event?.address,
+    event?.tokenAddress,
+    event?.mint,
+    payload.contractAddress,
+    payload.address,
+    payload.tokenAddress,
+    payload.mint,
+  ]);
 }
 
 // ─── input validation ─────────────────────────────────────────────────────────
@@ -1654,6 +1726,79 @@ async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]> {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }));
+}
+
+async function dbListWebhookTransactionLogs(
+  db: D1Database,
+  userId: number,
+): Promise<WebhookTransactionLogRecord[]> {
+  await dbEnsureTradeDomainSchema(db);
+  const [rows, tokens] = await Promise.all([
+    db
+      .prepare(
+        `SELECT
+           id,
+           event_type,
+           wallet_address,
+           tx_signature,
+           payload,
+           processed,
+           error_message,
+           created_at
+         FROM signals
+         WHERE source LIKE ?1
+         ORDER BY created_at DESC, id DESC
+         LIMIT 50`,
+      )
+      .bind(`%:user:${userId}`)
+      .all<{
+        id: number;
+        event_type: string;
+        wallet_address: string | null;
+        tx_signature: string | null;
+        payload: string;
+        processed: number;
+        error_message: string | null;
+        created_at: number;
+      }>(),
+    db
+      .prepare(
+        'SELECT contract_address, symbol FROM tradable_tokens WHERE network = ?1',
+      )
+      .bind('solana')
+      .all<{
+        contract_address: string;
+        symbol: string | null;
+      }>(),
+  ]);
+
+  const symbolByContract = new Map<string, string | null>();
+  for (const token of tokens.results) {
+    symbolByContract.set(normalizePubkey(token.contract_address), token.symbol);
+  }
+
+  return rows.results.map((row) => {
+    const tokenContractAddress =
+      extractStoredSignalContractAddresses(row.payload)[0] ?? null;
+    return {
+      id: row.id,
+      tokenContractAddress,
+      tokenSymbol: tokenContractAddress
+        ? (symbolByContract.get(tokenContractAddress) ?? null)
+        : null,
+      walletAddress: row.wallet_address,
+      eventType: row.event_type,
+      txSignature: row.tx_signature,
+      status:
+        row.processed === 1
+          ? 'SUCCESS'
+          : row.error_message
+            ? 'FAILED'
+            : 'PENDING',
+      errorMessage: row.error_message,
+      createdAt: row.created_at,
+    };
+  });
 }
 
 async function dbCreateTradeLog(
@@ -3841,6 +3986,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     outsiderAccs,
     activityLogs,
     tradeLogs,
+    webhookTransactionLogs,
     tradableTokens,
     historicalSetups,
     rpcEndpoints,
@@ -3850,6 +3996,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
       dbListAccounts(env.TRADINGBOT_DB, user.id, 'watch'),
       dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
       dbListTradeLogs(env.TRADINGBOT_DB),
+      dbListWebhookTransactionLogs(env.TRADINGBOT_DB, user.id),
       dbListTradableTokens(env.TRADINGBOT_DB),
       dbListHistoricalSetups(env.TRADINGBOT_DB, user.id),
       dbListRpcEndpoints(env.TRADINGBOT_DB, user.id),
@@ -3901,6 +4048,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     logs: activityLogs,
     activityLogs,
     tradeLogs,
+    webhookTransactionLogs,
     tradableTokens,
     historicalSetups,
     rpcEndpoints,
