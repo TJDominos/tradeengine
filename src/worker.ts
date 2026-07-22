@@ -2375,32 +2375,56 @@ interface JupiterTokenMetadata {
   decimals: number | null;
   logoUri: string | null;
   tags: string[];
+  fdv: number | null;
 }
 
 async function fetchJupiterTokenMetadata(
   mint: string,
 ): Promise<JupiterTokenMetadata | null> {
   try {
+    // Use Jupiter v2 search API which includes market data like FDV
     const response = await fetch(
-      `https://tokens.jup.ag/token/${encodeURIComponent(mint)}`,
+      `https://lite-api.jup.ag/tokens/v2/search?query=${encodeURIComponent(mint)}`,
       { headers: { Accept: 'application/json' } },
     );
     if (!response.ok) return null;
     const body = await response.json<{
-      address?: string;
-      name?: string;
-      symbol?: string;
-      decimals?: number;
-      logoURI?: string;
-      tags?: string[];
+      tokens?: Array<{
+        address?: string;
+        name?: string;
+        symbol?: string;
+        decimals?: number;
+        logoURI?: string;
+        tags?: string[];
+        asset?: {
+          fdv?: number;
+          mcap?: number;
+        };
+      }>;
     }>();
+
+    // Find the exact match for the mint address
+    const tokenData = body.tokens?.find(
+      (t) => t.address && t.address.toLowerCase() === mint.toLowerCase(),
+    );
+    if (!tokenData) return null;
+
+    // Extract FDV from asset, fallback to mcap if fdv is missing
+    const fdv =
+      typeof tokenData.asset?.fdv === 'number'
+        ? tokenData.asset.fdv
+        : typeof tokenData.asset?.mcap === 'number'
+          ? tokenData.asset.mcap
+          : null;
+
     return {
-      address: body.address ?? mint,
-      name: typeof body.name === 'string' ? body.name : null,
-      symbol: typeof body.symbol === 'string' ? body.symbol : null,
-      decimals: typeof body.decimals === 'number' ? body.decimals : null,
-      logoUri: typeof body.logoURI === 'string' ? body.logoURI : null,
-      tags: Array.isArray(body.tags) ? (body.tags as string[]) : [],
+      address: tokenData.address ?? mint,
+      name: typeof tokenData.name === 'string' ? tokenData.name : null,
+      symbol: typeof tokenData.symbol === 'string' ? tokenData.symbol : null,
+      decimals: typeof tokenData.decimals === 'number' ? tokenData.decimals : null,
+      logoUri: typeof tokenData.logoURI === 'string' ? tokenData.logoURI : null,
+      tags: Array.isArray(tokenData.tags) ? (tokenData.tags as string[]) : [],
+      fdv,
     };
   } catch {
     return null;
@@ -2769,7 +2793,7 @@ async function syncTokenMarketSnapshotForUser(
         tokenSymbol: jupiterMeta?.symbol ?? latestStoredSnapshot?.tokenSymbol ?? null,
         priceUsd: jupiterPrice,
         liquidityUsd: null,
-        fdv: null,
+        fdv: jupiterMeta?.fdv ?? null,
         volume24h: null,
         totalTransactions24h: null,
         outsidersOverOneUsd: null,
