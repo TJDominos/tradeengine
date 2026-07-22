@@ -2707,6 +2707,23 @@ async function dbGetTokenHolderAggregate(
   };
 }
 
+async function dbHasTokenHolderRows(
+  db: D1Database,
+  tokenId: number,
+): Promise<boolean> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT 1 AS has_rows
+       FROM token_holder_addresses
+       WHERE token_id = ?1
+       LIMIT 1`,
+    )
+    .bind(tokenId)
+    .first<{ has_rows: number }>();
+  return row?.has_rows === 1;
+}
+
 async function dbApplyTokenHolderTransactionDelta(
   db: D1Database,
   userId: number,
@@ -6152,7 +6169,10 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
           env.TRADINGBOT_DB,
           tokenId,
         );
-        if (!tokenHolderAggregate) {
+        if (
+          !tokenHolderAggregate &&
+          (await dbHasTokenHolderRows(env.TRADINGBOT_DB, tokenId))
+        ) {
           tokenHolderAggregate = await dbRecomputeTokenHolderAggregate(
             env.TRADINGBOT_DB,
             user.id,
@@ -6735,32 +6755,34 @@ async function handleForceRefreshMarketSnapshot(
       contractAddress,
     ).catch((err) => {
       console.warn(`Failed to fetch holder balances for ${contractAddress}:`, err);
-      return new Map<string, number>();
+      return null;
     });
-    holderSyncSummary = await dbSyncTokenHolderBalances(
-      env.TRADINGBOT_DB,
-      tokenId,
-      holderBalances,
-      'rpc_full_sync',
-    ).catch((err) => {
-      console.warn(`Failed to sync holder balances for ${contractAddress}:`, err);
-      return {
-        activeHolderCount: 0,
-        upsertedCount: 0,
-        zeroedCount: 0,
-      };
-    });
-    await dbRecomputeTokenHolderAggregate(
-      env.TRADINGBOT_DB,
-      user.id,
-      tokenId,
-      {
-        source: 'rpc_full_sync',
-        fullSyncAt: nowTs(),
-      },
-    ).catch((err) => {
-      console.warn(`Failed to recompute holder aggregate for ${contractAddress}:`, err);
-    });
+    if (holderBalances) {
+      holderSyncSummary = await dbSyncTokenHolderBalances(
+        env.TRADINGBOT_DB,
+        tokenId,
+        holderBalances,
+        'rpc_full_sync',
+      ).catch((err) => {
+        console.warn(`Failed to sync holder balances for ${contractAddress}:`, err);
+        return {
+          activeHolderCount: 0,
+          upsertedCount: 0,
+          zeroedCount: 0,
+        };
+      });
+      await dbRecomputeTokenHolderAggregate(
+        env.TRADINGBOT_DB,
+        user.id,
+        tokenId,
+        {
+          source: 'rpc_full_sync',
+          fullSyncAt: nowTs(),
+        },
+      ).catch((err) => {
+        console.warn(`Failed to recompute holder aggregate for ${contractAddress}:`, err);
+      });
+    }
   }
 
   const windowCompleteness = await reconcileWebhookTransactionDetailsInWindow(

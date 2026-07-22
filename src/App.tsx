@@ -970,6 +970,8 @@ export default function App() {
     : 0;
 
   const managedWallets = engineState.internalAccs;
+  const tokenHolderAggregateLoading =
+    Boolean(activeTokenContractAddress) && !engineState.tokenHolderAggregate;
 
   const renderDashboardLogs = () => (
     <DashboardLogsSection
@@ -1013,9 +1015,9 @@ export default function App() {
       profitUsdc={engineState.profitUsdc}
       dashboardSnapshot={dashboardSnapshot}
       tokenHolderAggregate={engineState.tokenHolderAggregate}
+      tokenHolderAggregateLoading={tokenHolderAggregateLoading}
       transactionCount={rangeTransactionLogs.length}
       transactionVolumeUsd={rangeTransactionVolumeUsd}
-      managedWalletsCount={managedWallets.length}
       logsSection={renderDashboardLogs()}
     />
   );

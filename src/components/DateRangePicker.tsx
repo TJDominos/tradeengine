@@ -6,6 +6,67 @@ import dayjs from 'dayjs';
 
 import type { DateRangeState } from '../app/types';
 
+const pickerTextFieldSx = {
+  width: 180,
+  '& .MuiInputBase-input': {
+    color: '#0f172a',
+    WebkitTextFillColor: '#0f172a',
+    fontWeight: 600,
+  },
+  '& .MuiOutlinedInput-root': {
+    color: '#0f172a',
+    backgroundColor: '#ffffff',
+    '& fieldset': { borderColor: '#cbd5e1' },
+    '&:hover fieldset': { borderColor: '#94a3b8' },
+    '&.Mui-focused fieldset': { borderColor: '#3b82f6' },
+  },
+  '& .MuiSvgIcon-root': { color: '#64748b' },
+};
+
+const pickerPopperSx = {
+  '& .MuiPaper-root': {
+    backgroundColor: '#ffffff',
+    color: '#0f172a',
+    border: '1px solid #cbd5e1',
+    boxShadow: '0 18px 50px rgba(15, 23, 42, 0.22)',
+  },
+  '& .MuiPickersLayout-root': {
+    backgroundColor: '#ffffff',
+    color: '#0f172a',
+  },
+  '& .MuiPickersCalendarHeader-label': {
+    color: '#0f172a',
+    fontWeight: 700,
+  },
+  '& .MuiPickersCalendarHeader-switchViewButton, & .MuiPickersArrowSwitcher-button': {
+    color: '#334155',
+  },
+  '& .MuiDayCalendar-weekDayLabel': {
+    color: '#64748b',
+    fontWeight: 600,
+  },
+  '& .MuiPickersDay-root': {
+    color: '#0f172a',
+  },
+  '& .MuiPickersDay-root.Mui-disabled': {
+    color: '#cbd5e1',
+  },
+  '& .MuiPickersDay-root:hover': {
+    backgroundColor: 'rgba(37, 99, 235, 0.12)',
+  },
+  '& .MuiPickersDay-root.Mui-selected': {
+    backgroundColor: '#2563eb',
+    color: '#ffffff',
+  },
+  '& .MuiPickersYear-yearButton, & .MuiPickersMonth-monthButton': {
+    color: '#0f172a',
+  },
+  '& .MuiPickersYear-yearButton.Mui-selected, & .MuiPickersMonth-monthButton.Mui-selected': {
+    backgroundColor: '#2563eb',
+    color: '#ffffff',
+  },
+};
+
 type DateRangePickerProps = {
   dateRange: DateRangeState;
   setDateRange: React.Dispatch<React.SetStateAction<DateRangeState>>;
@@ -39,36 +100,10 @@ export default function DateRangePicker({
               slotProps={{
                 textField: {
                   size: 'small',
-                  sx: {
-                    width: 180,
-                    '& .MuiInputBase-input': { color: '#ffffff' },
-                    '& .MuiInputLabel-root': { color: '#cbd5e1' },
-                    '& .MuiInputLabel-root.Mui-focused': { color: '#ffffff' },
-                    '& .MuiOutlinedInput-root': {
-                      color: '#ffffff',
-                      backgroundColor: '#020617',
-                      '& fieldset': { borderColor: '#334155' },
-                      '&:hover fieldset': { borderColor: '#475569' },
-                      '&.Mui-focused fieldset': { borderColor: '#3b82f6' },
-                    },
-                    '& .MuiSvgIcon-root': { color: '#94a3b8' },
-                  },
+                  sx: pickerTextFieldSx,
                 },
                 popper: {
-                  sx: {
-                    '& .MuiPaper-root': {
-                      backgroundColor: '#0f172a',
-                      color: '#e2e8f0',
-                      border: '1px solid #334155',
-                    },
-                    '& .MuiPickersCalendarHeader-label': { color: '#ffffff' },
-                    '& .MuiDayCalendar-weekDayLabel': { color: '#cbd5e1' },
-                    '& .MuiPickersDay-root': { color: '#e2e8f0' },
-                    '& .MuiPickersDay-root.Mui-selected': {
-                      backgroundColor: '#2563eb',
-                      color: '#ffffff',
-                    },
-                  },
+                  sx: pickerPopperSx,
                 },
               }}
             />
@@ -89,36 +124,10 @@ export default function DateRangePicker({
               slotProps={{
                 textField: {
                   size: 'small',
-                  sx: {
-                    width: 180,
-                    '& .MuiInputBase-input': { color: '#ffffff' },
-                    '& .MuiInputLabel-root': { color: '#cbd5e1' },
-                    '& .MuiInputLabel-root.Mui-focused': { color: '#ffffff' },
-                    '& .MuiOutlinedInput-root': {
-                      color: '#ffffff',
-                      backgroundColor: '#020617',
-                      '& fieldset': { borderColor: '#334155' },
-                      '&:hover fieldset': { borderColor: '#475569' },
-                      '&.Mui-focused fieldset': { borderColor: '#3b82f6' },
-                    },
-                    '& .MuiSvgIcon-root': { color: '#94a3b8' },
-                  },
+                  sx: pickerTextFieldSx,
                 },
                 popper: {
-                  sx: {
-                    '& .MuiPaper-root': {
-                      backgroundColor: '#0f172a',
-                      color: '#e2e8f0',
-                      border: '1px solid #334155',
-                    },
-                    '& .MuiPickersCalendarHeader-label': { color: '#ffffff' },
-                    '& .MuiDayCalendar-weekDayLabel': { color: '#cbd5e1' },
-                    '& .MuiPickersDay-root': { color: '#e2e8f0' },
-                    '& .MuiPickersDay-root.Mui-selected': {
-                      backgroundColor: '#2563eb',
-                      color: '#ffffff',
-                    },
-                  },
+                  sx: pickerPopperSx,
                 },
               }}
             />

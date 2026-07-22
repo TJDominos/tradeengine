@@ -20,9 +20,9 @@ type DashboardPageProps = {
   profitUsdc: number;
   dashboardSnapshot: TokenMarketSnapshot | null;
   tokenHolderAggregate: TokenHolderAggregate | null;
+  tokenHolderAggregateLoading: boolean;
   transactionCount: number;
   transactionVolumeUsd: number;
-  managedWalletsCount: number;
   logsSection: React.ReactNode;
 };
 
@@ -40,11 +40,12 @@ export default function DashboardPage({
   profitUsdc,
   dashboardSnapshot,
   tokenHolderAggregate,
+  tokenHolderAggregateLoading,
   transactionCount,
   transactionVolumeUsd,
-  managedWalletsCount,
   logsSection,
 }: DashboardPageProps) {
+  const hasActiveToken = Boolean(activeTokenContractAddress);
   const internalHolderCount = tokenHolderAggregate?.internalHolderCount ?? null;
   const internalAmountHolding = tokenHolderAggregate?.internalAmountHolding ?? null;
   const outsiderHolderCount = tokenHolderAggregate?.outsiderHolderCount ?? null;
@@ -54,6 +55,34 @@ export default function DashboardPage({
         tokenHolderAggregate.totalAmountHolding - tokenHolderAggregate.internalAmountHolding,
       )
     : null;
+  const internalHolderValue = !hasActiveToken
+    ? 'Not Configured'
+    : tokenHolderAggregateLoading
+      ? 'Fetching...'
+      : internalHolderCount != null
+        ? formatNum(internalHolderCount)
+        : 'Unavailable';
+  const outsideHolderValue = !hasActiveToken
+    ? 'Not Configured'
+    : tokenHolderAggregateLoading
+      ? 'Fetching...'
+      : outsiderHolderCount != null
+        ? formatNum(outsiderHolderCount)
+        : 'Unavailable';
+  const internalHolderSubtitle = !hasActiveToken
+    ? 'Set an active token to load holder data.'
+    : tokenHolderAggregateLoading
+      ? 'Loading holder counts and token total...'
+      : internalAmountHolding != null
+        ? `Token total ${formatNum(internalAmountHolding)} ${activeTokenSymbol}`
+        : 'Holder aggregate unavailable';
+  const outsideHolderSubtitle = !hasActiveToken
+    ? 'Set an active token to load holder data.'
+    : tokenHolderAggregateLoading
+      ? 'Loading holder counts and token total...'
+      : outsiderAmountHolding != null
+        ? `Token total ${formatNum(outsiderAmountHolding)} ${activeTokenSymbol}`
+        : 'Holder aggregate unavailable';
 
   return (
     <div className="space-y-6">
@@ -83,30 +112,19 @@ export default function DashboardPage({
           subtitle={marketSnapshotSubtitle}
         />
         <StatCard
-          title="Total Outsiders (>$1)"
-          value={dashboardSnapshot?.outsidersOverOneUsd != null ? String(dashboardSnapshot.outsidersOverOneUsd) : 'Unavailable'}
-          subtitle={
-            dashboardSnapshot?.outsidersOverOneUsd != null
-              ? managedWalletsCount === 0
-                ? 'No internal wallets are configured, so all holders count as outsiders.'
-                : `Excludes ${managedWalletsCount} internal wallet(s)`
-              : marketSnapshotSubtitle
-          }
-        />
-        <StatCard
           title="Number of Transaction and Volumes"
           value={formatNum(transactionCount)}
           subtitle={`Selected range volume ${formatUSD(transactionVolumeUsd)}`}
         />
         <StatCard
           title="Internal Token Holders"
-          value={internalHolderCount != null ? formatNum(internalHolderCount) : 'Unavailable'}
-          subtitle={internalAmountHolding != null ? `Token total ${formatNum(internalAmountHolding)} ${activeTokenSymbol}` : 'Holder aggregate unavailable'}
+          value={internalHolderValue}
+          subtitle={internalHolderSubtitle}
         />
         <StatCard
           title="Outside Token Holders"
-          value={outsiderHolderCount != null ? formatNum(outsiderHolderCount) : 'Unavailable'}
-          subtitle={outsiderAmountHolding != null ? `Token total ${formatNum(outsiderAmountHolding)} ${activeTokenSymbol}` : 'Holder aggregate unavailable'}
+          value={outsideHolderValue}
+          subtitle={outsideHolderSubtitle}
         />
       </div>
 
