@@ -19,6 +19,13 @@ import {
   Wallet,
 } from 'lucide-react';
 
+import AppHeader from './components/AppHeader';
+import PageTabs from './components/PageTabs';
+import AccountsPage from './pages/AccountsPage';
+import DashboardPage from './pages/DashboardPage';
+import HistoricalSetupsPage from './pages/HistoricalSetupsPage';
+import TradingSetupPage from './pages/TradingSetupPage';
+
 type TabId = 'dashboard' | 'accounts' | 'setup' | 'setups';
 
 type AuthStatus = {
@@ -782,6 +789,7 @@ export default function App() {
   const [error, setError] = React.useState('');
   const [notice, setNotice] = React.useState('');
   const [lastUpdated, setLastUpdated] = React.useState('-');
+  const [isTradingActive, setIsTradingActive] = React.useState(false);
 
   const [activeTab, setActiveTab] = React.useState<TabId>('dashboard');
   const [dateRange, setDateRange] = React.useState<DateRangeState>(() => createDefaultDateRange());
@@ -1179,7 +1187,15 @@ export default function App() {
   ]);
 
   const handleStartTrading = () => {
-    setNotice('Trade execution is intentionally disabled in the current backend release.');
+    setIsTradingActive((current) => {
+      const next = !current;
+      setNotice(
+        next
+          ? 'Trading status switched to active. Automated execution is still backend-gated.'
+          : 'Trading status switched back to idle.',
+      );
+      return next;
+    });
   };
 
   const handleSaveConfig = () =>
@@ -1866,514 +1882,97 @@ export default function App() {
   );
 
   const renderDashboard = () => (
-    <div className="space-y-6">
-      <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
-        <div className="text-right text-xs text-slate-400">
-          {marketSnapshotSubtitle}
-        </div>
-      </DateRangePicker>
-
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard title="Token Contract Address" value={settings.contractAddress || CONTRACT_ADDRESS || 'Not Configured'} isAddress />
-        <StatCard
-          title={`Total ${activeTokenSymbol} Amount (Internal)`}
-          value={activeTokenContractAddress ? formatNum(totalInternalTokenAmount) : 'Not Configured'}
-          subtitle={`${engineState.stats.managedAccounts} internal wallet(s)`}
-        />
-        <StatCard title="Profit (USDC)" value={formatUSD(engineState.profitUsdc)} />
-        <StatCard title="FDV" value={formatOptionalUsd(dashboardSnapshot?.fdv)} subtitle={marketSnapshotSubtitle} />
-        <StatCard
-          title={`Price: ${activeTokenName}`}
-          value={formatLivePrice(dashboardSnapshot?.priceUsd)}
-          subtitle={marketSnapshotSubtitle}
-        />
-        <StatCard
-          title="Liquidity (USDC)"
-          value={formatOptionalUsd(dashboardSnapshot?.liquidityUsd)}
-          subtitle={marketSnapshotSubtitle}
-        />
-        <StatCard
-          title="Total Outsiders (>$1)"
-          value={dashboardSnapshot?.outsidersOverOneUsd != null ? String(dashboardSnapshot.outsidersOverOneUsd) : 'Unavailable'}
-          subtitle={
-            dashboardSnapshot?.outsidersOverOneUsd != null
-              ? managedWallets.length === 0
-                ? 'No internal wallets are configured, so all holders count as outsiders.'
-                : `Excludes ${managedWallets.length} internal wallet(s)`
-              : marketSnapshotSubtitle
-          }
-        />
-        <StatCard
-          title="Number of Transaction and Volumes"
-          value={dashboardSnapshot?.totalTransactions24h != null ? formatNum(dashboardSnapshot.totalTransactions24h) : 'Unavailable'}
-          subtitle={dashboardSnapshot?.volume24h != null ? `24h volume ${formatUSD(dashboardSnapshot.volume24h)}` : marketSnapshotSubtitle}
-        />
-      </div>
-
-      <div className="mt-8">{renderDashboardLogs()}</div>
-    </div>
+    <DashboardPage
+      dateRange={dateRange}
+      setDateRange={setDateRange}
+      hasDateRange={hasDateRange}
+      marketSnapshotSubtitle={marketSnapshotSubtitle}
+      settingsContractAddress={settings.contractAddress}
+      activeTokenSymbol={activeTokenSymbol}
+      activeTokenName={activeTokenName}
+      activeTokenContractAddress={activeTokenContractAddress}
+      totalInternalTokenAmount={totalInternalTokenAmount}
+      managedAccountsCount={engineState.stats.managedAccounts}
+      profitUsdc={engineState.profitUsdc}
+      dashboardSnapshot={dashboardSnapshot}
+      managedWalletsCount={managedWallets.length}
+      logsSection={renderDashboardLogs()}
+    />
   );
 
   const renderAccounts = () => (
-    <div className="space-y-6">
-      <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
-        <div className="flex w-full flex-col gap-1.5 md:w-[400px]">
-          <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Global Address Search
-          </label>
-          <div className="relative">
-            <Search size={16} className="absolute left-3 top-2.5 text-slate-500" />
-            <input
-              type="text"
-              placeholder="Search by wallet address or label across all accounts..."
-              value={accountSearchTerm}
-              onChange={(event) => {
-                setAccountSearchTerm(event.target.value);
-                setInternalPage(1);
-                setOutsiderPage(1);
-              }}
-              className="h-10 w-full rounded-md border border-slate-700 bg-slate-950 pl-9 pr-3 text-sm outline-none focus:border-blue-500"
-            />
-          </div>
-        </div>
-      </DateRangePicker>
-
-      <SummaryBlock title="Internal Account Summary" icon={<Wallet size={16} className="text-blue-400" />} data={internalSummary} />
-      <SummaryBlock title="Outsider Account Summary" icon={<Users size={16} className="text-amber-400" />} data={outsiderSummary} />
-
-      <AccountsTable
-        title="Internal Account List"
-        icon={<Wallet size={16} className="text-blue-400" />}
-        count={filteredInternal.length}
-        rows={internalCurrentSlice}
-        typeLabel="Managed"
-        typeClass="text-emerald-400"
-        balances={walletBalances}
-        balanceErrors={walletBalanceErrors}
-        balancePending={walletBalancePending}
-        emptyText="No internal accounts found."
-        actionButton={
-          <button
-            onClick={() => setIsAdminModalOpen(true)}
-            className="flex h-9 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm text-white hover:bg-slate-700"
-          >
-            <Shield size={14} className="text-amber-500" /> Admin
-          </button>
-        }
-      >
-        <Pagination currentPage={internalPage} totalItems={filteredInternal.length} itemsPerPage={ITEMS_PER_PAGE} onPageChange={setInternalPage} />
-      </AccountsTable>
-
-      <AccountsTable
-        title="Outsider Account List"
-        icon={<Users size={16} className="text-amber-400" />}
-        count={filteredOutsider.length}
-        rows={outsiderCurrentSlice}
-        typeLabel="Watch"
-        typeClass="text-amber-400"
-        balances={walletBalances}
-        balanceErrors={walletBalanceErrors}
-        balancePending={walletBalancePending}
-        emptyText="No outsider accounts found."
-        actionButton={
-          <button
-            onClick={() => void refreshWalletBalances()}
-            className="flex h-9 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm text-white hover:bg-slate-700"
-          >
-            <RefreshCw size={14} /> Refresh Balances
-          </button>
-        }
-      >
-        <Pagination currentPage={outsiderPage} totalItems={filteredOutsider.length} itemsPerPage={ITEMS_PER_PAGE} onPageChange={setOutsiderPage} />
-      </AccountsTable>
-    </div>
+    <AccountsPage
+      dateRange={dateRange}
+      setDateRange={setDateRange}
+      hasDateRange={hasDateRange}
+      accountSearchTerm={accountSearchTerm}
+      onAccountSearchTermChange={(value) => {
+        setAccountSearchTerm(value);
+        setInternalPage(1);
+        setOutsiderPage(1);
+      }}
+      internalSummary={internalSummary}
+      outsiderSummary={outsiderSummary}
+      filteredInternal={filteredInternal}
+      filteredOutsider={filteredOutsider}
+      internalCurrentSlice={internalCurrentSlice}
+      outsiderCurrentSlice={outsiderCurrentSlice}
+      walletBalances={walletBalances}
+      walletBalanceErrors={walletBalanceErrors}
+      walletBalancePending={walletBalancePending}
+      internalPage={internalPage}
+      outsiderPage={outsiderPage}
+      onInternalPageChange={setInternalPage}
+      onOutsiderPageChange={setOutsiderPage}
+      onOpenAdmin={() => setIsAdminModalOpen(true)}
+      onRefreshBalances={() => void refreshWalletBalances()}
+      itemsPerPage={ITEMS_PER_PAGE}
+    />
   );
 
   const renderSetup = () => (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-      <div className="h-fit space-y-5 rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-sm">
-        <h3 className="flex items-center gap-2 border-b border-slate-800 pb-4 text-lg font-semibold">
-          <Settings size={18} /> Trading Parameters
-        </h3>
-
-        <div className="space-y-4">
-          <p className="rounded-md border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs leading-relaxed text-slate-400">
-            Add a token below, then use the token registry to switch the active trading contract.
-            Updating the active trading token never deletes historical transaction records.
-          </p>
-
-          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-            <div>
-              <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
-                Add Trading Token
-              </label>
-              <p className="text-xs text-slate-500">
-                Add tracked tokens explicitly with separate network and contract address fields.
-              </p>
-            </div>
-
-            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[150px_minmax(0,1fr)_auto]">
-              <select
-                value={tradableTokenForm.network}
-                onChange={(event) =>
-                  setTradableTokenForm((current) => ({
-                    ...current,
-                    network: event.target.value,
-                  }))
-                }
-                className="h-10 rounded-md border border-slate-700 bg-slate-950 px-3 text-sm outline-none focus:border-blue-500"
-              >
-                <option value="solana">Solana</option>
-              </select>
-              <input
-                type="text"
-                value={tradableTokenForm.contractAddress}
-                onChange={(event) =>
-                  setTradableTokenForm((current) => ({
-                    ...current,
-                    contractAddress: event.target.value,
-                  }))
-                }
-                placeholder="Token contract address"
-                className="h-10 rounded-md border border-slate-700 bg-slate-950 px-3 font-mono text-sm outline-none focus:border-blue-500"
-              />
-              <button
-                onClick={handleAddTrackedToken}
-                disabled={submitting === 'token'}
-                className="flex h-10 items-center justify-center gap-2 rounded-md bg-emerald-600 px-4 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
-              >
-                <Plus size={14} /> Add Token
-              </button>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
-                  Tracked Token Registry
-                </label>
-                <p className="text-xs text-slate-500">
-                  Activating a tracked token saves it immediately and starts loading market data. Save Configuration only applies to strategy settings.
-                </p>
-              </div>
-              <span className="rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-400">
-                {engineState.tradableTokens.length} tracked
-              </span>
-            </div>
-
-            <div className="mt-3 space-y-2">
-              {engineState.tradableTokens.length > 0 ? (
-                engineState.tradableTokens.map((token) => (
-                  <div key={token.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-semibold text-slate-200">
-                          {token.symbol ?? token.name ?? 'Tracked Token'}
-                        </span>
-                        <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] uppercase tracking-wider text-slate-400">
-                          {token.network}
-                        </span>
-                        {settings.contractAddress === token.contractAddress ? (
-                          <span className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-blue-300">
-                            active
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="truncate font-mono text-[11px] text-slate-500">
-                        {token.contractAddress}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => void handleUseToken(token.contractAddress)}
-                      disabled={submitting === 'use-token' || settings.contractAddress === token.contractAddress}
-                      className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-60"
-                    >
-                      {settings.contractAddress === token.contractAddress
-                        ? 'Active'
-                        : submitting === 'use-token'
-                          ? 'Activating...'
-                          : 'Use'}
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <div className="rounded-md border border-dashed border-slate-700 px-3 py-3 text-xs text-slate-500">
-                  Add your first tracked token to save it as the active token automatically.
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
-                  Solana RPC Network
-                </label>
-                <p className="text-xs text-slate-500">
-                  Solana requests try these custom endpoints first, then fall back to the worker environment and default mainnet RPC.
-                </p>
-              </div>
-              <span className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-blue-300">
-                {engineState.rpcEndpoints.length} custom RPC(s)
-              </span>
-            </div>
-
-            <div className="mt-3 flex gap-2">
-              <input
-                type="text"
-                value={rpcEndpointForm.url}
-                onChange={(event) => setRpcEndpointForm({ url: event.target.value })}
-                placeholder="https://solana-mainnet.rpc.example"
-                className="h-10 flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 font-mono text-sm outline-none focus:border-blue-500"
-              />
-              <button
-                onClick={handleAddRpcEndpoint}
-                disabled={submitting === 'rpc'}
-                className="flex h-10 items-center gap-2 rounded-md bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
-              >
-                <Plus size={14} /> Add RPC
-              </button>
-            </div>
-
-            <div className="mt-3 space-y-2">
-              {engineState.rpcEndpoints.length > 0 ? (
-                engineState.rpcEndpoints.map((endpoint) => (
-                  <div key={endpoint.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                        {endpoint.network}
-                      </div>
-                      <div className="truncate font-mono text-[11px] text-slate-500">{endpoint.url}</div>
-                    </div>
-                    <button
-                      onClick={() => void handleDeleteRpcEndpoint(endpoint.id)}
-                      disabled={submitting === `rpc-delete-${endpoint.id}`}
-                      className="rounded-md border border-rose-500/20 bg-rose-500/10 p-2 text-rose-400 hover:bg-rose-500/20 disabled:opacity-60"
-                      title="Remove RPC endpoint"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <div className="rounded-md border border-dashed border-slate-700 px-3 py-3 text-xs text-slate-500">
-                  No custom RPC endpoints yet. The worker will fall back to the environment/default mainnet RPC endpoint.
-                </div>
-              )}
-            </div>
-          </div>
-
-          <SettingInput
-            label="Time Range Target"
-            sublabel="Target Pre-Condition"
-            value={settings.timeRangeTarget}
-            onChange={(value) => updateStrategySettings((current) => ({ ...current, timeRangeTarget: value }))}
-            options={[
-              { label: '1 Hour', value: '1h' },
-              { label: '6 Hours', value: '6h' },
-              { label: '12 Hours', value: '12h' },
-              { label: '24 Hours', value: '24h' },
-              { label: '3 Days', value: '3d' },
-              { label: '1 Week', value: '1w' },
-            ]}
-          />
-
-          <div className="grid grid-cols-2 gap-4">
-            <SettingInput label="Max Transactions" sublabel="Time Range Limit" value={settings.maxTransactions} onChange={(value) => updateStrategySettings((current) => ({ ...current, maxTransactions: Number(value) }))} />
-            <SettingInput label="Max Slippage" sublabel="Min 0.0001" value={settings.maxSlippage} onChange={(value) => updateStrategySettings((current) => ({ ...current, maxSlippage: Number(value) }))} />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <SettingInput label="Volume Target (USDC)" value={settings.volumeTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, volumeTarget: Number(value) }))} />
-            <SettingInput label="Net Buyin Target" sublabel="Negative = Sell" value={settings.netBuyinTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, netBuyinTarget: Number(value) }))} />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <SettingInput label="Volatility Target (%)" value={settings.volatilityTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, volatilityTarget: Number(value) }))} />
-            <SettingInput label="Outsider Pull Back (%)" value={settings.pullbackTarget} onChange={(value) => updateStrategySettings((current) => ({ ...current, pullbackTarget: Number(value) }))} />
-          </div>
-
-          <div>
-            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
-              Strategy Notes
-            </label>
-            <textarea
-              value={settings.strategyNotes}
-              onChange={(event) => updateStrategySettings((current) => ({ ...current, strategyNotes: event.target.value }))}
-              className="min-h-28 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-blue-500"
-            />
-          </div>
-        </div>
-
-        <div className="mt-4 flex flex-col gap-3">
-          <button
-            onClick={handleSaveConfig}
-            disabled={submitting === 'settings'}
-            className="h-11 w-full cursor-pointer rounded-md border border-blue-500 bg-blue-600 font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60"
-          >
-            {submitting === 'settings' ? 'Saving...' : 'Save Strategy Configuration'}
-          </button>
-        </div>
-      </div>
-
-      <div className="flex min-h-[500px] flex-col rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-sm">
-        <h3 className="flex items-center gap-2 border-b border-slate-800 pb-4 text-lg font-semibold">
-          <Code size={18} /> Trading Algorithm (Cloudflare + Helius)
-        </h3>
-        <textarea
-          className="mt-4 flex-1 resize-none rounded-md border border-slate-700 bg-slate-950 p-4 font-mono text-[13px] leading-relaxed text-emerald-400 outline-none focus:border-blue-500"
-          value={tradingAlgorithm}
-          onChange={(event) => setTradingAlgorithm(event.target.value)}
-          placeholder="// Write your trading algorithm logic here"
-        ></textarea>
-        <div className="mt-4 flex gap-3 border-t border-slate-800 pt-4">
-          <button
-            onClick={() => {
-              saveStoredString('tradeengine.tradingAlgorithm', tradingAlgorithm);
-              setNotice('Algorithm draft saved locally in the browser.');
-            }}
-            className="h-10 flex-1 cursor-pointer rounded-md bg-emerald-600 font-medium text-white shadow-sm hover:bg-emerald-700"
-          >
-            Update
-          </button>
-          <button
-            onClick={() => setIsSimulationModalOpen(true)}
-            className="h-10 flex-1 cursor-pointer rounded-md border border-slate-700 bg-slate-800 font-medium text-white shadow-sm hover:bg-slate-700"
-          >
-            Simulation Summary
-          </button>
-        </div>
-      </div>
-    </div>
+    <TradingSetupPage
+      engineState={engineState}
+      settings={settings}
+      tradableTokenForm={tradableTokenForm}
+      setTradableTokenForm={setTradableTokenForm}
+      rpcEndpointForm={rpcEndpointForm}
+      setRpcEndpointForm={setRpcEndpointForm}
+      submitting={submitting}
+      handleAddTrackedToken={handleAddTrackedToken}
+      handleUseToken={handleUseToken}
+      handleAddRpcEndpoint={handleAddRpcEndpoint}
+      handleDeleteRpcEndpoint={handleDeleteRpcEndpoint}
+      updateStrategySettings={updateStrategySettings}
+      handleSaveConfig={handleSaveConfig}
+      tradingAlgorithm={tradingAlgorithm}
+      setTradingAlgorithm={setTradingAlgorithm}
+      onPersistAlgorithm={() => {
+        saveStoredString('tradeengine.tradingAlgorithm', tradingAlgorithm);
+        setNotice('Algorithm draft saved locally in the browser.');
+      }}
+      onOpenSimulation={() => setIsSimulationModalOpen(true)}
+    />
   );
 
-  const renderSetups = () => {
-    const setups = engineState.historicalSetups;
-
-    if (setups.length === 0) {
-      return (
-        <div className="flex flex-col items-center rounded-xl border border-slate-800 bg-slate-900 p-10 text-center text-slate-500 shadow-sm">
-          <Archive size={40} className="mb-4 opacity-50" />
-          <p className="text-lg font-medium text-slate-400">No Historical Setups Found</p>
-          <p className="mx-auto mt-2 max-w-[400px] text-sm">
-            Save a configuration from the Trading Setup tab to start tracking historical changes.
-          </p>
-        </div>
-      );
-    }
-
-    return (
-      <div className="flex flex-col gap-4 space-y-6">
-        {setups.map((setup, index) => {
-          const setupLogs = getLogsForSetup(setups, engineState.activityLogs, index);
-          return (
-            <div key={setup.id} className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
-              <div className="flex items-center justify-between border-b border-slate-800 bg-slate-800/50 p-4">
-                <div>
-                  <h3 className="flex items-center gap-2 text-lg font-semibold text-slate-200">
-                    <Archive size={16} className="text-emerald-500" />
-                    Configuration Setup {index === 0 ? '(Active)' : `(${setups.length - index})`}
-                  </h3>
-                  <p className="mt-1 text-xs text-slate-500">Deployed {formatDate(setup.createdAt)}</p>
-                </div>
-                <div className="text-right">
-                  <span className="block text-sm font-medium text-slate-300">{setupLogs.length} Events</span>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4 border-b border-slate-800 bg-slate-900/50 p-5 text-sm md:grid-cols-4">
-                <SetupData label="Time Range Condition" value={setup.timeRangeTarget} />
-                <SetupData label="Volume Target" value={`${setup.volumeTarget} USDC`} />
-                <SetupData label="Net Buyin" value={`${setup.netBuyinTarget} USDC`} />
-                <SetupData label="Volatility" value={`${setup.volatilityTarget}%`} />
-                <SetupData label="Pullback" value={`${setup.pullbackTarget}%`} />
-                <SetupData label="Max Transactions" value={String(setup.maxTransactions)} />
-                <SetupData label="Max Slippage" value={`${setup.maxSlippage}%`} />
-                <SetupData label="Contract" value={setup.contractAddress ? compactAddress(setup.contractAddress) : 'Global'} />
-              </div>
-
-              <div className="p-0">
-                {setupLogs.length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <table className="w-full border-collapse text-left text-sm">
-                      <thead>
-                        <tr className="h-10 border-b border-slate-800 bg-slate-900 text-xs font-semibold uppercase text-slate-400">
-                          <th className="px-4 font-medium" style={{ width: '20%' }}>Time</th>
-                          <th className="px-4 font-medium" style={{ width: '20%' }}>Action</th>
-                          <th className="px-4 font-medium" style={{ width: '60%' }}>Details</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-800">
-                        {setupLogs.map((log) => (
-                          <tr key={log.id} className="transition-colors hover:bg-slate-800/50">
-                            <td className="px-4 py-2 font-mono text-xs text-slate-400">{formatDate(log.createdAt)}</td>
-                            <td className="px-4 py-2">
-                              <span className="rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">{log.action}</span>
-                            </td>
-                            <td className="px-4 py-2 text-xs text-slate-300">{log.target} - {log.details}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="p-6 text-center text-sm text-slate-500">
-                    No audit events fall inside this configuration window yet.
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
+  const renderSetups = () => (
+    <HistoricalSetupsPage
+      setups={engineState.historicalSetups}
+      activityLogs={engineState.activityLogs}
+    />
+  );
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-950 p-4 font-sans text-slate-200 md:p-6">
-      <div className="mb-6 flex flex-col items-start justify-between gap-4 md:flex-row md:items-center">
-        <div>
-          <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-white">
-            <Activity className="text-blue-500" /> WLT Execution Engine
-          </h1>
-          <p className="mt-1.5 flex items-center gap-2 text-sm text-slate-400">
-            <span className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 font-mono text-blue-400">
-              {settings.contractAddress || CONTRACT_ADDRESS || 'Not Configured'}
-            </span>
-            <span className="text-slate-700">|</span>
-            <Clock size={14} /> Time Updated: {lastUpdated}
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={handleStartTrading}
-            className="flex h-10 cursor-pointer items-center gap-2 rounded-md bg-emerald-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-emerald-700"
-          >
-            <Activity size={16} /> Start Trading
-          </button>
-          <button
-            onClick={() => setIsAdminModalOpen(true)}
-            className="flex h-10 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm font-medium text-white shadow-sm hover:bg-slate-700"
-          >
-            <Shield size={16} className="text-amber-500" /> Admin
-          </button>
-          <button
-            onClick={handleRefresh}
-            className="flex h-10 cursor-pointer items-center gap-2 rounded-md bg-blue-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-blue-700"
-          >
-            <RefreshCw size={16} /> Refresh
-          </button>
-          <button
-            onClick={handleLogout}
-            className="flex h-10 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm font-medium text-white shadow-sm hover:bg-slate-700"
-          >
-            <Lock size={16} /> Logout
-          </button>
-        </div>
-      </div>
+      <AppHeader
+        contractAddress={settings.contractAddress || CONTRACT_ADDRESS}
+        lastUpdated={lastUpdated}
+        isTradingActive={isTradingActive}
+        onToggleTrading={handleStartTrading}
+        onOpenAdmin={() => setIsAdminModalOpen(true)}
+        onRefresh={handleRefresh}
+        onLogout={handleLogout}
+      />
 
       {error || notice ? (
         <div className={`mb-6 rounded-xl border p-4 text-sm ${error ? 'border-rose-900 bg-rose-950/50 text-rose-200' : 'border-emerald-900 bg-emerald-950/50 text-emerald-200'}`}>
@@ -2381,12 +1980,7 @@ export default function App() {
         </div>
       ) : null}
 
-      <div className="mb-6 inline-flex h-10 items-center justify-center self-start rounded-md border border-slate-800 bg-slate-900 p-1 text-slate-400 shadow-sm">
-        <TabButton active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} icon={<Activity size={16} />} label="Dashboard" />
-        <TabButton active={activeTab === 'accounts'} onClick={() => setActiveTab('accounts')} icon={<Users size={16} />} label="Accounts" />
-        <TabButton active={activeTab === 'setup'} onClick={() => setActiveTab('setup')} icon={<Settings size={16} />} label="Trading Setup" />
-        <TabButton active={activeTab === 'setups'} onClick={() => setActiveTab('setups')} icon={<Archive size={16} />} label="Historical Setups" />
-      </div>
+      <PageTabs activeTab={activeTab} onTabChange={setActiveTab} />
 
       <div className="flex-1">
         {activeTab === 'dashboard' && renderDashboard()}

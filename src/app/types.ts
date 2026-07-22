@@ -1,0 +1,182 @@
+export type TabId = 'dashboard' | 'accounts' | 'setup' | 'setups';
+
+export type AuthStatus = {
+  setupRequired: boolean;
+  authenticated: boolean;
+  user?: { username: string; role: string } | null;
+};
+
+export type SettingsState = {
+  contractAddress: string;
+  volatilityTarget: number;
+  pullbackTarget: number;
+  volumeTarget: number;
+  netBuyinTarget: number;
+  timeRangeTarget: string;
+  maxTransactions: number;
+  maxSlippage: number;
+  strategyNotes: string;
+  managedKeyCount: number;
+};
+
+export type AccountRecord = {
+  id: number;
+  label: string;
+  address: string;
+  type: string;
+  createdAt: number;
+};
+
+export type AuditLog = {
+  id: number;
+  action: string;
+  target: string;
+  details: string;
+  actor: string;
+  createdAt: number;
+};
+
+export type TradeLog = {
+  id: number;
+  tokenId: number;
+  tokenContractAddress: string | null;
+  tokenSymbol: string | null;
+  walletAddress: string;
+  action: 'BUY' | 'SELL';
+  requestedAmount: number;
+  executedAmount: number | null;
+  executedPrice: number | null;
+  txSignature: string | null;
+  status: 'PENDING' | 'SUCCESS' | 'FAILED';
+  errorMessage: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type WebhookTransactionLog = {
+  id: number;
+  tokenContractAddress: string | null;
+  tokenSymbol: string | null;
+  walletAddress: string | null;
+  eventType: string;
+  txSignature: string | null;
+  status: 'PENDING' | 'SUCCESS' | 'FAILED';
+  errorMessage: string | null;
+  createdAt: number;
+};
+
+export type RpcEndpoint = {
+  id: number;
+  network: string;
+  url: string;
+  createdAt: number;
+};
+
+export type TokenMarketSnapshot = {
+  network: string;
+  contractAddress: string;
+  tokenName: string | null;
+  tokenSymbol: string | null;
+  priceUsd: number | null;
+  liquidityUsd: number | null;
+  fdv: number | null;
+  volume24h: number | null;
+  totalTransactions24h: number | null;
+  outsidersOverOneUsd: number | null;
+  dexId: string | null;
+  pairAddress: string | null;
+  fetchedAt: number;
+};
+
+export type TradableToken = {
+  id: number;
+  network: string;
+  contractAddress: string;
+  symbol: string | null;
+  name: string | null;
+  decimals: number | null;
+  isActive: boolean;
+};
+
+export type HistoricalSetup = {
+  id: number;
+  tokenSymbol: string | null;
+  contractAddress: string | null;
+  timeRangeTarget: string;
+  maxTransactions: number;
+  maxSlippage: number;
+  volumeTarget: number;
+  netBuyinTarget: number;
+  volatilityTarget: number;
+  pullbackTarget: number;
+  createdAt: number;
+};
+
+export type WalletBalanceToken = {
+  mint: string;
+  symbol: string;
+  network: string;
+  amount: string;
+  decimals: number | null;
+};
+
+export type WalletBalance = {
+  address: string;
+  sol: string;
+  usdc: string;
+  tokens: WalletBalanceToken[];
+  updatedAt: number;
+};
+
+export type EngineState = {
+  auth: { username: string; role: string };
+  settings: SettingsState;
+  internalAccs: AccountRecord[];
+  outsiderAccs: AccountRecord[];
+  activityLogs: AuditLog[];
+  tradeLogs: TradeLog[];
+  webhookTransactionLogs: WebhookTransactionLog[];
+  tradableTokens: TradableToken[];
+  historicalSetups: HistoricalSetup[];
+  rpcEndpoints: RpcEndpoint[];
+  marketSnapshot: TokenMarketSnapshot | null;
+  marketSnapshotHistory: TokenMarketSnapshot[];
+  profitUsdc: number;
+  stats: {
+    managedAccounts: number;
+    watchedAccounts: number;
+    tradeExecutionEnabled: boolean;
+  };
+  system: {
+    backend: string;
+    databasePath: string;
+    databaseConnected: boolean;
+  };
+};
+
+export type DateRangeState = {
+  from: string;
+  to: string;
+};
+
+export type AccountSummary = {
+  total: number;
+  activeAssets: number;
+  totalSol: number;
+  totalUsdc: number;
+  trackedWallets: number;
+  trackedTokenLines: number;
+};
+
+export type DashboardLogTab = 'transaction' | 'activity';
+
+export type DashboardTransactionLog =
+  | ({ kind: 'trade' } & TradeLog)
+  | ({ kind: 'webhook' } & WebhookTransactionLog);
+
+export type WalletOwnership = 'internal' | 'external' | 'system' | 'untracked';
+
+export type WalletOwnershipMeta = {
+  ownership: WalletOwnership;
+  accountLabel: string | null;
+};
