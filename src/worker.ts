@@ -15,6 +15,29 @@ import {
   type JupiterQuoteResponse,
   type JupiterTokenMetadata,
 } from './backend/jupiter';
+import {
+  DEFAULT_STRATEGY_TYPE,
+  PRIMARY_STRATEGY_NAME,
+} from './backend/strategy/config';
+import { normalizeStrategyDocument } from './backend/strategy/migrations';
+import {
+  buildStrategyDocumentFromSettings,
+  runStrategyRuntime,
+  summarizeStrategyRuntime,
+} from './backend/strategy/runtime';
+import {
+  buildManualRefreshStrategyTrigger,
+  buildWebhookStrategyTrigger,
+} from './backend/strategy/triggers';
+import type {
+  StrategyDefinitionRecord,
+  StrategyMarketSnapshot,
+  StrategyRuntimeResult,
+  StrategySettingsInput,
+  StrategyTriggerEvent,
+  StrategyVersionDocument,
+  StrategyVersionRecord,
+} from './backend/strategy/types';
 import { nowMs, nowTs, normalizeTimestampMs } from './backend/time';
 
 // ─── environment bindings ────────────────────────────────────────────────────
@@ -1008,6 +1031,57 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY(token_id) REFERENCES tradable_tokens(id)
   )`,
+  `CREATE TABLE IF NOT EXISTS strategy_definitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    strategy_type TEXT NOT NULL,
+    current_version_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(user_id, strategy_type),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS strategy_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id INTEGER NOT NULL,
+    version_no INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL,
+    engine_version TEXT NOT NULL,
+    strategy_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    params_json TEXT NOT NULL,
+    triggers_json TEXT NOT NULL,
+    targets_json TEXT NOT NULL,
+    risk_json TEXT NOT NULL,
+    execution_json TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    change_note TEXT,
+    created_at INTEGER NOT NULL,
+    activated_at INTEGER,
+    UNIQUE(strategy_id, version_no),
+    FOREIGN KEY(strategy_id) REFERENCES strategy_definitions(id) ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS strategy_evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    strategy_version_id INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    external_id TEXT,
+    contract_address TEXT NOT NULL,
+    wallet_address TEXT,
+    tx_signature TEXT,
+    status TEXT NOT NULL,
+    should_execute INTEGER NOT NULL DEFAULT 0,
+    dry_run INTEGER NOT NULL DEFAULT 1,
+    summary_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(strategy_version_id) REFERENCES strategy_versions(id) ON DELETE CASCADE
+  )`,
   `CREATE TABLE IF NOT EXISTS rpc_endpoints (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -1024,6 +1098,10 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_contract_fetched ON token_market_snapshots(network, contract_address, fetched_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_token_created ON trade_logs(token_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_wallet_created ON trade_logs(wallet_address, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_strategy_definitions_user_type ON strategy_definitions(user_id, strategy_type)',
+  'CREATE INDEX IF NOT EXISTS idx_strategy_versions_strategy_created ON strategy_versions(strategy_id, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_version_created ON strategy_evaluations(strategy_version_id, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_user_created ON strategy_evaluations(user_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_user_network_created ON rpc_endpoints(user_id, network, created_at DESC)',
 ];
 
@@ -2572,6 +2650,453 @@ async function dbListHistoricalSetups(
   }));
 }
 
+function mapTokenMarketSnapshotToStrategySnapshot(
+  snapshot: TokenMarketSnapshot | null,
+): StrategyMarketSnapshot | null {
+  if (!snapshot) {
+    return null;
+  }
+  return {
+    contractAddress: snapshot.contractAddress,
+    priceUsd: snapshot.priceUsd,
+    liquidityUsd: snapshot.liquidityUsd,
+    fdv: snapshot.fdv,
+    volume24h: snapshot.volume24h,
+    totalTransactions24h: snapshot.totalTransactions24h,
+    outsidersOverOneUsd: snapshot.outsidersOverOneUsd,
+    fetchedAt: snapshot.fetchedAt,
+  };
+}
+
+function mapStrategyDefinitionRow(row: {
+  id: number;
+  user_id: number;
+  name: string;
+  strategy_type: string;
+  current_version_id: number | null;
+  status: string;
+  created_at: number;
+  updated_at: number;
+}): StrategyDefinitionRecord {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    name: row.name,
+    strategyType: row.strategy_type as StrategyDefinitionRecord['strategyType'],
+    currentVersionId: row.current_version_id,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapStrategyVersionRow(row: {
+  id: number;
+  strategy_id: number;
+  version_no: number;
+  schema_version: number;
+  engine_version: string;
+  strategy_type: string;
+  status: string;
+  params_json: string;
+  triggers_json: string;
+  targets_json: string;
+  risk_json: string;
+  execution_json: string;
+  metadata_json: string;
+  checksum: string;
+  change_note: string | null;
+  created_at: number;
+  activated_at: number | null;
+}): StrategyVersionRecord {
+  const document: StrategyVersionDocument = normalizeStrategyDocument({
+    schemaVersion: row.schema_version,
+    engineVersion: row.engine_version,
+    strategyType: row.strategy_type,
+    parameters: parseJsonText(row.params_json),
+    triggers: parseJsonText(row.triggers_json),
+    targets: parseJsonText(row.targets_json),
+    riskControls: parseJsonText(row.risk_json),
+    execution: parseJsonText(row.execution_json),
+    metadata: parseJsonText(row.metadata_json),
+  });
+
+  return {
+    id: row.id,
+    strategyId: row.strategy_id,
+    versionNo: row.version_no,
+    schemaVersion: row.schema_version,
+    engineVersion: row.engine_version,
+    strategyType: row.strategy_type as StrategyVersionRecord['strategyType'],
+    status: row.status as StrategyVersionRecord['status'],
+    checksum: row.checksum,
+    changeNote: row.change_note,
+    createdAt: row.created_at,
+    activatedAt: row.activated_at,
+    document,
+  };
+}
+
+async function dbGetOrCreatePrimaryStrategyDefinition(
+  db: D1Database,
+  userId: number,
+): Promise<StrategyDefinitionRecord> {
+  await dbEnsureTradeDomainSchema(db);
+  const existing = await db
+    .prepare(
+      `SELECT
+         id,
+         user_id,
+         name,
+         strategy_type,
+         current_version_id,
+         status,
+         created_at,
+         updated_at
+       FROM strategy_definitions
+       WHERE user_id = ?1 AND strategy_type = ?2
+       LIMIT 1`,
+    )
+    .bind(userId, DEFAULT_STRATEGY_TYPE)
+    .first<{
+      id: number;
+      user_id: number;
+      name: string;
+      strategy_type: string;
+      current_version_id: number | null;
+      status: string;
+      created_at: number;
+      updated_at: number;
+    }>();
+  if (existing) {
+    return mapStrategyDefinitionRow(existing);
+  }
+
+  const createdAt = nowTs();
+  await db
+    .prepare(
+      `INSERT INTO strategy_definitions (
+         user_id,
+         name,
+         strategy_type,
+         current_version_id,
+         status,
+         created_at,
+         updated_at
+       ) VALUES (?1, ?2, ?3, NULL, 'active', ?4, ?4)`,
+    )
+    .bind(userId, PRIMARY_STRATEGY_NAME, DEFAULT_STRATEGY_TYPE, createdAt)
+    .run();
+
+  const created = await db
+    .prepare(
+      `SELECT
+         id,
+         user_id,
+         name,
+         strategy_type,
+         current_version_id,
+         status,
+         created_at,
+         updated_at
+       FROM strategy_definitions
+       WHERE user_id = ?1 AND strategy_type = ?2
+       LIMIT 1`,
+    )
+    .bind(userId, DEFAULT_STRATEGY_TYPE)
+    .first<{
+      id: number;
+      user_id: number;
+      name: string;
+      strategy_type: string;
+      current_version_id: number | null;
+      status: string;
+      created_at: number;
+      updated_at: number;
+    }>();
+  if (!created) {
+    throw new ApiError(500, 'Failed to create primary strategy definition');
+  }
+  return mapStrategyDefinitionRow(created);
+}
+
+async function dbGetStrategyVersionById(
+  db: D1Database,
+  versionId: number,
+): Promise<StrategyVersionRecord | null> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT
+         id,
+         strategy_id,
+         version_no,
+         schema_version,
+         engine_version,
+         strategy_type,
+         status,
+         params_json,
+         triggers_json,
+         targets_json,
+         risk_json,
+         execution_json,
+         metadata_json,
+         checksum,
+         change_note,
+         created_at,
+         activated_at
+       FROM strategy_versions
+       WHERE id = ?1
+       LIMIT 1`,
+    )
+    .bind(versionId)
+    .first<{
+      id: number;
+      strategy_id: number;
+      version_no: number;
+      schema_version: number;
+      engine_version: string;
+      strategy_type: string;
+      status: string;
+      params_json: string;
+      triggers_json: string;
+      targets_json: string;
+      risk_json: string;
+      execution_json: string;
+      metadata_json: string;
+      checksum: string;
+      change_note: string | null;
+      created_at: number;
+      activated_at: number | null;
+    }>();
+  return row ? mapStrategyVersionRow(row) : null;
+}
+
+async function dbGetActiveStrategyVersion(
+  db: D1Database,
+  userId: number,
+): Promise<StrategyVersionRecord | null> {
+  const definition = await dbGetOrCreatePrimaryStrategyDefinition(db, userId);
+  if (definition.currentVersionId == null) {
+    return null;
+  }
+  return dbGetStrategyVersionById(db, definition.currentVersionId);
+}
+
+async function dbSyncActiveStrategyVersionFromSettings(
+  db: D1Database,
+  userId: number,
+  settings: StrategySettingsInput,
+  options?: {
+    author?: string | null;
+    changeNote?: string;
+    origin?: 'settings-sync' | 'manual' | 'migration';
+  },
+): Promise<{ version: StrategyVersionRecord; created: boolean }> {
+  await dbEnsureTradeDomainSchema(db);
+  const definition = await dbGetOrCreatePrimaryStrategyDefinition(db, userId);
+  const document = buildStrategyDocumentFromSettings(settings, {
+    author: options?.author ?? null,
+    changeNote: options?.changeNote,
+    origin: options?.origin,
+  });
+  const checksum = await sha256Hex(JSON.stringify(document));
+  const currentVersion = definition.currentVersionId
+    ? await dbGetStrategyVersionById(db, definition.currentVersionId)
+    : null;
+
+  if (currentVersion && currentVersion.checksum === checksum) {
+    return { version: currentVersion, created: false };
+  }
+
+  const nextVersionNo =
+    ((await db
+      .prepare(
+        'SELECT MAX(version_no) AS max_version_no FROM strategy_versions WHERE strategy_id = ?1',
+      )
+      .bind(definition.id)
+      .first<{ max_version_no: number | null }>())?.max_version_no ?? 0) + 1;
+  const createdAt = nowTs();
+
+  await db
+    .prepare(
+      `INSERT INTO strategy_versions (
+         strategy_id,
+         version_no,
+         schema_version,
+         engine_version,
+         strategy_type,
+         status,
+         params_json,
+         triggers_json,
+         targets_json,
+         risk_json,
+         execution_json,
+         metadata_json,
+         checksum,
+         change_note,
+         created_at,
+         activated_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)`,
+    )
+    .bind(
+      definition.id,
+      nextVersionNo,
+      document.schemaVersion,
+      document.engineVersion,
+      document.strategyType,
+      JSON.stringify(document.parameters),
+      JSON.stringify(document.triggers),
+      JSON.stringify(document.targets),
+      JSON.stringify(document.riskControls),
+      JSON.stringify(document.execution),
+      JSON.stringify(document.metadata),
+      checksum,
+      options?.changeNote ?? document.metadata.changeNote,
+      createdAt,
+    )
+    .run();
+
+  const inserted = await db
+    .prepare(
+      `SELECT
+         id,
+         strategy_id,
+         version_no,
+         schema_version,
+         engine_version,
+         strategy_type,
+         status,
+         params_json,
+         triggers_json,
+         targets_json,
+         risk_json,
+         execution_json,
+         metadata_json,
+         checksum,
+         change_note,
+         created_at,
+         activated_at
+       FROM strategy_versions
+       WHERE strategy_id = ?1 AND version_no = ?2
+       LIMIT 1`,
+    )
+    .bind(definition.id, nextVersionNo)
+    .first<{
+      id: number;
+      strategy_id: number;
+      version_no: number;
+      schema_version: number;
+      engine_version: string;
+      strategy_type: string;
+      status: string;
+      params_json: string;
+      triggers_json: string;
+      targets_json: string;
+      risk_json: string;
+      execution_json: string;
+      metadata_json: string;
+      checksum: string;
+      change_note: string | null;
+      created_at: number;
+      activated_at: number | null;
+    }>();
+  if (!inserted) {
+    throw new ApiError(500, 'Failed to load inserted strategy version');
+  }
+
+  if (currentVersion) {
+    await db
+      .prepare("UPDATE strategy_versions SET status = 'published' WHERE id = ?1")
+      .bind(currentVersion.id)
+      .run();
+  }
+
+  await db
+    .prepare(
+      'UPDATE strategy_definitions SET current_version_id = ?2, updated_at = ?3 WHERE id = ?1',
+    )
+    .bind(definition.id, inserted.id, createdAt)
+    .run();
+
+  return {
+    version: mapStrategyVersionRow(inserted),
+    created: true,
+  };
+}
+
+async function dbCreateStrategyEvaluation(
+  db: D1Database,
+  userId: number,
+  strategyVersionId: number,
+  trigger: StrategyTriggerEvent,
+  runtime: StrategyRuntimeResult,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  const createdAt = nowTs();
+  await db
+    .prepare(
+      `INSERT INTO strategy_evaluations (
+         user_id,
+         strategy_version_id,
+         source,
+         event_type,
+         external_id,
+         contract_address,
+         wallet_address,
+         tx_signature,
+         status,
+         should_execute,
+         dry_run,
+         summary_json,
+         created_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
+    )
+    .bind(
+      userId,
+      strategyVersionId,
+      trigger.source,
+      trigger.eventType,
+      trigger.externalId,
+      trigger.contractAddress,
+      trigger.walletAddress,
+      trigger.txSignature,
+      runtime.evaluation.status,
+      runtime.evaluation.shouldExecute ? 1 : 0,
+      runtime.evaluation.dryRun ? 1 : 0,
+      JSON.stringify(runtime.summary),
+      createdAt,
+    )
+    .run();
+}
+
+async function runAndPersistStrategyEvaluation(
+  db: D1Database,
+  userId: number,
+  settings: StrategySettingsInput,
+  trigger: StrategyTriggerEvent,
+  marketSnapshot: TokenMarketSnapshot | null,
+  options?: {
+    author?: string | null;
+    changeNote?: string;
+    origin?: 'settings-sync' | 'manual' | 'migration';
+  },
+): Promise<{ version: StrategyVersionRecord; runtime: StrategyRuntimeResult }> {
+  const { version } = await dbSyncActiveStrategyVersionFromSettings(
+    db,
+    userId,
+    settings,
+    options,
+  );
+  const runtime = runStrategyRuntime({
+    strategyDocument: version.document,
+    trigger,
+    marketSnapshot: mapTokenMarketSnapshotToStrategySnapshot(marketSnapshot),
+  });
+  await dbCreateStrategyEvaluation(db, userId, version.id, trigger, runtime);
+  return { version, runtime };
+}
+
 async function dbUserOwnsAccount(
   db: D1Database,
   userId: number,
@@ -3346,14 +3871,43 @@ async function processTokenActivitySignal(
       );
     }
 
+    let strategySummary: string | null = null;
+    try {
+      const settings = await dbLoadSettings(env.TRADINGBOT_DB, input.userId);
+      const strategyResult = await runAndPersistStrategyEvaluation(
+        env.TRADINGBOT_DB,
+        input.userId,
+        settings,
+        buildWebhookStrategyTrigger({
+          eventType: input.eventType,
+          externalId: input.externalId,
+          contractAddress: normalizedContractAddress,
+          walletAddress: input.walletAddress,
+          txSignature: input.txSignature,
+          payloadJson: input.payload,
+        }),
+        marketSnapshot,
+        {
+          changeNote: `Webhook trigger ${input.eventType}`,
+          origin: 'settings-sync',
+        },
+      );
+      strategySummary = `Strategy v${strategyResult.version.versionNo}: ${summarizeStrategyRuntime(strategyResult.runtime)}`;
+    } catch (err: unknown) {
+      console.warn(
+        `Strategy evaluation failed for webhook ${input.eventType} on ${normalizedContractAddress}:`,
+        err,
+      );
+    }
+
     await dbAddAuditLog(
       env.TRADINGBOT_DB,
       input.userId,
       'strategy.triggered',
       input.txSignature ?? input.externalId,
       marketSnapshot
-        ? `Received an ${input.providerLabel} ${input.eventType} event for ${normalizedContractAddress}. Recorded a fresh market snapshot and triggered strategy evaluation. Automated trade execution remains disabled in this release.`
-        : `Received an ${input.providerLabel} ${input.eventType} event for ${normalizedContractAddress}. Triggered strategy evaluation. Automated trade execution remains disabled in this release.`,
+        ? `Received an ${input.providerLabel} ${input.eventType} event for ${normalizedContractAddress}. Recorded a fresh market snapshot and triggered strategy evaluation. ${strategySummary ?? 'Strategy runtime is not yet actionable for automated execution.'}`
+        : `Received an ${input.providerLabel} ${input.eventType} event for ${normalizedContractAddress}. Triggered strategy evaluation. ${strategySummary ?? 'Strategy runtime is not yet actionable for automated execution.'}`,
     );
     await dbMarkSignalProcessed(
       env.TRADINGBOT_DB,
@@ -3793,12 +4347,24 @@ async function handleSaveSettings(
     user.id,
     updated,
   );
+  const strategySync = await dbSyncActiveStrategyVersionFromSettings(
+    env.TRADINGBOT_DB,
+    user.id,
+    updated,
+    {
+      author: user.username,
+      changeNote: updated.strategyNotes.trim() || 'Trading settings were updated',
+      origin: 'settings-sync',
+    },
+  );
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
     'settings.updated',
     'settings',
-    'Trading settings were updated',
+    strategySync.created
+      ? `Trading settings were updated. Strategy version v${strategySync.version.versionNo} was published and activated.`
+      : `Trading settings were updated. Strategy version v${strategySync.version.versionNo} remains active.`,
   );
 
   if (normalizedContractAddress && rpcUrls) {
@@ -3886,6 +4452,20 @@ async function handleSaveActiveToken(
     }
   }
 
+  const updatedSettings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+  const strategySync = await dbSyncActiveStrategyVersionFromSettings(
+    env.TRADINGBOT_DB,
+    user.id,
+    updatedSettings,
+    {
+      author: user.username,
+      changeNote: normalizedContractAddress
+        ? 'Active trading token changed'
+        : 'Active trading token cleared',
+      origin: 'settings-sync',
+    },
+  );
+
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
@@ -3893,9 +4473,9 @@ async function handleSaveActiveToken(
     normalizedContractAddress || 'none',
     normalizedContractAddress
       ? marketSnapshot
-        ? 'Activated the tracked token and initialized market data.'
-        : 'Activated the tracked token. Live market data will load on the next successful refresh.'
-      : 'Cleared the active tracked token.',
+        ? `Activated the tracked token and initialized market data. Strategy version v${strategySync.version.versionNo} is now active.`
+        : `Activated the tracked token. Live market data will load on the next successful refresh. Strategy version v${strategySync.version.versionNo} is now active.`
+      : `Cleared the active tracked token. Strategy version v${strategySync.version.versionNo} is now active.`,
   );
 
   return jsonResponse({
@@ -4113,15 +4693,48 @@ async function handleForceRefreshMarketSnapshot(
     },
   );
 
+  let strategyEvaluationSummary: string | null = null;
+  let strategyEvaluationPayload: Record<string, unknown> | null = null;
+  try {
+    const strategyResult = await runAndPersistStrategyEvaluation(
+      env.TRADINGBOT_DB,
+      user.id,
+      settings,
+      buildManualRefreshStrategyTrigger({
+        contractAddress,
+        externalId: `manual-refresh:${user.id}:${contractAddress}:${nowMs()}`,
+      }),
+      marketSnapshot,
+      {
+        author: user.username,
+        changeNote: 'Manual market snapshot refresh',
+        origin: 'settings-sync',
+      },
+    );
+    strategyEvaluationSummary = `Strategy v${strategyResult.version.versionNo}: ${summarizeStrategyRuntime(strategyResult.runtime)}`;
+    strategyEvaluationPayload = {
+      versionNo: strategyResult.version.versionNo,
+      status: strategyResult.runtime.evaluation.status,
+      qualified: strategyResult.runtime.evaluation.qualified,
+      shouldExecute: strategyResult.runtime.evaluation.shouldExecute,
+      dryRun: strategyResult.runtime.evaluation.dryRun,
+      reasons: strategyResult.runtime.evaluation.reasons,
+    };
+  } catch (err: unknown) {
+    console.warn(`Strategy evaluation failed after manual refresh for ${contractAddress}:`, err);
+  }
+
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
     'market_snapshot.force_refreshed',
     contractAddress,
-    'Forced a live market snapshot refresh and stored a new historical record.',
+    strategyEvaluationSummary
+      ? `Forced a live market snapshot refresh and stored a new historical record. ${strategyEvaluationSummary}`
+      : 'Forced a live market snapshot refresh and stored a new historical record.',
   );
 
-  return jsonResponse({ marketSnapshot });
+  return jsonResponse({ marketSnapshot, strategyEvaluation: strategyEvaluationPayload });
 }
 
 // POST /api/rpc-endpoints
