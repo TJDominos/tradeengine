@@ -238,59 +238,72 @@ async function fetchSolanaTokenHolderAddresses(
 async function fetchSolanaTokenHolderBalances(
   rpcUrls: string | string[],
   mint: string,
+  decimals: number,
 ): Promise<Map<string, number>> {
+  // One getProgramAccounts call per token program (2 total) with a base64 data
+  // slice for owner (32 bytes) + amount (8 bytes). This is far lighter than the
+  // 512 owner-prefix shard scans and avoids the RPC rate limiting that left the
+  // sharded sync stuck at 0/512.
   const filters = [{ dataSize: 165 }, { memcmp: { offset: 0, bytes: mint } }];
   const programResults = await Promise.allSettled(
     [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID].map((programId) =>
       solanaRpc<
         Array<{
           account: {
-            data: {
-              parsed?: {
-                info?: {
-                  owner?: string;
-                  tokenAmount?: {
-                    uiAmountString?: string;
-                    amount?: string;
-                    decimals?: number;
-                  };
-                };
-              };
-            };
+            data: [string, string] | string;
           };
         }>
       >(rpcUrls, 'getProgramAccounts', [
         programId,
-        { filters, encoding: 'jsonParsed' },
+        {
+          filters,
+          encoding: 'base64',
+          dataSlice: { offset: 32, length: 40 },
+        },
       ]),
     ),
   );
 
   const balances = new Map<string, number>();
+  let successfulQueryCount = 0;
   for (const result of programResults) {
     if (result.status !== 'fulfilled') {
       continue;
     }
-    for (const account of result.value) {
-      const owner = tryNormalizeSolanaPubkey(
-        account.account.data.parsed?.info?.owner,
-      );
-      const tokenAmount = account.account.data.parsed?.info?.tokenAmount;
-      if (!owner || !tokenAmount) {
+    successfulQueryCount += 1;
+    for (const row of result.value) {
+      const data = Array.isArray(row.account.data)
+        ? row.account.data[0]
+        : row.account.data;
+      if (typeof data !== 'string' || data.length === 0) {
         continue;
       }
-      const uiAmount =
-        tokenAmount.uiAmountString != null
-          ? Number.parseFloat(tokenAmount.uiAmountString)
-          : typeof tokenAmount.amount === 'string' && typeof tokenAmount.decimals === 'number'
-            ? Number.parseFloat(tokenAmount.amount) / 10 ** tokenAmount.decimals
-            : null;
-      if (uiAmount == null || !Number.isFinite(uiAmount)) {
+      const bytes = decodeBase64Bytes(data);
+      if (bytes.length < 40) {
         continue;
       }
-      balances.set(owner, (balances.get(owner) ?? 0) + uiAmount);
+      const owner = base58Encode(bytes.slice(0, 32));
+      const rawAmount = readUint64LittleEndian(bytes, 32);
+      if (rawAmount <= 0n) {
+        continue;
+      }
+      const amountHolding = Number(rawAmount) / 10 ** decimals;
+      if (!Number.isFinite(amountHolding) || amountHolding <= 0) {
+        continue;
+      }
+      balances.set(owner, (balances.get(owner) ?? 0) + amountHolding);
     }
   }
+
+  if (successfulQueryCount === 0) {
+    const rejectedResult = programResults.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    throw rejectedResult?.reason instanceof Error
+      ? rejectedResult.reason
+      : new ApiError(502, 'Failed to load token holder accounts from Solana RPC');
+  }
+
   return balances;
 }
 
@@ -523,7 +536,28 @@ async function syncSolanaTokenHolderBalancesFull(
   const existingState = await dbGetTokenHolderSyncState(db, tokenId);
 
   try {
-    const balances = await fetchSolanaTokenHolderBalances(rpcUrls, mint);
+    const decimals = await fetchSolanaMintDecimals(rpcUrls, mint);
+    if (decimals == null) {
+      const failedState = await dbPutTokenHolderSyncState(db, {
+        tokenId,
+        runId: existingState?.runId ?? crypto.randomUUID(),
+        status: 'failed',
+        source: 'rpc_full_sync',
+        nextShardIndex: existingState?.nextShardIndex ?? 0,
+        processedShardCount: existingState?.processedShardCount ?? 0,
+        totalShardCount:
+          existingState?.totalShardCount ?? TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+        stagedHolderCount: existingState?.stagedHolderCount ?? 0,
+        lastProgramId: existingState?.lastProgramId ?? null,
+        lastOwnerPrefix: existingState?.lastOwnerPrefix ?? null,
+        errorMessage: 'Failed to resolve token mint decimals for holder sync',
+        startedAt: existingState?.startedAt ?? timestamp,
+        updatedAt: timestamp,
+        lastCompletedAt: existingState?.lastCompletedAt ?? null,
+      });
+      return buildTokenHolderSyncSummary(failedState);
+    }
+    const balances = await fetchSolanaTokenHolderBalances(rpcUrls, mint, decimals);
     const { activeHolderCount, upsertedCount, zeroedCount } =
       await dbSyncTokenHolderBalances(db, tokenId, balances, 'rpc_full_sync');
 
@@ -1476,22 +1510,52 @@ async function fetchSolanaWebhookTransactionDetailsFromRpc(
     applyTokenBalances(transaction.meta?.preTokenBalances, -1);
     applyTokenBalances(transaction.meta?.postTokenBalances, 1);
 
-    const isBuyDelta = (delta: { tracked: number; usdc: number }) =>
-      delta.tracked > 0 && delta.usdc < 0;
-    const isSellDelta = (delta: { tracked: number; usdc: number }) =>
-      delta.tracked < 0 && delta.usdc > 0;
-    const findOwnerByDelta = (
-      candidates: Array<string | null | undefined>,
-      predicate: (delta: { tracked: number; usdc: number }) => boolean,
-    ): { wallet: string; delta: { tracked: number; usdc: number } } | null => {
-      for (const wallet of uniqueSolanaPubkeys(candidates)) {
-        const delta = deltaByOwner.get(wallet);
-        if (delta && predicate(delta)) {
-          return { wallet, delta };
-        }
+    // For a WLT/USDC pair the trade direction is unambiguous from the monitored
+    // wallet's tracked-token balance change: received tracked token => BUY, sent
+    // tracked token => SELL. We deliberately do NOT require a matching USDC delta
+    // on the same owner, because routers/aggregators can settle the USDC leg
+    // through a different account, which previously left action = null and let an
+    // incorrect webhook payload label (e.g. SELL) stick.
+    const traderCandidates = uniqueSolanaPubkeys([
+      payloadDetails.primaryWalletAddress,
+      payloadDetails.toWalletAddress,
+      payloadDetails.fromWalletAddress,
+    ]);
+
+    let focusWallet: string | null = null;
+    let focusDelta: { tracked: number; usdc: number } | null = null;
+    for (const wallet of traderCandidates) {
+      const delta = deltaByOwner.get(wallet);
+      if (delta && delta.tracked !== 0) {
+        focusWallet = wallet;
+        focusDelta = delta;
+        break;
       }
-      return null;
-    };
+    }
+
+    // Fallback: if no monitored wallet moved the tracked token, use the single
+    // wallet whose tracked and USDC balances moved in opposite directions (a
+    // genuine swap counterparty). Left null when ambiguous so we never overwrite
+    // an already-correct record with a guess.
+    if (!focusWallet) {
+      const swapParties = [...deltaByOwner.entries()].filter(
+        ([, delta]) =>
+          delta.tracked !== 0 &&
+          ((delta.tracked > 0 && delta.usdc < 0) ||
+            (delta.tracked < 0 && delta.usdc > 0)),
+      );
+      if (swapParties.length === 1) {
+        focusWallet = swapParties[0][0];
+        focusDelta = swapParties[0][1];
+      }
+    }
+
+    const action: 'BUY' | 'SELL' | null =
+      focusDelta && focusDelta.tracked > 0
+        ? 'BUY'
+        : focusDelta && focusDelta.tracked < 0
+          ? 'SELL'
+          : null;
 
     const trackedPositiveWallets = [...deltaByOwner.entries()]
       .filter(([, delta]) => delta.tracked > 0)
@@ -1500,80 +1564,13 @@ async function fetchSolanaWebhookTransactionDetailsFromRpc(
       .filter(([, delta]) => delta.tracked < 0)
       .map(([wallet]) => wallet);
 
-    const buyOwner = findOwnerByDelta(
-      [
-        payloadDetails.primaryWalletAddress,
-        payloadDetails.toWalletAddress,
-        payloadDetails.fromWalletAddress,
-        ...trackedPositiveWallets,
-      ],
-      isBuyDelta,
-    );
-    const sellOwner = findOwnerByDelta(
-      [
-        payloadDetails.primaryWalletAddress,
-        payloadDetails.fromWalletAddress,
-        payloadDetails.toWalletAddress,
-        ...trackedNegativeWallets,
-      ],
-      isSellDelta,
-    );
-
-    const primaryDelta = payloadDetails.primaryWalletAddress
-      ? deltaByOwner.get(payloadDetails.primaryWalletAddress) ?? null
-      : null;
-    const toDelta = payloadDetails.toWalletAddress
-      ? deltaByOwner.get(payloadDetails.toWalletAddress) ?? null
-      : null;
-    const fromDelta = payloadDetails.fromWalletAddress
-      ? deltaByOwner.get(payloadDetails.fromWalletAddress) ?? null
-      : null;
-
-    let action: 'BUY' | 'SELL' | null = null;
-    let focusWallet: string | null = null;
-    let focusDelta: { tracked: number; usdc: number } | null = null;
-
-    if (primaryDelta && isBuyDelta(primaryDelta)) {
-      action = 'BUY';
-      focusWallet = payloadDetails.primaryWalletAddress ?? null;
-      focusDelta = primaryDelta;
-    } else if (primaryDelta && isSellDelta(primaryDelta)) {
-      action = 'SELL';
-      focusWallet = payloadDetails.primaryWalletAddress ?? null;
-      focusDelta = primaryDelta;
-    } else if (toDelta && toDelta.tracked > 0 && buyOwner) {
-      action = 'BUY';
-      focusWallet = buyOwner.wallet;
-      focusDelta = buyOwner.delta;
-    } else if (fromDelta && fromDelta.tracked < 0 && sellOwner) {
-      action = 'SELL';
-      focusWallet = sellOwner.wallet;
-      focusDelta = sellOwner.delta;
-    } else if (payloadDetails.action === 'BUY' && buyOwner) {
-      action = 'BUY';
-      focusWallet = buyOwner.wallet;
-      focusDelta = buyOwner.delta;
-    } else if (payloadDetails.action === 'SELL' && sellOwner) {
-      action = 'SELL';
-      focusWallet = sellOwner.wallet;
-      focusDelta = sellOwner.delta;
-    } else if (buyOwner && !sellOwner) {
-      action = 'BUY';
-      focusWallet = buyOwner.wallet;
-      focusDelta = buyOwner.delta;
-    } else if (sellOwner && !buyOwner) {
-      action = 'SELL';
-      focusWallet = sellOwner.wallet;
-      focusDelta = sellOwner.delta;
-    }
-
     const fromWalletAddress =
-      sellOwner?.wallet ??
+      (action === 'SELL' ? focusWallet : null) ??
       payloadDetails.fromWalletAddress ??
       trackedNegativeWallets[0] ??
       null;
     const toWalletAddress =
-      buyOwner?.wallet ??
+      (action === 'BUY' ? focusWallet : null) ??
       payloadDetails.toWalletAddress ??
       trackedPositiveWallets[0] ??
       null;
@@ -4559,17 +4556,12 @@ async function handleForceRefreshMarketSnapshot(
   );
   let holderSyncSummary = buildTokenHolderSyncSummary(null);
   if (tokenId) {
-    holderSyncSummary = await syncSolanaTokenHolderBalancesPaged(
+    holderSyncSummary = await syncSolanaTokenHolderBalancesFull(
       env.TRADINGBOT_DB,
       user.id,
       tokenId,
       contractAddress,
       rpcUrls,
-      {
-        maxShards: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
-        continueUntilFirstStage: true,
-        timeBudgetMs: 8_000,
-      },
     ).catch((err) => {
       console.warn(
         `Failed to page holder balances for ${contractAddress}:`,
