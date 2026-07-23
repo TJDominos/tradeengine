@@ -9,6 +9,9 @@ import StatCard from '../components/StatCard';
 type DashboardPageProps = {
   dateRange: DateRangeState;
   setDateRange: React.Dispatch<React.SetStateAction<DateRangeState>>;
+  dateFilterReady: boolean;
+  dateFilterActive: boolean;
+  onDateFilterToggle: () => void;
   hasDateRange: boolean;
   marketSnapshotSubtitle: string;
   settingsContractAddress: string;
@@ -29,6 +32,9 @@ type DashboardPageProps = {
 export default function DashboardPage({
   dateRange,
   setDateRange,
+  dateFilterReady,
+  dateFilterActive,
+  onDateFilterToggle,
   hasDateRange,
   marketSnapshotSubtitle,
   settingsContractAddress,
@@ -86,7 +92,14 @@ export default function DashboardPage({
 
   return (
     <div className="space-y-6">
-      <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
+      <DateRangePicker
+        dateRange={dateRange}
+        setDateRange={setDateRange}
+        dateFilterReady={dateFilterReady}
+        dateFilterActive={dateFilterActive}
+        onDateFilterToggle={onDateFilterToggle}
+        hasDateRange={hasDateRange}
+      >
         <div className="text-right text-xs text-slate-400">
           {marketSnapshotSubtitle}
         </div>

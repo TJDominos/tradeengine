@@ -19,6 +19,8 @@ type DashboardLogsSectionProps = {
   onTransactionLogSearchTermChange: (value: string) => void;
   transactionLogCurrentPage: number;
   onTransactionLogPageChange: (page: number) => void;
+  activeTokenPriceUsd: number | null;
+  onTransactionAddressClick: (address: string) => void;
   walletOwnershipLookup: Map<string, WalletOwnershipMeta>;
   currentActivityLogs: AuditLog[];
   filteredActivityLogsCount: number;
@@ -38,6 +40,8 @@ export default function DashboardLogsSection({
   onTransactionLogSearchTermChange,
   transactionLogCurrentPage,
   onTransactionLogPageChange,
+  activeTokenPriceUsd,
+  onTransactionAddressClick,
   walletOwnershipLookup,
   currentActivityLogs,
   filteredActivityLogsCount,
@@ -72,6 +76,8 @@ export default function DashboardLogsSection({
           transactionLogCurrentPage={transactionLogCurrentPage}
           onTransactionLogPageChange={onTransactionLogPageChange}
           itemsPerPage={itemsPerPage}
+          activeTokenPriceUsd={activeTokenPriceUsd}
+          onTransactionAddressClick={onTransactionAddressClick}
           walletOwnershipLookup={walletOwnershipLookup}
         />
       ) : (

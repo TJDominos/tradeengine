@@ -379,13 +379,28 @@ async function syncSolanaTokenHolderBalancesPaged(
     ) {
       const shardIndex = currentState.nextShardIndex;
       const cursor = getTokenHolderSyncShardCursor(shardIndex);
-      const balances = await fetchSolanaTokenHolderBalanceShard(
-        rpcUrls,
-        mint,
-        cursor.programId,
-        cursor.ownerPrefix,
-        decimals,
-      );
+      let balances: Map<string, number> | null = null;
+      let lastShardError: unknown = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          balances = await fetchSolanaTokenHolderBalanceShard(
+            rpcUrls,
+            mint,
+            cursor.programId,
+            cursor.ownerPrefix,
+            decimals,
+          );
+          break;
+        } catch (err: unknown) {
+          lastShardError = err;
+          if (attempt === 0) {
+            continue;
+          }
+        }
+      }
+      if (!balances) {
+        throw lastShardError ?? new Error('Failed to fetch token holder shard');
+      }
       if (currentState.runId) {
         await dbStageTokenHolderBalanceShard(
           db,

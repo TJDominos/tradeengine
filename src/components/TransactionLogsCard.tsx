@@ -1,9 +1,10 @@
-import { CheckSquare, FileText, Search } from 'lucide-react';
+import { CheckSquare, Copy, FileText, Search } from 'lucide-react';
 
 import type { DashboardTransactionLog, WalletOwnershipMeta } from '../app/types';
 import {
   compactAddress,
   formatDate,
+  formatUSD,
   formatNum,
   formatWebhookEventLabel,
   resolveWalletOwnershipMeta,
@@ -18,6 +19,8 @@ type TransactionLogsCardProps = {
   transactionLogCurrentPage: number;
   onTransactionLogPageChange: (page: number) => void;
   itemsPerPage: number;
+  activeTokenPriceUsd: number | null;
+  onTransactionAddressClick: (address: string) => void;
   walletOwnershipLookup: Map<string, WalletOwnershipMeta>;
 };
 
@@ -29,8 +32,45 @@ export default function TransactionLogsCard({
   transactionLogCurrentPage,
   onTransactionLogPageChange,
   itemsPerPage,
+  activeTokenPriceUsd,
+  onTransactionAddressClick,
   walletOwnershipLookup,
 }: TransactionLogsCardProps) {
+  const handleCopyAddress = async (address: string) => {
+    try {
+      await navigator.clipboard.writeText(address);
+    } catch {
+      // Ignore clipboard failures; clicking still navigates to the account search.
+    }
+  };
+
+  const renderAddress = (address: string | null, label: 'from' | 'to') => {
+    if (!address) {
+      return <span className="text-slate-600">-</span>;
+    }
+
+    return (
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => onTransactionAddressClick(address)}
+          className="font-mono text-xs text-slate-200 underline decoration-dotted underline-offset-4 transition hover:text-blue-300"
+          title={`Search ${label} address in Accounts`}
+        >
+          {compactAddress(address)}
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleCopyAddress(address)}
+          className="rounded border border-slate-700 bg-slate-950 p-1 text-slate-500 transition hover:border-slate-500 hover:text-slate-200"
+          title="Copy address"
+        >
+          <Copy size={10} />
+        </button>
+      </div>
+    );
+  };
+
   return (
     <div className="flex flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
       <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/80 p-4">
@@ -57,7 +97,8 @@ export default function TransactionLogsCard({
             <tr>
               <th className="px-4 py-2 font-medium">Time</th>
               <th className="px-4 py-2 font-medium">Token</th>
-              <th className="px-4 py-2 font-medium">Wallets</th>
+              <th className="px-4 py-2 font-medium">From</th>
+              <th className="px-4 py-2 font-medium">To</th>
               <th className="px-4 py-2 font-medium">Action / Event</th>
               <th className="px-4 py-2 font-medium">Token Qty</th>
               <th className="px-4 py-2 font-medium">USDC Amount</th>
@@ -68,7 +109,6 @@ export default function TransactionLogsCard({
           </thead>
           <tbody className="divide-y divide-slate-800">
             {currentTransactionLogs.map((log) => {
-              const walletAddress = log.walletAddress ?? 'system';
               const walletOwnershipMeta = resolveWalletOwnershipMeta(log.walletAddress, walletOwnershipLookup);
               const actionLabel =
                 log.kind === 'webhook'
@@ -106,6 +146,10 @@ export default function TransactionLogsCard({
                     : log.executedAmount != null && log.executedPrice != null
                       ? log.executedAmount * log.executedPrice
                       : null;
+              const estimatedUsdcAmount =
+                usdcAmount == null && log.kind === 'webhook' && tokenAmount != null && activeTokenPriceUsd != null
+                  ? tokenAmount * activeTokenPriceUsd
+                  : null;
               const feeAmount =
                 log.kind === 'webhook'
                   ? log.feeAmountUsd
@@ -132,22 +176,14 @@ export default function TransactionLogsCard({
                     </div>
                   </td>
                   <td className="px-4 py-1.5">
-                    {log.kind === 'webhook' ? (
-                      <div className="space-y-1 font-mono text-xs text-slate-500">
-                        <div>
-                          <span className="mr-1 text-slate-600">from</span>
-                          {log.fromWalletAddress ? compactAddress(log.fromWalletAddress) : '-'}
-                        </div>
-                        <div>
-                          <span className="mr-1 text-slate-600">to</span>
-                          {log.toWalletAddress ? compactAddress(log.toWalletAddress) : '-'}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="font-mono text-xs text-slate-500">
-                        {walletAddress === 'system' ? 'system' : compactAddress(walletAddress)}
-                      </div>
-                    )}
+                    <div className="space-y-1 text-slate-500">
+                      {renderAddress(log.kind === 'webhook' ? log.fromWalletAddress : log.walletAddress, 'from')}
+                    </div>
+                  </td>
+                  <td className="px-4 py-1.5">
+                    <div className="space-y-1 text-slate-500">
+                      {renderAddress(log.kind === 'webhook' ? log.toWalletAddress : null, 'to')}
+                    </div>
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${ownershipBadgeClass}`}>
                         {walletOwnershipMeta.ownership}
@@ -164,7 +200,13 @@ export default function TransactionLogsCard({
                   </td>
                   <td className={`px-4 py-1.5 text-xs font-bold ${actionClass}`}>{actionLabel}</td>
                   <td className="px-4 py-1.5 text-xs text-slate-300">{tokenAmount != null ? formatNum(tokenAmount) : '-'}</td>
-                  <td className="px-4 py-1.5 text-xs text-slate-300">{usdcAmount != null ? formatNum(usdcAmount) : '-'}</td>
+                  <td className="px-4 py-1.5 text-xs text-slate-300">
+                    {usdcAmount != null
+                      ? formatUSD(usdcAmount)
+                      : estimatedUsdcAmount != null
+                        ? `~${formatUSD(estimatedUsdcAmount)}`
+                        : '-'}
+                  </td>
                   <td className="px-4 py-1.5 text-xs text-slate-300">{feeAmount != null ? formatNum(feeAmount) : '-'}</td>
                   <td className="px-4 py-1.5 text-center">
                     <span
@@ -185,7 +227,7 @@ export default function TransactionLogsCard({
             })}
             {currentTransactionLogs.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-8 text-center text-sm text-slate-500">
+                <td colSpan={10} className="py-8 text-center text-sm text-slate-500">
                   No trade or webhook records yet.
                 </td>
               </tr>

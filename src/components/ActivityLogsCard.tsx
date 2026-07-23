@@ -53,11 +53,11 @@ export default function ActivityLogsCard({
           </thead>
           <tbody className="divide-y divide-slate-800">
             {currentActivityLogs.map((log) => (
-              <tr key={log.id} className="transition-colors hover:bg-slate-800/50">
+              <tr key={log.id} className="align-top transition-colors hover:bg-slate-800/50">
                 <td className="px-4 py-1.5 text-xs text-slate-400">{formatDate(log.createdAt)}</td>
                 <td className="px-4 py-1.5 font-mono text-xs text-slate-500">{compactAddress(log.target)}</td>
                 <td className="px-4 py-1.5 text-xs font-bold text-slate-200">{log.action}</td>
-                <td className="max-w-[500px] px-4 py-1.5 text-xs text-slate-300">{log.details}</td>
+                <td className="max-w-[500px] whitespace-pre-wrap break-all px-4 py-1.5 text-xs leading-relaxed text-slate-300">{log.details}</td>
                 <td className="px-4 py-1.5 text-center">
                   <span className="inline-flex items-center gap-1 rounded-full border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-blue-300">
                     <CheckSquare size={10} /> recorded

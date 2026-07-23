@@ -78,6 +78,7 @@ export default function App() {
 
   const [activeTab, setActiveTab] = React.useState<TabId>('dashboard');
   const [dateRange, setDateRange] = React.useState<DateRangeState>(() => createDefaultDateRange());
+  const [dateFilterActive, setDateFilterActive] = React.useState(true);
   const [accountSearchTerm, setAccountSearchTerm] = React.useState('');
   const [internalPage, setInternalPage] = React.useState(1);
   const [outsiderPage, setOutsiderPage] = React.useState(1);
@@ -139,7 +140,8 @@ export default function App() {
   const marketInitAttemptedRef = React.useRef('');
   const dashboardAutoRefreshInFlightRef = React.useRef(false);
 
-  const hasDateRange = dateRange.from !== '' && dateRange.to !== '';
+  const dateFilterReady = dateRange.from !== '' && dateRange.to !== '';
+  const hasDateRange = dateFilterActive && dateFilterReady;
 
   useEffect(() => {
     setTradingAlgorithm(loadStoredString('tradeengine.tradingAlgorithm', workerAlgorithmTemplate));
@@ -1037,6 +1039,13 @@ export default function App() {
       }}
       transactionLogCurrentPage={transactionLogCurrentPage}
       onTransactionLogPageChange={setTransactionLogCurrentPage}
+      activeTokenPriceUsd={dashboardSnapshot?.priceUsd ?? engineState.marketSnapshot?.priceUsd ?? null}
+      onTransactionAddressClick={(address) => {
+        setAccountSearchTerm(address);
+        setInternalPage(1);
+        setOutsiderPage(1);
+        setActiveTab('accounts');
+      }}
       walletOwnershipLookup={walletOwnershipLookup}
       currentActivityLogs={currentActivityLogs}
       filteredActivityLogsCount={filteredActivityLogs.length}
@@ -1055,6 +1064,14 @@ export default function App() {
     <DashboardPage
       dateRange={dateRange}
       setDateRange={setDateRange}
+      dateFilterReady={dateFilterReady}
+      dateFilterActive={dateFilterActive}
+      onDateFilterToggle={() => {
+        if (!dateFilterReady) {
+          return;
+        }
+        setDateFilterActive((current) => !current);
+      }}
       hasDateRange={hasDateRange}
       marketSnapshotSubtitle={marketSnapshotSubtitle}
       settingsContractAddress={settings.contractAddress}
@@ -1077,6 +1094,14 @@ export default function App() {
     <AccountsPage
       dateRange={dateRange}
       setDateRange={setDateRange}
+      dateFilterReady={dateFilterReady}
+      dateFilterActive={dateFilterActive}
+      onDateFilterToggle={() => {
+        if (!dateFilterReady) {
+          return;
+        }
+        setDateFilterActive((current) => !current);
+      }}
       hasDateRange={hasDateRange}
       accountSearchTerm={accountSearchTerm}
       onAccountSearchTermChange={(value) => {

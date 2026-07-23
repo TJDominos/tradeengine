@@ -22,6 +22,9 @@ import SummaryMetric from '../components/SummaryMetric';
 type AccountsPageProps = {
   dateRange: DateRangeState;
   setDateRange: React.Dispatch<React.SetStateAction<DateRangeState>>;
+  dateFilterReady: boolean;
+  dateFilterActive: boolean;
+  onDateFilterToggle: () => void;
   hasDateRange: boolean;
   accountSearchTerm: string;
   onAccountSearchTermChange: (value: string) => void;
@@ -49,6 +52,9 @@ type AccountsPageProps = {
 export default function AccountsPage({
   dateRange,
   setDateRange,
+  dateFilterReady,
+  dateFilterActive,
+  onDateFilterToggle,
   hasDateRange,
   accountSearchTerm,
   onAccountSearchTermChange,
@@ -85,7 +91,14 @@ export default function AccountsPage({
 
   return (
     <div className="space-y-6">
-      <DateRangePicker dateRange={dateRange} setDateRange={setDateRange} hasDateRange={hasDateRange}>
+      <DateRangePicker
+        dateRange={dateRange}
+        setDateRange={setDateRange}
+        dateFilterReady={dateFilterReady}
+        dateFilterActive={dateFilterActive}
+        onDateFilterToggle={onDateFilterToggle}
+        hasDateRange={hasDateRange}
+      >
         <div className="flex w-full flex-col gap-1.5 md:w-[400px]">
           <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
             Global Address Search
