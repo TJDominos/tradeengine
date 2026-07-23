@@ -3691,28 +3691,21 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
       dbListRpcEndpoints(env.TRADINGBOT_DB, user.id),
     ]);
 
-  const rpcUrls = dedupeStrings([
-    ...rpcEndpoints.map((endpoint) => endpoint.url),
-    env.SOLANA_RPC_URL ?? '',
-  ]);
-
   let marketSnapshot: TokenMarketSnapshot | null = null;
   let tokenHolderAggregate: TokenHolderAggregateRecord | null = null;
   let outsideTokenHolders: OutsideTokenHolderRecord[] = [];
+  let tokenId: number | null = null;
   if (settings.contractAddress.trim()) {
     try {
-      marketSnapshot = await syncTokenMarketSnapshotForUser(
+      tokenId = await dbResolveTradableTokenId(
         env.TRADINGBOT_DB,
-        user.id,
-        'solana',
         settings.contractAddress,
-        rpcUrls,
-        {
-          managedAccountAddresses: internalAccs.map((account) => account.address),
-        },
       );
-      if (marketSnapshot) {
-        tradableTokens = await dbListTradableTokens(env.TRADINGBOT_DB);
+      if (tokenId) {
+        marketSnapshot = await dbGetLatestTokenMarketSnapshot(
+          env.TRADINGBOT_DB,
+          tokenId,
+        );
       }
     } catch (err: unknown) {
       console.warn(
@@ -3722,10 +3715,6 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     }
 
     try {
-      const tokenId = await dbResolveTradableTokenId(
-        env.TRADINGBOT_DB,
-        settings.contractAddress,
-      );
       if (tokenId) {
         const holderSyncState = await dbGetTokenHolderSyncState(
           env.TRADINGBOT_DB,

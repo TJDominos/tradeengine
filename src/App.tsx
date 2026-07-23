@@ -139,9 +139,15 @@ export default function App() {
   // re-firing every 3-second polling cycle when the snapshot stays null.
   const marketInitAttemptedRef = React.useRef('');
   const dashboardAutoRefreshInFlightRef = React.useRef(false);
+  const latestMarketSnapshotFetchedAtRef = React.useRef<number | null>(null);
+  const loadedMarketSnapshotHistoryAtRef = React.useRef<number | null>(null);
 
   const dateFilterReady = dateRange.from !== '' && dateRange.to !== '';
   const hasDateRange = dateFilterActive && dateFilterReady;
+
+  useEffect(() => {
+    latestMarketSnapshotFetchedAtRef.current = engineState?.marketSnapshot?.fetchedAt ?? null;
+  }, [engineState?.marketSnapshot?.fetchedAt]);
 
   useEffect(() => {
     setTradingAlgorithm(loadStoredString('tradeengine.tradingAlgorithm', workerAlgorithmTemplate));
@@ -341,7 +347,7 @@ export default function App() {
       await refresh();
     });
 
-  const loadMarketSnapshotHistory = React.useCallback(async (options?: { silent?: boolean }) => {
+  const loadMarketSnapshotHistory = React.useCallback(async (options?: { silent?: boolean; snapshotFetchedAt?: number | null }) => {
     if (!auth?.authenticated || !settings.contractAddress.trim()) {
       return;
     }
@@ -382,6 +388,8 @@ export default function App() {
             }
           : current,
       );
+      loadedMarketSnapshotHistoryAtRef.current =
+        options?.snapshotFetchedAt ?? latestMarketSnapshotFetchedAtRef.current;
     } catch (err: unknown) {
       if (!options?.silent) {
         setError(err instanceof Error ? err.message : 'Failed to load market snapshot history');
@@ -439,7 +447,9 @@ export default function App() {
               : current,
           );
           await loadState();
-          await loadMarketSnapshotHistory();
+          await loadMarketSnapshotHistory({
+            snapshotFetchedAt: result.marketSnapshot.fetchedAt,
+          });
           const holderSyncMessage = result.holderSyncSummary
             ? result.holderSyncSummary.status === 'completed'
               ? ` Holder sync completed with ${result.holderSyncSummary.activeHolderCount} holders.`
@@ -489,9 +499,18 @@ export default function App() {
       }
       dashboardAutoRefreshInFlightRef.current = true;
       try {
-        await loadState();
-        if (!disposed && settings.contractAddress.trim() && hasDateRange) {
-          await loadMarketSnapshotHistory({ silent: true });
+        const state = await loadState();
+        const snapshotFetchedAt = state.marketSnapshot?.fetchedAt ?? null;
+        if (
+          !disposed &&
+          settings.contractAddress.trim() &&
+          hasDateRange &&
+          snapshotFetchedAt !== loadedMarketSnapshotHistoryAtRef.current
+        ) {
+          await loadMarketSnapshotHistory({
+            silent: true,
+            snapshotFetchedAt,
+          });
         }
       } catch (err: unknown) {
         if (!disposed) {

@@ -697,14 +697,57 @@ export function mergeStoredSignalTransactionDetails(
 
   for (const details of detailsList) {
     if (!details) continue;
+    const preferDetails =
+      details.detailSource === 'rpc' ||
+      details.detailSource === 'payload+rpc' ||
+      details.source === 'rpc_reconcile';
+
     merged.tokenContractAddress ??= details.tokenContractAddress ?? null;
-    merged.fromWalletAddress ??= details.fromWalletAddress ?? null;
-    merged.toWalletAddress ??= details.toWalletAddress ?? null;
-    merged.primaryWalletAddress ??= details.primaryWalletAddress ?? null;
-    merged.action ??= details.action ?? null;
-    merged.usdcAmount ??= details.usdcAmount ?? null;
-    merged.tokenAmount ??= details.tokenAmount ?? null;
-    merged.feeAmountUsd ??= details.feeAmountUsd ?? null;
+    if (preferDetails) {
+      if (details.fromWalletAddress) {
+        merged.fromWalletAddress = details.fromWalletAddress;
+      } else {
+        merged.fromWalletAddress ??= null;
+      }
+      if (details.toWalletAddress) {
+        merged.toWalletAddress = details.toWalletAddress;
+      } else {
+        merged.toWalletAddress ??= null;
+      }
+      if (details.primaryWalletAddress) {
+        merged.primaryWalletAddress = details.primaryWalletAddress;
+      } else {
+        merged.primaryWalletAddress ??= null;
+      }
+      if (details.action) {
+        merged.action = details.action;
+      } else {
+        merged.action ??= null;
+      }
+      if (details.usdcAmount != null) {
+        merged.usdcAmount = details.usdcAmount;
+      } else {
+        merged.usdcAmount ??= null;
+      }
+      if (details.tokenAmount != null) {
+        merged.tokenAmount = details.tokenAmount;
+      } else {
+        merged.tokenAmount ??= null;
+      }
+      if (details.feeAmountUsd != null) {
+        merged.feeAmountUsd = details.feeAmountUsd;
+      } else {
+        merged.feeAmountUsd ??= null;
+      }
+    } else {
+      merged.fromWalletAddress ??= details.fromWalletAddress ?? null;
+      merged.toWalletAddress ??= details.toWalletAddress ?? null;
+      merged.primaryWalletAddress ??= details.primaryWalletAddress ?? null;
+      merged.action ??= details.action ?? null;
+      merged.usdcAmount ??= details.usdcAmount ?? null;
+      merged.tokenAmount ??= details.tokenAmount ?? null;
+      merged.feeAmountUsd ??= details.feeAmountUsd ?? null;
+    }
 
     if (details.transactionStatus === 'FAILED') {
       merged.transactionStatus = 'FAILED';
@@ -731,6 +774,24 @@ export function mergeStoredSignalTransactionDetails(
   }
 
   return merged;
+}
+
+function deriveWebhookActionFromHints(
+  ...hints: Array<string | null | undefined>
+): StoredSignalTransactionDetails['action'] {
+  for (const hint of hints) {
+    const normalizedHint = readNonEmptyString(hint)?.toLowerCase();
+    if (!normalizedHint) {
+      continue;
+    }
+    if (normalizedHint.includes('buy')) {
+      return 'BUY';
+    }
+    if (normalizedHint.includes('sell')) {
+      return 'SELL';
+    }
+  }
+  return null;
 }
 
 export function extractWebhookTransactionDetailsFromPayload(
@@ -782,6 +843,9 @@ export function extractWebhookTransactionDetailsFromPayload(
     [activityContractAddress, logContractAddress, trackedContractAddress]
       .find((address) => address != null && address !== SOLANA_USDC_MINT) ??
     trackedContractAddress;
+  const isTrackedTokenActivity =
+    activityContractAddress === trackedContractAddress ||
+    logContractAddress === trackedContractAddress;
 
   const amountCandidate =
     toFiniteNumber(activity?.amount) ??
@@ -792,18 +856,27 @@ export function extractWebhookTransactionDetailsFromPayload(
     toFiniteNumber(log?.tokenAmount);
 
   const symbolHint = readNonEmptyString(activity?.asset)?.toUpperCase() ?? '';
-  const categoryHint = readNonEmptyString(activity?.category)?.toLowerCase() ?? '';
-  const action =
-    categoryHint.includes('buy')
-      ? 'BUY'
-      : categoryHint.includes('sell')
-        ? 'SELL'
-        : null;
+  const action = isTrackedTokenActivity
+    ? deriveWebhookActionFromHints(
+        readNonEmptyString(activity?.type),
+        readNonEmptyString(activity?.side),
+        readNonEmptyString(activity?.category),
+        readNonEmptyString(log?.type),
+        readNonEmptyString(log?.category),
+      )
+    : null;
+  const primaryWalletAddress =
+    tryNormalizeSolanaPubkey(activity?.walletAddress) ??
+    fromWalletAddress ??
+    toWalletAddress ??
+    tryNormalizeSolanaPubkey(log?.walletAddress) ??
+    null;
 
   const details: Partial<StoredSignalTransactionDetails> = {
     tokenContractAddress,
     fromWalletAddress,
     toWalletAddress,
+    primaryWalletAddress,
     action,
     detailSource: 'payload',
     source: 'webhook',
