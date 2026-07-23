@@ -7,7 +7,7 @@ export function buildWebhookStrategyTrigger(input: {
   contractAddress: string;
   walletAddress: string | null;
   txSignature: string | null;
-  payloadJson: string;
+  payloadJson?: string | null;
 }): StrategyTriggerEvent {
   return {
     source: 'alchemy_notify',
@@ -17,7 +17,7 @@ export function buildWebhookStrategyTrigger(input: {
     walletAddress: input.walletAddress,
     txSignature: input.txSignature,
     triggeredAt: nowMs(),
-    payloadJson: input.payloadJson,
+    payloadJson: input.payloadJson ?? null,
   };
 }
 

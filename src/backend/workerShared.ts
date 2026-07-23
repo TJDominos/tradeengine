@@ -436,14 +436,17 @@ export function getTokenHolderSyncShardCursor(shardIndex: number): {
     0,
     Math.min(shardIndex, TOKEN_HOLDER_SYNC_TOTAL_SHARDS - 1),
   );
-  const programIndex = Math.floor(
-    normalizedIndex / TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT,
-  );
+  const programCount = TOKEN_HOLDER_SYNC_PROGRAM_IDS.length;
+  const ownerPrefix = Math.floor(normalizedIndex / programCount);
+  const programIndex = normalizedIndex % programCount;
   return {
     programId:
       TOKEN_HOLDER_SYNC_PROGRAM_IDS[programIndex] ??
       TOKEN_HOLDER_SYNC_PROGRAM_IDS[0],
-    ownerPrefix: normalizedIndex % TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT,
+    ownerPrefix: Math.min(
+      TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT - 1,
+      ownerPrefix,
+    ),
   };
 }
 

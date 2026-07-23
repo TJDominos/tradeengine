@@ -356,8 +356,13 @@ async function syncSolanaTokenHolderBalancesPaged(
   tokenId: number,
   mint: string,
   rpcUrls: string | string[],
-  maxShards = TOKEN_HOLDER_SYNC_SHARDS_PER_REFRESH,
+  options?: {
+    maxShards?: number;
+    continueUntilFirstStage?: boolean;
+    timeBudgetMs?: number;
+  },
 ): Promise<TokenHolderSyncSummary> {
+  const maxShards = options?.maxShards ?? TOKEN_HOLDER_SYNC_SHARDS_PER_REFRESH;
   const state = await dbStartOrResumeTokenHolderSync(db, tokenId);
   const decimals = await fetchSolanaMintDecimals(rpcUrls, mint);
   if (decimals == null) {
@@ -372,11 +377,25 @@ async function syncSolanaTokenHolderBalancesPaged(
 
   let currentState = state;
   let shardsProcessedThisRun = 0;
+  let stagedHolderCount = currentState.stagedHolderCount;
+  const startedAtMs = Date.now();
   try {
     while (
-      shardsProcessedThisRun < maxShards &&
+      currentState.nextShardIndex < currentState.totalShardCount &&
+      (
+        shardsProcessedThisRun < maxShards ||
+        (!!options?.continueUntilFirstStage && stagedHolderCount === 0)
+      ) &&
       currentState.nextShardIndex < currentState.totalShardCount
     ) {
+      if (
+        options?.timeBudgetMs != null &&
+        shardsProcessedThisRun > 0 &&
+        Date.now() - startedAtMs >= options.timeBudgetMs
+      ) {
+        break;
+      }
+
       const shardIndex = currentState.nextShardIndex;
       const cursor = getTokenHolderSyncShardCursor(shardIndex);
       let balances: Map<string, number> | null = null;
@@ -409,6 +428,13 @@ async function syncSolanaTokenHolderBalancesPaged(
           shardIndex,
           balances,
         );
+        if (balances.size > 0) {
+          stagedHolderCount = await dbCountTokenHolderSyncStageHolders(
+            db,
+            tokenId,
+            currentState.runId,
+          );
+        }
       }
       shardsProcessedThisRun += 1;
       currentState = await dbPutTokenHolderSyncState(db, {
@@ -420,6 +446,7 @@ async function syncSolanaTokenHolderBalancesPaged(
           currentState.totalShardCount,
           shardIndex + 1,
         ),
+        stagedHolderCount,
         lastProgramId: cursor.programId,
         lastOwnerPrefix: cursor.ownerPrefix,
         errorMessage: null,
@@ -453,7 +480,7 @@ async function syncSolanaTokenHolderBalancesPaged(
     });
   }
 
-  const stagedHolderCount = currentState.runId
+  stagedHolderCount = currentState.runId
     ? await dbCountTokenHolderSyncStageHolders(
         db,
         tokenId,
@@ -483,6 +510,78 @@ async function syncSolanaTokenHolderBalancesPaged(
     stagedHolderCount,
     activeHolderCount: stagedHolderCount,
   });
+}
+
+async function syncSolanaTokenHolderBalancesFull(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  mint: string,
+  rpcUrls: string | string[],
+): Promise<TokenHolderSyncSummary> {
+  const timestamp = nowTs();
+  const existingState = await dbGetTokenHolderSyncState(db, tokenId);
+
+  try {
+    const balances = await fetchSolanaTokenHolderBalances(rpcUrls, mint);
+    const { activeHolderCount, upsertedCount, zeroedCount } =
+      await dbSyncTokenHolderBalances(db, tokenId, balances, 'rpc_full_sync');
+
+    await dbRecomputeTokenHolderAggregate(db, userId, tokenId, {
+      source: 'rpc_full_sync',
+      fullSyncAt: timestamp,
+    });
+
+    await db
+      .prepare('DELETE FROM token_holder_sync_stage WHERE token_id = ?1')
+      .bind(tokenId)
+      .run();
+
+    const completedState = await dbPutTokenHolderSyncState(db, {
+      tokenId,
+      runId: existingState?.runId ?? crypto.randomUUID(),
+      status: 'completed',
+      source: 'rpc_full_sync',
+      nextShardIndex: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+      processedShardCount: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+      totalShardCount: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+      stagedHolderCount: activeHolderCount,
+      lastProgramId:
+        TOKEN_HOLDER_SYNC_PROGRAM_IDS[TOKEN_HOLDER_SYNC_PROGRAM_IDS.length - 1],
+      lastOwnerPrefix: TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT - 1,
+      errorMessage: null,
+      startedAt: existingState?.startedAt ?? timestamp,
+      updatedAt: timestamp,
+      lastCompletedAt: timestamp,
+    });
+
+    return buildTokenHolderSyncSummary(completedState, {
+      activeHolderCount,
+      stagedHolderCount: activeHolderCount,
+      upsertedCount,
+      zeroedCount,
+      shardsProcessedThisRun: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+    });
+  } catch (err: unknown) {
+    const failedState = await dbPutTokenHolderSyncState(db, {
+      tokenId,
+      runId: existingState?.runId ?? crypto.randomUUID(),
+      status: 'failed',
+      source: 'rpc_full_sync',
+      nextShardIndex: existingState?.nextShardIndex ?? 0,
+      processedShardCount: existingState?.processedShardCount ?? 0,
+      totalShardCount: existingState?.totalShardCount ?? TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+      stagedHolderCount: existingState?.stagedHolderCount ?? 0,
+      lastProgramId: existingState?.lastProgramId ?? null,
+      lastOwnerPrefix: existingState?.lastOwnerPrefix ?? null,
+      errorMessage: err instanceof Error ? err.message : String(err),
+      startedAt: existingState?.startedAt ?? timestamp,
+      updatedAt: timestamp,
+      lastCompletedAt: existingState?.lastCompletedAt ?? null,
+    });
+
+    return buildTokenHolderSyncSummary(failedState);
+  }
 }
 
 function serializeStrategyVersionContent(
@@ -1252,10 +1351,17 @@ async function dbResolvePreferredSignalWalletAddress(
     .prepare(
       `SELECT wallet_address, type
        FROM accounts
-       WHERE user_id = ?1 AND wallet_address IN (?2, ?3)
+       WHERE user_id = ?1 AND wallet_address IN (?2, ?3, ?4, ?5, ?6)
        ORDER BY CASE type WHEN 'managed' THEN 0 ELSE 1 END, id ASC`,
     )
-    .bind(userId, normalizedCandidates[0] ?? '', normalizedCandidates[1] ?? '')
+    .bind(
+      userId,
+      normalizedCandidates[0] ?? '',
+      normalizedCandidates[1] ?? '',
+      normalizedCandidates[2] ?? '',
+      normalizedCandidates[3] ?? '',
+      normalizedCandidates[4] ?? '',
+    )
     .all<{
       wallet_address: string;
       type: string;
@@ -1367,50 +1473,118 @@ async function fetchSolanaWebhookTransactionDetailsFromRpc(
     applyTokenBalances(transaction.meta?.preTokenBalances, -1);
     applyTokenBalances(transaction.meta?.postTokenBalances, 1);
 
-    const candidateWallets = uniqueSolanaPubkeys([
-      payloadDetails.primaryWalletAddress,
-      payloadDetails.fromWalletAddress,
-      payloadDetails.toWalletAddress,
-    ]);
-
-    let focusWallet: string | null = null;
-    for (const wallet of candidateWallets) {
-      const delta = deltaByOwner.get(wallet);
-      if (delta && (delta.tracked !== 0 || delta.usdc !== 0)) {
-        focusWallet = wallet;
-        break;
+    const isBuyDelta = (delta: { tracked: number; usdc: number }) =>
+      delta.tracked > 0 && delta.usdc < 0;
+    const isSellDelta = (delta: { tracked: number; usdc: number }) =>
+      delta.tracked < 0 && delta.usdc > 0;
+    const findOwnerByDelta = (
+      candidates: Array<string | null | undefined>,
+      predicate: (delta: { tracked: number; usdc: number }) => boolean,
+    ): { wallet: string; delta: { tracked: number; usdc: number } } | null => {
+      for (const wallet of uniqueSolanaPubkeys(candidates)) {
+        const delta = deltaByOwner.get(wallet);
+        if (delta && predicate(delta)) {
+          return { wallet, delta };
+        }
       }
-    }
-    if (!focusWallet) {
-      const fallbackEntry = [...deltaByOwner.entries()].find(
-        ([, delta]) => delta.tracked !== 0 || delta.usdc !== 0,
-      );
-      focusWallet = fallbackEntry?.[0] ?? null;
+      return null;
+    };
+
+    const trackedPositiveWallets = [...deltaByOwner.entries()]
+      .filter(([, delta]) => delta.tracked > 0)
+      .map(([wallet]) => wallet);
+    const trackedNegativeWallets = [...deltaByOwner.entries()]
+      .filter(([, delta]) => delta.tracked < 0)
+      .map(([wallet]) => wallet);
+
+    const buyOwner = findOwnerByDelta(
+      [
+        payloadDetails.primaryWalletAddress,
+        payloadDetails.toWalletAddress,
+        payloadDetails.fromWalletAddress,
+        ...trackedPositiveWallets,
+      ],
+      isBuyDelta,
+    );
+    const sellOwner = findOwnerByDelta(
+      [
+        payloadDetails.primaryWalletAddress,
+        payloadDetails.fromWalletAddress,
+        payloadDetails.toWalletAddress,
+        ...trackedNegativeWallets,
+      ],
+      isSellDelta,
+    );
+
+    const primaryDelta = payloadDetails.primaryWalletAddress
+      ? deltaByOwner.get(payloadDetails.primaryWalletAddress) ?? null
+      : null;
+    const toDelta = payloadDetails.toWalletAddress
+      ? deltaByOwner.get(payloadDetails.toWalletAddress) ?? null
+      : null;
+    const fromDelta = payloadDetails.fromWalletAddress
+      ? deltaByOwner.get(payloadDetails.fromWalletAddress) ?? null
+      : null;
+
+    let action: 'BUY' | 'SELL' | null = null;
+    let focusWallet: string | null = null;
+    let focusDelta: { tracked: number; usdc: number } | null = null;
+
+    if (primaryDelta && isBuyDelta(primaryDelta)) {
+      action = 'BUY';
+      focusWallet = payloadDetails.primaryWalletAddress ?? null;
+      focusDelta = primaryDelta;
+    } else if (primaryDelta && isSellDelta(primaryDelta)) {
+      action = 'SELL';
+      focusWallet = payloadDetails.primaryWalletAddress ?? null;
+      focusDelta = primaryDelta;
+    } else if (toDelta && toDelta.tracked > 0 && buyOwner) {
+      action = 'BUY';
+      focusWallet = buyOwner.wallet;
+      focusDelta = buyOwner.delta;
+    } else if (fromDelta && fromDelta.tracked < 0 && sellOwner) {
+      action = 'SELL';
+      focusWallet = sellOwner.wallet;
+      focusDelta = sellOwner.delta;
+    } else if (payloadDetails.action === 'BUY' && buyOwner) {
+      action = 'BUY';
+      focusWallet = buyOwner.wallet;
+      focusDelta = buyOwner.delta;
+    } else if (payloadDetails.action === 'SELL' && sellOwner) {
+      action = 'SELL';
+      focusWallet = sellOwner.wallet;
+      focusDelta = sellOwner.delta;
+    } else if (buyOwner && !sellOwner) {
+      action = 'BUY';
+      focusWallet = buyOwner.wallet;
+      focusDelta = buyOwner.delta;
+    } else if (sellOwner && !buyOwner) {
+      action = 'SELL';
+      focusWallet = sellOwner.wallet;
+      focusDelta = sellOwner.delta;
     }
 
-    const focusDelta = focusWallet ? deltaByOwner.get(focusWallet) ?? null : null;
-    const action =
-      focusDelta && focusDelta.tracked > 0 && focusDelta.usdc < 0
-        ? 'BUY'
-        : focusDelta && focusDelta.tracked < 0 && focusDelta.usdc > 0
-          ? 'SELL'
-          : null;
-
-    const trackedOwners = [...deltaByOwner.entries()].filter(([, delta]) => delta.tracked !== 0);
     const fromWalletAddress =
+      sellOwner?.wallet ??
       payloadDetails.fromWalletAddress ??
-      trackedOwners.find(([, delta]) => delta.tracked < 0)?.[0] ??
+      trackedNegativeWallets[0] ??
       null;
     const toWalletAddress =
+      buyOwner?.wallet ??
       payloadDetails.toWalletAddress ??
-      trackedOwners.find(([, delta]) => delta.tracked > 0)?.[0] ??
+      trackedPositiveWallets[0] ??
       null;
 
     return {
       tokenContractAddress: trackedContractAddress,
       fromWalletAddress,
       toWalletAddress,
-      primaryWalletAddress: focusWallet,
+      primaryWalletAddress:
+        focusWallet ??
+        payloadDetails.primaryWalletAddress ??
+        toWalletAddress ??
+        fromWalletAddress ??
+        null,
       action,
       usdcAmount: focusDelta && focusDelta.usdc !== 0 ? Math.abs(focusDelta.usdc) : null,
       tokenAmount: focusDelta && focusDelta.tracked !== 0 ? Math.abs(focusDelta.tracked) : null,
@@ -3037,6 +3211,129 @@ async function assertAlchemyWebhookSignature(
   }
 }
 
+function compactDefinedRecord(
+  entries: Array<[string, unknown]>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of entries) {
+    if (value == null) {
+      continue;
+    }
+    if (Array.isArray(value) && value.length === 0) {
+      continue;
+    }
+    if (isRecord(value) && Object.keys(value).length === 0) {
+      continue;
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
+function compactAddressParticipant(value: unknown): Record<string, unknown> | null {
+  const record = isRecord(value) ? value : null;
+  const address = readNonEmptyString(record?.address);
+  return address ? { address } : null;
+}
+
+function buildCompactAlchemyLogPayload(
+  logValue: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!logValue) {
+    return null;
+  }
+  const transaction = isRecord(logValue.transaction) ? logValue.transaction : null;
+  return compactDefinedRecord([
+    ['address', readNonEmptyString(logValue.address)],
+    ['contractAddress', readNonEmptyString(logValue.contractAddress)],
+    ['tokenAddress', readNonEmptyString(logValue.tokenAddress)],
+    ['mint', readNonEmptyString(logValue.mint)],
+    ['transactionHash', readNonEmptyString(logValue.transactionHash)],
+    ['type', readNonEmptyString(logValue.type)],
+    ['category', readNonEmptyString(logValue.category)],
+    ['walletAddress', readNonEmptyString(logValue.walletAddress)],
+    ['amount', logValue.amount],
+    ['value', logValue.value],
+    ['tokenAmount', logValue.tokenAmount],
+    ['fee', logValue.fee],
+    ['feeUsd', logValue.feeUsd],
+    ['feeUSD', logValue.feeUSD],
+    [
+      'transaction',
+      compactDefinedRecord([
+        ['from', compactAddressParticipant(transaction?.from)],
+        ['to', compactAddressParticipant(transaction?.to)],
+      ]),
+    ],
+  ]);
+}
+
+function buildCompactAlchemyActivityPayload(
+  activityValue: Record<string, unknown>,
+): Record<string, unknown> {
+  const rawContract = isRecord(activityValue.rawContract) ? activityValue.rawContract : null;
+  const log = isRecord(activityValue.log) ? activityValue.log : null;
+  return compactDefinedRecord([
+    ['hash', readNonEmptyString(activityValue.hash)],
+    ['type', readNonEmptyString(activityValue.type)],
+    ['side', readNonEmptyString(activityValue.side)],
+    ['category', readNonEmptyString(activityValue.category)],
+    ['asset', readNonEmptyString(activityValue.asset)],
+    ['fromAddress', readNonEmptyString(activityValue.fromAddress)],
+    ['toAddress', readNonEmptyString(activityValue.toAddress)],
+    ['walletAddress', readNonEmptyString(activityValue.walletAddress)],
+    ['contractAddress', readNonEmptyString(activityValue.contractAddress)],
+    ['tokenAddress', readNonEmptyString(activityValue.tokenAddress)],
+    ['mint', readNonEmptyString(activityValue.mint)],
+    ['amount', activityValue.amount],
+    ['value', activityValue.value],
+    ['tokenAmount', activityValue.tokenAmount],
+    ['fee', activityValue.fee],
+    ['feeUsd', activityValue.feeUsd],
+    ['feeUSD', activityValue.feeUSD],
+    [
+      'rawContract',
+      compactDefinedRecord([
+        ['address', readNonEmptyString(rawContract?.address)],
+      ]),
+    ],
+    ['log', buildCompactAlchemyLogPayload(log)],
+  ]);
+}
+
+function buildCompactAlchemySignalPayload(input: {
+  webhookId: string | null;
+  eventId: string;
+  type: string;
+  txSignature: string | null;
+  contractAddresses: string[];
+  activity?: Record<string, unknown> | null;
+  log?: Record<string, unknown> | null;
+}): string {
+  return JSON.stringify(
+    compactDefinedRecord([
+      ['webhookId', input.webhookId],
+      ['eventId', input.eventId],
+      ['type', input.type],
+      ['txSignature', input.txSignature],
+      ['contractAddresses', input.contractAddresses],
+      ['activity', input.activity ? buildCompactAlchemyActivityPayload(input.activity) : null],
+      ['log', buildCompactAlchemyLogPayload(input.log ?? null)],
+    ]),
+  );
+}
+
+async function loadStoredMarketSnapshotByContractAddress(
+  db: D1Database,
+  contractAddress: string,
+): Promise<TokenMarketSnapshot | null> {
+  const tokenId = await dbResolveTradableTokenId(db, contractAddress);
+  if (!tokenId) {
+    return null;
+  }
+  return dbGetLatestTokenMarketSnapshot(db, tokenId);
+}
+
 function deriveAlchemySignalsFromPayload(
   payload: AlchemyWebhookPayload,
   defaultContractAddress: string | null,
@@ -3075,10 +3372,12 @@ function deriveAlchemySignalsFromPayload(
             tryNormalizeSolanaPubkey(item.toAddress),
           txSignature,
           contractAddresses,
-          payload: JSON.stringify({
+          payload: buildCompactAlchemySignalPayload({
             webhookId,
             eventId,
             type: payloadType,
+            txSignature,
+            contractAddresses,
             activity: item,
           }),
         } satisfies DerivedChainSignal,
@@ -3121,10 +3420,12 @@ function deriveAlchemySignalsFromPayload(
             tryNormalizeSolanaPubkey(to?.address),
           txSignature,
           contractAddresses,
-          payload: JSON.stringify({
+          payload: buildCompactAlchemySignalPayload({
             webhookId,
             eventId,
             type: payloadType,
+            txSignature,
+            contractAddresses,
             log: item,
           }),
         } satisfies DerivedChainSignal,
@@ -3148,7 +3449,23 @@ function deriveAlchemySignalsFromPayload(
         event?.tokenAddress,
         event?.mint,
       ]),
-      payload: JSON.stringify(payload),
+      payload: JSON.stringify(
+        compactDefinedRecord([
+          ['webhookId', webhookId],
+          ['eventId', eventId],
+          ['type', payloadType],
+          [
+            'contractAddresses',
+            uniqueSolanaPubkeys([
+              ...fallbackContracts,
+              event?.contractAddress,
+              event?.address,
+              event?.tokenAddress,
+              event?.mint,
+            ]),
+          ],
+        ]),
+      ),
     },
   ];
 }
@@ -3286,7 +3603,7 @@ async function processTokenActivitySignal(
           contractAddress: normalizedContractAddress,
           walletAddress: input.walletAddress,
           txSignature: input.txSignature,
-          payloadJson: input.payload,
+          payloadJson: null,
         }),
         marketSnapshot,
         {
@@ -3440,55 +3757,9 @@ async function handleAlchemyNotifyWebhook(
           contractFromQuery,
           derivedSignals,
         );
-        
-        // After webhook processing, refresh market snapshots for affected tokens
-        if (result.processed > 0 || result.routedTargets > 0) {
-          console.log(`[webhook] Processed ${result.processed} signals, updating market snapshots`);
-          // Collect unique (userId, contractAddress) pairs for market refresh
-          const tokensToRefresh = new Set<string>();
-          
-          for (const signal of derivedSignals) {
-            const contractAddresses = signal.contractAddresses.length > 0
-              ? signal.contractAddresses
-              : contractFromQuery
-                ? [contractFromQuery]
-                : [];
-            
-            for (const contractAddress of contractAddresses) {
-              const userIds = await dbListUserIdsByActiveContractAddress(
-                env.TRADINGBOT_DB,
-                contractAddress,
-              );
-              for (const userId of userIds) {
-                tokensToRefresh.add(`${userId}:${contractAddress}`);
-              }
-            }
-          }
-          
-          // Refresh market snapshots for affected tokens
-          const rpcUrl = env.SOLANA_RPC_URL ?? '';
-          for (const pair of tokensToRefresh) {
-            const [userIdStr, contractAddress] = pair.split(':');
-            const userId = parseInt(userIdStr, 10);
-            if (!isNaN(userId)) {
-              const rpcUrls = await dbResolveSolanaRpcUrls(
-                env.TRADINGBOT_DB,
-                userId,
-                rpcUrl,
-              );
-              await syncTokenMarketSnapshotForUser(
-                env.TRADINGBOT_DB,
-                userId,
-                'solana',
-                contractAddress,
-                rpcUrls,
-                { force: true },
-              ).catch((err) => {
-                console.warn(`Failed to refresh market snapshot for ${contractAddress}:`, err);
-              });
-            }
-          }
-        }
+        console.log(
+          `[webhook] Routed ${result.routedTargets} targets, processed ${result.processed} signal(s), duplicates ${result.duplicates}, ignored ${result.ignored}`,
+        );
       } catch (err) {
         console.error('Alchemy webhook background processing failed:', err);
       }
@@ -3859,23 +4130,6 @@ async function handleSaveSettings(
     'Trading settings were updated. No strategy version was created automatically.',
   );
 
-  if (normalizedContractAddress && rpcUrls) {
-    try {
-      await syncTokenMarketSnapshotForUser(
-        env.TRADINGBOT_DB,
-        user.id,
-        'solana',
-        normalizedContractAddress,
-        rpcUrls,
-      );
-    } catch (err: unknown) {
-      console.warn(
-        `Failed to initialize market snapshot after saving settings for ${normalizedContractAddress}:`,
-        err,
-      );
-    }
-  }
-
   return jsonResponse(updated);
 }
 
@@ -3927,21 +4181,10 @@ async function handleSaveActiveToken(
         );
       }
     }
-
-    try {
-      marketSnapshot = await syncTokenMarketSnapshotForUser(
-        env.TRADINGBOT_DB,
-        user.id,
-        'solana',
-        normalizedContractAddress,
-        rpcUrls,
-      );
-    } catch (err: unknown) {
-      console.warn(
-        `Failed to initialize market snapshot after activating ${normalizedContractAddress}:`,
-        err,
-      );
-    }
+    marketSnapshot = await loadStoredMarketSnapshotByContractAddress(
+      env.TRADINGBOT_DB,
+      normalizedContractAddress,
+    );
   }
 
   const updatedSettings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
@@ -3954,8 +4197,8 @@ async function handleSaveActiveToken(
     normalizedContractAddress || 'none',
     normalizedContractAddress
       ? marketSnapshot
-        ? 'Activated the tracked token and initialized market data. No strategy version was created automatically.'
-        : 'Activated the tracked token. Live market data will load on the next successful refresh. No strategy version was created automatically.'
+        ? 'Activated the tracked token and reused the latest stored market data. No strategy version was created automatically.'
+        : 'Activated the tracked token. Market data will refresh only on manual refresh or webhook events. No strategy version was created automatically.'
       : 'Cleared the active tracked token. No strategy version was created automatically.',
   );
 
@@ -4049,24 +4292,10 @@ async function handleSaveActiveStrategy(
         );
       }
     }
-
-    try {
-      marketSnapshot = await syncTokenMarketSnapshotForUser(
-        env.TRADINGBOT_DB,
-        user.id,
-        'solana',
-        normalizedContractAddress,
-        rpcUrls,
-        {
-          force: true,
-        },
-      );
-    } catch (err: unknown) {
-      console.warn(
-        `Failed to initialize market snapshot after saving strategy for ${normalizedContractAddress}:`,
-        err,
-      );
-    }
+    marketSnapshot = await loadStoredMarketSnapshotByContractAddress(
+      env.TRADINGBOT_DB,
+      normalizedContractAddress,
+    );
   }
 
   await dbAddAuditLog(
@@ -4193,32 +4422,18 @@ async function handleAddTradableToken(
     { network: body.network, contractAddress: normalizedAddress },
     decimals,
   );
-  let marketSnapshot: TokenMarketSnapshot | null = null;
-  try {
-    marketSnapshot = await syncTokenMarketSnapshotForUser(
-      env.TRADINGBOT_DB,
-      user.id,
-      body.network,
-      normalizedAddress,
-      rpcUrls,
-      {
-        force: true,
-      },
-    );
-  } catch (err: unknown) {
-    console.warn(
-      `Failed to initialize live market data for ${normalizedAddress}:`,
-      err,
-    );
-  }
+  const marketSnapshot = await loadStoredMarketSnapshotByContractAddress(
+    env.TRADINGBOT_DB,
+    normalizedAddress,
+  );
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
     'token.added',
     token.contractAddress,
     marketSnapshot
-      ? `Added tradable token on ${token.network} and recorded the initial market snapshot.`
-      : `Added tradable token on ${token.network}. Live market initialization will retry on the next refresh.`,
+      ? `Added tradable token on ${token.network} and reused the latest stored market snapshot.`
+      : `Added tradable token on ${token.network}. Market data will refresh only on manual refresh or webhook events.`,
   );
   return jsonResponse({ token, marketSnapshot }, 201);
 }
@@ -4347,6 +4562,11 @@ async function handleForceRefreshMarketSnapshot(
       tokenId,
       contractAddress,
       rpcUrls,
+      {
+        maxShards: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+        continueUntilFirstStage: true,
+        timeBudgetMs: 8_000,
+      },
     ).catch((err) => {
       console.warn(
         `Failed to page holder balances for ${contractAddress}:`,

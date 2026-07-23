@@ -135,9 +135,6 @@ export default function App() {
   
   const settingsDirtyRef = React.useRef(false);
   const strategyDraftDirtyRef = React.useRef(false);
-  // Tracks which token address we last attempted to auto-init, to avoid
-  // re-firing every 3-second polling cycle when the snapshot stays null.
-  const marketInitAttemptedRef = React.useRef('');
   const dashboardAutoRefreshInFlightRef = React.useRef(false);
   const latestMarketSnapshotFetchedAtRef = React.useRef<number | null>(null);
   const loadedMarketSnapshotHistoryAtRef = React.useRef<number | null>(null);
@@ -265,38 +262,6 @@ export default function App() {
     }
     void refreshWalletBalances();
   }, [auth?.authenticated, engineState, activeTab, isAdminModalOpen, refreshWalletBalances]);
-
-  // Auto-initialize market data when dashboard loads with active token
-  useEffect(() => {
-    if (!auth?.authenticated || !engineState || activeTab !== 'dashboard') return;
-    const addr = settings.contractAddress.trim();
-    if (!addr) return;
-    if (engineState.marketSnapshot) return; // Already loaded
-    if (marketInitAttemptedRef.current === addr) return; // Already tried for this address
-
-    marketInitAttemptedRef.current = addr;
-    const initializeMarketData = async () => {
-      try {
-        const result = await api<{ marketSnapshot: TokenMarketSnapshot | null }>(
-          '/api/market-snapshot/refresh',
-          { method: 'POST' },
-        );
-        if (result.marketSnapshot) {
-          setEngineState((current) =>
-            current
-              ? {
-                  ...current,
-                  marketSnapshot: result.marketSnapshot,
-                }
-              : current,
-          );
-        }
-      } catch {
-        // Silently fail — user can click Refresh manually
-      }
-    };
-    void initializeMarketData();
-  }, [auth?.authenticated, activeTab, settings.contractAddress, engineState]);
 
   const submitWithFeedback = async (name: string, action: () => Promise<void>) => {
     setSubmitting(name);
@@ -436,8 +401,6 @@ export default function App() {
           { method: 'POST' },
         );
         if (result.marketSnapshot) {
-          // Allow auto-init to retry if user manually refreshes
-          marketInitAttemptedRef.current = '';
           setEngineState((current) =>
             current
               ? {
@@ -623,7 +586,11 @@ export default function App() {
           current ? { ...current, marketSnapshot: result.marketSnapshot } : current,
         );
       }
-      setNotice(result.marketSnapshot ? 'Token activated with live market data.' : 'Token activated.');
+      setNotice(
+        result.marketSnapshot
+          ? 'Token activated with stored market data.'
+          : 'Token activated. Market data refresh now runs only on manual refresh or webhook events.',
+      );
       await refresh();
     });
 
@@ -701,8 +668,8 @@ export default function App() {
         hadActiveContract
           ? 'Tracked token added.'
           : activeMarketSnapshot
-            ? 'Token saved as active with live market data.'
-            : 'Token saved as active.',
+            ? 'Token saved as active with stored market data.'
+            : 'Token saved as active. Market data refresh now runs only on manual refresh or webhook events.',
       );
       await refresh();
     });
