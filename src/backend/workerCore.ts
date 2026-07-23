@@ -104,6 +104,13 @@ export function base58Decode(s: string): Uint8Array {
 }
 
 export function base58Encode(bytes: Uint8Array): string {
+  if (bytes.length === 0) {
+    return '';
+  }
+  if ([...bytes].every((byte) => byte === 0)) {
+    return '1'.repeat(bytes.length);
+  }
+
   const digits: number[] = [0];
   for (const byte of bytes) {
     let carry = byte;
@@ -122,7 +129,8 @@ export function base58Encode(bytes: Uint8Array): string {
     if (byte === 0) result += '1';
     else break;
   }
-  return result + digits.reverse().map((d) => BASE58_ALPHABET[d]).join('');
+  const encoded = digits.reverse().map((d) => BASE58_ALPHABET[d]).join('');
+  return result + encoded;
 }
 
 export function decodeBase64Bytes(value: string): Uint8Array {

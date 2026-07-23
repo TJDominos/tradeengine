@@ -871,12 +871,10 @@ async function reconcileWebhookTransactionDetailsInWindow(
     endTimeMs,
   );
 
-  const incompleteGroups = groups.filter(
-    (group) => group.txSignature && !isWebhookTransactionDetailsComplete(group.mergedDetails),
-  );
+  const groupsToReconcile = groups.filter((group) => group.txSignature);
   let enrichedTransactions = 0;
 
-  for (const group of incompleteGroups) {
+  for (const group of groupsToReconcile) {
     const rpcDetails = await fetchSolanaWebhookTransactionDetailsFromRpc(
       rpcUrls,
       group.txSignature!,
@@ -905,7 +903,12 @@ async function reconcileWebhookTransactionDetailsInWindow(
       preferredWalletAddress,
       mergedDetails,
     );
-    enrichedTransactions += 1;
+    const detailsChanged =
+      JSON.stringify(group.mergedDetails) !== JSON.stringify(mergedDetails) ||
+      preferredWalletAddress !== (group.rows[0]?.wallet_address ?? null);
+    if (detailsChanged) {
+      enrichedTransactions += 1;
+    }
   }
 
   const finalGroups = await dbListSignalGroupsForTokenWindow(
