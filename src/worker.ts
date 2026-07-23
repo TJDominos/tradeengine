@@ -1,8 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import { mnemonicToSeedSync, validateMnemonic } from '@scure/bip39';
-import { wordlist as englishWordlist } from '@scure/bip39/wordlists/english.js';
-import { HDKey } from 'micro-ed25519-hdkey';
 import nacl from 'tweetnacl';
 
 import { ApiError } from './backend/errors';
@@ -29,6 +26,58 @@ import {
   buildManualRefreshStrategyTrigger,
   buildWebhookStrategyTrigger,
 } from './backend/strategy/triggers';
+import {
+  dbAddRpcEndpoint,
+  dbCreateTradableToken,
+  dbDeleteRpcEndpoint,
+  dbGetLatestTokenMarketSnapshot,
+  dbGetTokenMarketSnapshotsByTimeRange,
+  dbInsertTokenMarketSnapshot,
+  dbListRpcEndpoints,
+  dbListTradableTokens,
+  dbResolveSolanaRpcUrls,
+  dbResolveTradableTokenId,
+  dbUpdateTradableTokenMetadata,
+} from './backend/tokenStore';
+import {
+  dbAddAuditLog,
+  dbAuthenticateUser,
+  dbCreateSession,
+  dbCreateUser,
+  dbDeleteOtherSessions,
+  dbDeleteSession,
+  dbGetUserBySessionToken,
+  dbImportManagedKey,
+  dbImportManagedKeyBytes,
+  dbImportWatchAccount,
+  dbListAccounts,
+  dbListAuditLogs,
+  dbListManagedAccountAddresses,
+  dbListRecentSignalsForDebug,
+  dbListTradeLogs,
+  dbListWebhookTransactionLogs,
+  dbLoadManagedKeypairBytes,
+  dbLoadSettings,
+  dbSaveActiveContractAddress,
+  dbSaveSettings,
+  dbSetupRequired,
+  dbVerifyUserPassword,
+} from './backend/userStore';
+import {
+  dbComputeTokenHolderAggregateFromStage,
+  dbCountTokenHolderSyncStageHolders,
+  dbFinalizePagedTokenHolderSync,
+  dbGetTokenHolderAggregate,
+  dbGetTokenHolderSyncState,
+  dbHasTokenHolderRows,
+  dbListOutsideTokenHolders,
+  dbPutTokenHolderSyncState,
+  dbRecomputeTokenHolderAggregate,
+  dbStageTokenHolderBalanceShard,
+  dbStartOrResumeTokenHolderSync,
+  dbSyncTokenHolderBalances,
+  dbUpsertTokenHolderAddresses,
+} from './backend/tokenHolders';
 import type {
   StrategyDefinitionRecord,
   StrategyMarketSnapshot,
@@ -39,2448 +88,109 @@ import type {
   StrategyVersionRecord,
 } from './backend/strategy/types';
 import { nowMs, nowTs, normalizeTimestampMs } from './backend/time';
-
-// ─── environment bindings ────────────────────────────────────────────────────
-
-export interface Env {
-  TRADINGBOT_DB: D1Database;
-  ASSETS: Fetcher;
-  /** 32-byte key encoded as base64 or hex; required for private-key import */
-  PRIVATE_KEY_ENCRYPTION_KEY?: string;
-  /** Optional Solana RPC URL. Falls back to the public mainnet endpoint. */
-  SOLANA_RPC_URL?: string;
-  /** Alchemy webhook signing key used to verify X-Alchemy-Signature. */
-  ALCHEMY_WEBHOOK_SIGNING_KEY?: string;
-  /** Backward-compatible alias for the Alchemy webhook signing key. */
-  ALCHEMY_WEBHOOK_SECRET?: string;
-}
-
-// ─── constants ───────────────────────────────────────────────────────────────
-
-const COOKIE_NAME = 'te_session';
-const SESSION_TTL_HOURS = 12;
-const PBKDF2_ITERATIONS = 100_000; // Max supported by Cloudflare Workers
-const DEFAULT_SOLANA_DERIVATION_PATH = "m/44'/501'/0'/0'";
-const SOLANA_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-const SOLANA_WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
-const SOLANA_SPL_TOKEN_PROGRAM_ID =
-  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
-const SOLANA_TOKEN_2022_PROGRAM_ID =
-  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
-const TOKEN_HOLDER_SYNC_PROGRAM_IDS = [
+import type {
+  AccountRecord,
+  ActiveTokenUpdateRequest,
+  AlchemyWebhookPayload,
+  AuditLog,
+  DerivedChainSignal,
+  Env,
+  HistoricalSetupRecord,
+  ManagedWalletImportRequest,
+  OutsideTokenHolderRecord,
+  RpcEndpoint,
+  RpcEndpointCreateRequest,
+  SessionUser,
+  SettingsState,
+  SettingsUpdateRequest,
+  SignalCreateRequest,
+  SignalRecord,
+  StoredSignalTransactionDetails,
+  TokenHolderAggregateRecord,
+  TokenHolderSyncStateRecord,
+  TokenHolderSyncStatus,
+  TokenHolderSyncSummary,
+  TokenMarketSnapshot,
+  TradableToken,
+  TradableTokenCreateRequest,
+  TrackedTokenDescriptor,
+  TradeLogCreateRequest,
+  TradeLogRecord,
+  WalletBalanceResponse,
+  WalletBalanceToken,
+  WebhookTransactionLogRecord,
+} from './backend/workerShared';
+import {
+  base58Encode,
+  buildSessionCookie,
+  buildTokenHolderSyncSummary,
+  clearSessionCookie,
+  decodeBase64Bytes,
+  dedupeStrings,
+  decryptPrivateKey,
+  deriveSolanaKeypairFromRecoveryPhrase,
+  encryptPrivateKey,
+  errorResponse,
+  extractStoredSignalContractAddresses,
+  extractWebhookTransactionDetailsFromPayload,
+  formatTokenAmount,
+  generateToken,
+  getTokenHolderSyncShardCursor,
+  hashPassword,
+  isRecord,
+  isSecure,
+  isSolanaRpcRateLimitError,
+  jsonResponse,
+  mergeStoredSignalTransactionDetails,
+  normalizePrivateKey,
+  normalizePubkey,
+  normalizeRpcUrl,
+  parseStoredSignalTransactionDetails,
+  readNonEmptyString,
+  readTokenMarketCache,
+  readUint64LittleEndian,
+  readWalletBalanceCache,
+  sessionTokenFromCookie,
+  sha256Hex,
+  solanaPubkeyFromKeypairBytes,
+  tokenMarketCacheKey,
+  tryNormalizeSolanaPubkey,
+  uniqueSolanaPubkeys,
+  validateContractAddress,
+  validateLabel,
+  validatePassword,
+  validateUsername,
+  verifyPassword,
+  walletBalanceCacheKey,
+  writeTokenMarketCache,
+  writeWalletBalanceCache,
+} from './backend/workerCore';
+import {
+  dbEnsureSchema,
+  dbEnsureTradeDomainSchema,
+  parseActiveTokenUpdateRequest,
+  parseCredentialsBody,
+  parseJsonBody,
+  parseJsonText,
+  parseManagedWalletImportRequest,
+  parseRpcEndpointCreateRequest,
+  parseTradableTokenCreateRequest,
+} from './backend/workerSchema';
+import {
+  DEFAULT_SOLANA_DERIVATION_PATH,
   SOLANA_SPL_TOKEN_PROGRAM_ID,
   SOLANA_TOKEN_2022_PROGRAM_ID,
-] as const;
-const TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT = 256;
-const TOKEN_HOLDER_SYNC_TOTAL_SHARDS =
-  TOKEN_HOLDER_SYNC_PROGRAM_IDS.length * TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT;
-const TOKEN_HOLDER_SYNC_SHARDS_PER_REFRESH = 32;
-const WALLET_BALANCE_CACHE_TTL_MS = 30_000;
-const TOKEN_MARKET_CACHE_TTL_MS = 30_000;
-const BASE58_ALPHABET =
-  '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-
-const walletBalanceCache = new Map<
-  string,
-  { expiresAt: number; value: WalletBalanceResponse }
->();
-
-const tokenMarketCache = new Map<
-  string,
-  { expiresAt: number; value: TokenMarketSnapshot }
->();
-
-// ─── types (mirror frontend type shapes) ─────────────────────────────────────
-
-interface SettingsState {
-  contractAddress: string;
-  volatilityTarget: number;
-  pullbackTarget: number;
-  volumeTarget: number;
-  netBuyinTarget: number;
-  timeRangeTarget: string;
-  maxTransactions: number;
-  maxSlippage: number;
-  strategyNotes: string;
-  managedKeyCount: number;
-}
-
-interface SettingsUpdateRequest {
-  contractAddress: string;
-  volatilityTarget: number;
-  pullbackTarget: number;
-  volumeTarget: number;
-  netBuyinTarget: number;
-  timeRangeTarget: string;
-  maxTransactions: number;
-  maxSlippage: number;
-  strategyNotes: string;
-}
-
-interface ActiveTokenUpdateRequest {
-  contractAddress: string;
-}
-
-interface AccountRecord {
-  id: number;
-  label: string;
-  address: string;
-  type: string;
-  createdAt: number;
-}
-
-interface AuditLog {
-  id: number;
-  action: string;
-  target: string;
-  details: string;
-  actor: string;
-  createdAt: number;
-}
-
-interface TradableToken {
-  id: number;
-  network: string;
-  contractAddress: string;
-  symbol: string | null;
-  name: string | null;
-  decimals: number | null;
-  isActive: boolean;
-}
-
-interface TradeLogRecord {
-  id: number;
-  tokenId: number;
-  tokenContractAddress: string | null;
-  tokenSymbol: string | null;
-  walletAddress: string;
-  action: 'BUY' | 'SELL';
-  requestedAmount: number;
-  executedAmount: number | null;
-  executedPrice: number | null;
-  txSignature: string | null;
-  status: 'PENDING' | 'SUCCESS' | 'FAILED';
-  errorMessage: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-interface WebhookTransactionLogRecord {
-  id: number;
-  tokenContractAddress: string | null;
-  tokenSymbol: string | null;
-  walletAddress: string | null;
-  fromWalletAddress: string | null;
-  toWalletAddress: string | null;
-  action: 'BUY' | 'SELL' | null;
-  usdcAmount: number | null;
-  tokenAmount: number | null;
-  feeAmountUsd: number | null;
-  source: 'webhook' | 'rpc_reconcile';
-  eventType: string;
-  txSignature: string | null;
-  status: 'PENDING' | 'CONFIRMED' | 'FAILED';
-  errorMessage: string | null;
-  createdAt: number;
-}
-
-interface TokenHolderAggregateRecord {
-  tokenId: number;
-  activeHolderCount: number;
-  internalHolderCount: number;
-  watchedHolderCount: number;
-  outsiderHolderCount: number;
-  totalAmountHolding: number;
-  internalAmountHolding: number;
-  watchedAmountHolding: number;
-  lastFullSyncAt: number | null;
-  lastDeltaSyncAt: number | null;
-  updatedAt: number;
-  source: string;
-}
-
-interface OutsideTokenHolderRecord {
-  address: string;
-  label: string | null;
-  amountHolding: number;
-  source: string;
-  ownership: 'watch' | 'outside';
-  updatedAt: number;
-}
-
-type TokenHolderSyncStatus = 'idle' | 'running' | 'completed' | 'failed';
-
-interface TokenHolderSyncStateRecord {
-  tokenId: number;
-  runId: string | null;
-  status: TokenHolderSyncStatus;
-  source: string;
-  nextShardIndex: number;
-  processedShardCount: number;
-  totalShardCount: number;
-  stagedHolderCount: number;
-  lastProgramId: string | null;
-  lastOwnerPrefix: number | null;
-  errorMessage: string | null;
-  startedAt: number | null;
-  updatedAt: number;
-  lastCompletedAt: number | null;
-}
-
-interface TokenHolderSyncSummary {
-  status: TokenHolderSyncStatus;
-  mode: 'rpc_owner_prefix_shards';
-  runId: string | null;
-  processedShardCount: number;
-  totalShardCount: number;
-  remainingShardCount: number;
-  shardsProcessedThisRun: number;
-  stagedHolderCount: number;
-  activeHolderCount: number;
-  upsertedCount: number;
-  zeroedCount: number;
-  lastProgramId: string | null;
-  lastOwnerPrefix: number | null;
-  errorMessage: string | null;
-  lastCompletedAt: number | null;
-}
-
-interface StoredSignalTransactionDetails {
-  tokenContractAddress: string | null;
-  fromWalletAddress: string | null;
-  toWalletAddress: string | null;
-  primaryWalletAddress: string | null;
-  action: 'BUY' | 'SELL' | null;
-  usdcAmount: number | null;
-  tokenAmount: number | null;
-  feeAmountUsd: number | null;
-  source: 'webhook' | 'rpc_reconcile';
-  transactionStatus: 'PENDING' | 'CONFIRMED' | 'FAILED';
-  detailSource: 'payload' | 'rpc' | 'payload+rpc' | 'unknown';
-}
-
-interface RpcEndpoint {
-  id: number;
-  network: string;
-  url: string;
-  createdAt: number;
-}
-
-interface TokenMarketSnapshot {
-  network: string;
-  contractAddress: string;
-  tokenName: string | null;
-  tokenSymbol: string | null;
-  priceUsd: number | null;
-  liquidityUsd: number | null;
-  fdv: number | null;
-  volume24h: number | null;
-  totalTransactions24h: number | null;
-  outsidersOverOneUsd: number | null;
-  dexId: string | null;
-  pairAddress: string | null;
-  fetchedAt: number;
-}
-
-interface SignalRecord {
-  id: number;
-  source: string;
-  externalId: string;
-  eventType: string;
-  walletAddress: string | null;
-  txSignature: string | null;
-  payload: string;
-  detailsJson: string | null;
-  processed: boolean;
-  processedState: number;
-  processedAt: number | null;
-  errorMessage: string | null;
-  retryCount: number;
-  createdAt: number;
-}
-
-interface SignalCreateRequest {
-  source: string;
-  externalId: string;
-  eventType: string;
-  walletAddress: string | null;
-  txSignature: string | null;
-  payload: string;
-  detailsJson?: string | null;
-}
-
-interface AlchemyWebhookPayload {
-  webhookId?: unknown;
-  id?: unknown;
-  createdAt?: unknown;
-  type?: unknown;
-  event?: unknown;
-}
-
-interface DerivedChainSignal {
-  externalId: string;
-  eventType: string;
-  walletAddress: string | null;
-  txSignature: string | null;
-  contractAddresses: string[];
-  payload: string;
-}
-
-interface HistoricalSetupRecord {
-  id: number;
-  tokenSymbol: string | null;
-  contractAddress: string | null;
-  timeRangeTarget: string;
-  maxTransactions: number;
-  maxSlippage: number;
-  volumeTarget: number;
-  netBuyinTarget: number;
-  volatilityTarget: number;
-  pullbackTarget: number;
-  createdAt: number;
-}
-
-interface WalletBalanceToken {
-  mint: string;
-  symbol: string;
-  network: string;
-  amount: string;
-  decimals: number | null;
-}
-
-interface WalletBalanceResponse {
-  address: string;
-  sol: string;
-  usdc: string;
-  tokens: WalletBalanceToken[];
-  updatedAt: number;
-}
-
-interface ManagedWalletImportRequest {
-  label: string;
-  adminPassword?: string;
-  privateKey?: string;
-  recoveryPhrase?: string;
-  derivationPath?: string;
-}
-
-interface TradableTokenCreateRequest {
-  network: string;
-  contractAddress: string;
-}
-
-interface RpcEndpointCreateRequest {
-  network: string;
-  url: string;
-}
-
-interface TradeLogCreateRequest {
-  tokenId: number;
-  setupId: number | null;
-  walletAddress: string;
-  action: 'BUY' | 'SELL';
-  requestedAmount: number;
-  executedAmount?: number | null;
-  executedPrice?: number | null;
-  txSignature?: string | null;
-  status: 'PENDING' | 'SUCCESS' | 'FAILED';
-  errorMessage?: string | null;
-}
-
-interface TrackedTokenDescriptor {
-  mint: string;
-  symbol: string;
-  network: string;
-  decimals: number | null;
-}
-
-interface SessionUser {
-  id: number;
-  username: string;
-  role: string;
-}
-
-// ─── response helpers ─────────────────────────────────────────────────────────
-
-function jsonResponse(
-  data: unknown,
-  status = 200,
-  extraHeaders?: Record<string, string>,
-): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'Content-Type': 'application/json', ...extraHeaders },
-  });
-}
-
-function errorResponse(err: unknown): Response {
-  if (err instanceof ApiError) {
-    return jsonResponse({ error: err.message }, err.status);
-  }
-  const errorMsg = err instanceof Error ? err.message : String(err);
-  console.error('Unexpected error:', errorMsg, err);
-  return jsonResponse(
-    { error: 'Internal server error', details: errorMsg },
-    500,
-  );
-}
-
-// ─── misc helpers ─────────────────────────────────────────────────────────────
-
-async function sha256Hex(value: string): Promise<string> {
-  const enc = new TextEncoder();
-  const hash = await crypto.subtle.digest('SHA-256', enc.encode(value));
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function generateToken(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  let binary = '';
-  bytes.forEach((b) => (binary += String.fromCharCode(b)));
-  return btoa(binary)
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '');
-}
-
-// ─── base58 encode / decode ───────────────────────────────────────────────────
-
-function base58Decode(s: string): Uint8Array {
-  const bytes: number[] = [0];
-  for (const char of s) {
-    const idx = BASE58_ALPHABET.indexOf(char);
-    if (idx === -1) throw new Error('Invalid base58 character');
-    let carry = idx;
-    for (let i = 0; i < bytes.length; i++) {
-      carry += bytes[i] * 58;
-      bytes[i] = carry & 0xff;
-      carry >>= 8;
-    }
-    while (carry > 0) {
-      bytes.push(carry & 0xff);
-      carry >>= 8;
-    }
-  }
-  for (const char of s) {
-    if (char === '1') bytes.push(0);
-    else break;
-  }
-  return new Uint8Array(bytes.reverse());
-}
-
-function base58Encode(bytes: Uint8Array): string {
-  const digits: number[] = [0];
-  for (const byte of bytes) {
-    let carry = byte;
-    for (let i = 0; i < digits.length; i++) {
-      carry += digits[i] << 8;
-      digits[i] = carry % 58;
-      carry = Math.floor(carry / 58);
-    }
-    while (carry > 0) {
-      digits.push(carry % 58);
-      carry = Math.floor(carry / 58);
-    }
-  }
-  let result = '';
-  for (const byte of bytes) {
-    if (byte === 0) result += '1';
-    else break;
-  }
-  return result + digits.reverse().map((d) => BASE58_ALPHABET[d]).join('');
-}
-
-function decodeBase64Bytes(value: string): Uint8Array {
-  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
-}
-
-function readUint64LittleEndian(bytes: Uint8Array, offset: number): bigint {
-  let value = 0n;
-  for (let index = 0; index < 8; index += 1) {
-    value |= BigInt(bytes[offset + index] ?? 0) << BigInt(index * 8);
-  }
-  return value;
-}
-
-function getTokenHolderSyncShardCursor(shardIndex: number): {
-  programId: (typeof TOKEN_HOLDER_SYNC_PROGRAM_IDS)[number];
-  ownerPrefix: number;
-} {
-  const normalizedIndex = Math.max(
-    0,
-    Math.min(shardIndex, TOKEN_HOLDER_SYNC_TOTAL_SHARDS - 1),
-  );
-  const programIndex = Math.floor(
-    normalizedIndex / TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT,
-  );
-  return {
-    programId:
-      TOKEN_HOLDER_SYNC_PROGRAM_IDS[programIndex] ??
-      TOKEN_HOLDER_SYNC_PROGRAM_IDS[0],
-    ownerPrefix: normalizedIndex % TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT,
-  };
-}
-
-function buildTokenHolderSyncSummary(
-  state: TokenHolderSyncStateRecord | null,
-  overrides: Partial<TokenHolderSyncSummary> = {},
-): TokenHolderSyncSummary {
-  const baseSummary: TokenHolderSyncSummary = {
-    status: state?.status ?? 'idle',
-    mode: 'rpc_owner_prefix_shards',
-    runId: state?.runId ?? null,
-    processedShardCount: state?.processedShardCount ?? 0,
-    totalShardCount: state?.totalShardCount ?? TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
-    remainingShardCount: Math.max(
-      0,
-      (state?.totalShardCount ?? TOKEN_HOLDER_SYNC_TOTAL_SHARDS) -
-        (state?.processedShardCount ?? 0),
-    ),
-    shardsProcessedThisRun: 0,
-    stagedHolderCount: state?.stagedHolderCount ?? 0,
-    activeHolderCount: state?.stagedHolderCount ?? 0,
-    upsertedCount: 0,
-    zeroedCount: 0,
-    lastProgramId: state?.lastProgramId ?? null,
-    lastOwnerPrefix: state?.lastOwnerPrefix ?? null,
-    errorMessage: state?.errorMessage ?? null,
-    lastCompletedAt: state?.lastCompletedAt ?? null,
-  };
-  const merged = {
-    ...baseSummary,
-    ...overrides,
-  };
-  return {
-    ...merged,
-    remainingShardCount: Math.max(
-      0,
-      merged.totalShardCount - merged.processedShardCount,
-    ),
-  };
-}
-
-// ─── password hashing (PBKDF2 via SubtleCrypto) ───────────────────────────────
-
-async function hashPassword(password: string): Promise<string> {
-  const enc = new TextEncoder();
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    enc.encode(password),
-    'PBKDF2',
-    false,
-    ['deriveBits'],
-  );
-  const derived = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
-    keyMaterial,
-    256,
-  );
-  const hashHex = Array.from(new Uint8Array(derived))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-  const saltHex = Array.from(salt)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-  return `pbkdf2:sha256:${PBKDF2_ITERATIONS}:${saltHex}:${hashHex}`;
-}
-
-async function verifyPassword(
-  password: string,
-  storedHash: string,
-): Promise<boolean> {
-  const parts = storedHash.split(':');
-  if (parts.length !== 5 || parts[0] !== 'pbkdf2') return false;
-  const [, , iterStr, saltHex, expectedHash] = parts;
-  const iterations = parseInt(iterStr, 10);
-  const salt = new Uint8Array(
-    (saltHex.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)),
-  );
-  const enc = new TextEncoder();
-  const keyMaterial = await crypto.subtle.importKey(
-    'raw',
-    enc.encode(password),
-    'PBKDF2',
-    false,
-    ['deriveBits'],
-  );
-  const derived = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
-    keyMaterial,
-    256,
-  );
-  const computedHash = Array.from(new Uint8Array(derived))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-  if (computedHash.length !== expectedHash.length) return false;
-  // Constant-time comparison
-  let diff = 0;
-  for (let i = 0; i < computedHash.length; i++) {
-    diff |= computedHash.charCodeAt(i) ^ expectedHash.charCodeAt(i);
-  }
-  return diff === 0;
-}
-
-// ─── AES-256-GCM private-key encryption ──────────────────────────────────────
-
-function parseEncryptionKey(keyStr: string): Uint8Array {
-  const trimmed = keyStr.trim();
-  // Try base64 (44 chars for 32 bytes)
-  try {
-    const raw = atob(trimmed);
-    if (raw.length === 32) {
-      return new Uint8Array([...raw].map((c) => c.charCodeAt(0)));
-    }
-  } catch {
-    // not valid base64
-  }
-  // Try hex (64 hex chars for 32 bytes)
-  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
-    return new Uint8Array(
-      (trimmed.match(/.{2}/g) ?? []).map((b) => parseInt(b, 16)),
-    );
-  }
-  throw new ApiError(
-    503,
-    'PRIVATE_KEY_ENCRYPTION_KEY must be base64 or hex and decode to exactly 32 bytes',
-  );
-}
-
-async function encryptPrivateKey(
-  secretBytes: Uint8Array,
-  keyStr: string,
-): Promise<string> {
-  const keyBytes = parseEncryptionKey(keyStr);
-  const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, [
-    'encrypt',
-  ]);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    secretBytes,
-  );
-  const payload = new Uint8Array(12 + ciphertext.byteLength);
-  payload.set(iv);
-  payload.set(new Uint8Array(ciphertext), 12);
-  let binary = '';
-  payload.forEach((b) => (binary += String.fromCharCode(b)));
-  return btoa(binary);
-}
-
-async function decryptPrivateKey(
-  encryptedB64: string,
-  keyStr: string,
-): Promise<Uint8Array> {
-  const keyBytes = parseEncryptionKey(keyStr);
-  const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, [
-    'decrypt',
-  ]);
-  const payload = Uint8Array.from(atob(encryptedB64), (c) => c.charCodeAt(0));
-  const iv = payload.slice(0, 12);
-  const ciphertext = payload.slice(12);
-  const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
-  return new Uint8Array(decrypted);
-}
-
-function normalizeWhitespace(value: string): string {
-  return value.trim().split(/\s+/).filter(Boolean).join(' ');
-}
-
-// ─── Solana key helpers ───────────────────────────────────────────────────────
-
-function normalizePrivateKey(raw: string): Uint8Array {
-  const trimmed = raw.trim();
-  if (!trimmed) throw new ApiError(400, 'Private key is required');
-  if (trimmed.startsWith('[')) {
-    let values: number[];
-    try {
-      values = JSON.parse(trimmed) as number[];
-    } catch {
-      throw new ApiError(400, 'Private key JSON array could not be parsed');
-    }
-    if (!Array.isArray(values) || values.some((v) => typeof v !== 'number')) {
-      throw new ApiError(400, 'Private key JSON array could not be parsed');
-    }
-    return new Uint8Array(values);
-  }
-  try {
-    return base58Decode(trimmed);
-  } catch {
-    throw new ApiError(
-      400,
-      'Private key must be a base58 string or JSON array',
-    );
-  }
-}
-
-function normalizeRecoveryPhrase(raw: string): string {
-  const normalized = normalizeWhitespace(raw).toLowerCase();
-  if (!normalized) {
-    throw new ApiError(400, 'Recovery phrase is required');
-  }
-  const wordCount = normalized.split(' ').length;
-  if (wordCount !== 12 && wordCount !== 24) {
-    throw new ApiError(400, 'Recovery phrase must contain 12 or 24 words');
-  }
-  if (!validateMnemonic(normalized, englishWordlist)) {
-    throw new ApiError(400, 'Recovery phrase is not a valid BIP39 mnemonic');
-  }
-  return normalized;
-}
-
-function deriveSolanaKeypairFromRecoveryPhrase(
-  recoveryPhraseRaw: string,
-  derivationPath = DEFAULT_SOLANA_DERIVATION_PATH,
-): Uint8Array {
-  const recoveryPhrase = normalizeRecoveryPhrase(recoveryPhraseRaw);
-  if (!/^m(\/[0-9]+'?)+$/.test(derivationPath)) {
-    throw new ApiError(400, 'Invalid derivation path');
-  }
-  const seed = mnemonicToSeedSync(recoveryPhrase);
-  const derived = HDKey.fromMasterSeed(seed).derive(derivationPath);
-  if (!derived.privateKey || derived.privateKey.length !== 32) {
-    throw new ApiError(
-      400,
-      'Could not derive a Solana private key from the recovery phrase',
-    );
-  }
-  return nacl.sign.keyPair.fromSeed(derived.privateKey).secretKey;
-}
-
-/** Extract the base58-encoded public key from a 64-byte Solana keypair. */
-function solanaPubkeyFromKeypairBytes(keypairBytes: Uint8Array): string {
-  if (keypairBytes.length !== 64) {
-    throw new ApiError(
-      400,
-      'Private key must decode to a 64-byte Solana keypair',
-    );
-  }
-  // Solana keypair layout: [32-byte seed | 32-byte public key]
-  return base58Encode(keypairBytes.slice(32));
-}
-
-function normalizePubkey(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) throw new ApiError(400, 'Account address is required');
-  try {
-    const decoded = base58Decode(trimmed);
-    if (decoded.length !== 32) throw new Error('wrong length');
-    return base58Encode(decoded);
-  } catch {
-    throw new ApiError(
-      400,
-      'Account address must be a valid Solana public key',
-    );
-  }
-}
-
-function validateContractAddress(value: string): void {
-  if (!value.trim()) return;
-  normalizePubkey(value);
-}
-
-function normalizeRpcUrl(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    throw new ApiError(400, 'RPC URL is required');
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    throw new ApiError(400, 'RPC URL must be a valid http or https URL');
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new ApiError(400, 'RPC URL must use http or https');
-  }
-  return parsed.toString();
-}
-
-function dedupeStrings(values: string[]): string[] {
-  const seen = new Set<string>();
-  const deduped: string[] = [];
-  for (const value of values) {
-    const trimmed = value.trim();
-    if (!trimmed || seen.has(trimmed)) continue;
-    seen.add(trimmed);
-    deduped.push(trimmed);
-  }
-  return deduped;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value != null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function readNonEmptyString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0
-    ? value.trim()
-    : null;
-}
-
-function tryNormalizeSolanaPubkey(value: unknown): string | null {
-  const text = readNonEmptyString(value);
-  if (!text) {
-    return null;
-  }
-  try {
-    return normalizePubkey(text);
-  } catch {
-    return null;
-  }
-}
-
-function uniqueSolanaPubkeys(values: unknown[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const value of values) {
-    const pubkey = tryNormalizeSolanaPubkey(value);
-    if (!pubkey || seen.has(pubkey)) {
-      continue;
-    }
-    seen.add(pubkey);
-    result.push(pubkey);
-  }
-  return result;
-}
-
-function formatTokenAmount(rawAmount: bigint, decimals: number): string {
-  if (decimals <= 0) return rawAmount.toString();
-  const base = 10n ** BigInt(decimals);
-  const whole = rawAmount / base;
-  const fraction = rawAmount % base;
-  if (fraction === 0n) return whole.toString();
-  const fractionText = fraction
-    .toString()
-    .padStart(decimals, '0')
-    .replace(/0+$/, '');
-  return `${whole.toString()}.${fractionText}`;
-}
-
-function walletBalanceCacheKey(
-  address: string,
-  trackedTokens: TrackedTokenDescriptor[],
-): string {
-  const tokenKey = trackedTokens
-    .map((token) => `${token.network}:${token.mint}`)
-    .sort()
-    .join('|');
-  return `${address}|${tokenKey}`;
-}
-
-function readWalletBalanceCache(
-  cacheKey: string,
-): WalletBalanceResponse | null {
-  const cached = walletBalanceCache.get(cacheKey);
-  if (!cached) return null;
-  if (cached.expiresAt <= Date.now()) {
-    walletBalanceCache.delete(cacheKey);
-    return null;
-  }
-  return cached.value;
-}
-
-function writeWalletBalanceCache(
-  cacheKey: string,
-  value: WalletBalanceResponse,
-): void {
-  walletBalanceCache.set(cacheKey, {
-    expiresAt: Date.now() + WALLET_BALANCE_CACHE_TTL_MS,
-    value,
-  });
-}
-
-function tokenMarketCacheKey(network: string, contractAddress: string): string {
-  return `${network}:${contractAddress}`;
-}
-
-function readTokenMarketCache(
-  cacheKey: string,
-): TokenMarketSnapshot | null {
-  const cached = tokenMarketCache.get(cacheKey);
-  if (!cached) return null;
-  if (cached.expiresAt <= Date.now()) {
-    tokenMarketCache.delete(cacheKey);
-    return null;
-  }
-  return cached.value;
-}
-
-function writeTokenMarketCache(
-  cacheKey: string,
-  value: TokenMarketSnapshot,
-): void {
-  tokenMarketCache.set(cacheKey, {
-    expiresAt: Date.now() + TOKEN_MARKET_CACHE_TTL_MS,
-    value,
-  });
-}
-
-function toFiniteNumber(value: unknown): number | null {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null;
-  }
-  if (typeof value === 'string') {
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function extractStoredSignalContractAddresses(payloadText: string): string[] {
-  let payload: unknown;
-  try {
-    payload = parseJsonText<unknown>(payloadText);
-  } catch {
-    return [];
-  }
-
-  if (!isRecord(payload)) {
-    return [];
-  }
-
-  const activity = isRecord(payload.activity) ? payload.activity : null;
-  const rawContract = activity && isRecord(activity.rawContract)
-    ? activity.rawContract
-    : null;
-  const log = isRecord(payload.log) ? payload.log : null;
-  const event = isRecord(payload.event) ? payload.event : null;
-  const firstActivity =
-    event && Array.isArray(event.activity)
-      ? event.activity.find((item): item is Record<string, unknown> => isRecord(item)) ?? null
-      : null;
-  const firstRawContract = firstActivity && isRecord(firstActivity.rawContract)
-    ? firstActivity.rawContract
-    : null;
-  const data = event && isRecord(event.data) ? event.data : null;
-  const block = data && isRecord(data.block) ? data.block : null;
-  const firstLog =
-    block && Array.isArray(block.logs)
-      ? block.logs.find((item): item is Record<string, unknown> => isRecord(item)) ?? null
-      : null;
-
-  return uniqueSolanaPubkeys([
-    rawContract?.address,
-    activity?.contractAddress,
-    activity?.tokenAddress,
-    activity?.mint,
-    log?.address,
-    log?.contractAddress,
-    log?.tokenAddress,
-    log?.mint,
-    firstRawContract?.address,
-    firstActivity?.contractAddress,
-    firstActivity?.tokenAddress,
-    firstActivity?.mint,
-    firstLog?.address,
-    firstLog?.contractAddress,
-    firstLog?.tokenAddress,
-    firstLog?.mint,
-    event?.contractAddress,
-    event?.address,
-    event?.tokenAddress,
-    event?.mint,
-    payload.contractAddress,
-    payload.address,
-    payload.tokenAddress,
-    payload.mint,
-  ]);
-}
-
-function parseStoredSignalTransactionDetails(
-  detailsJson: string | null | undefined,
-): StoredSignalTransactionDetails | null {
-  if (!detailsJson) {
-    return null;
-  }
-
-  let payload: unknown;
-  try {
-    payload = parseJsonText<unknown>(detailsJson);
-  } catch {
-    return null;
-  }
-
-  if (!isRecord(payload)) {
-    return null;
-  }
-
-  const actionText = readNonEmptyString(payload.action)?.toUpperCase();
-  const statusText = readNonEmptyString(payload.transactionStatus)?.toUpperCase();
-  const detailSourceText = readNonEmptyString(payload.detailSource);
-
-  return {
-    tokenContractAddress: tryNormalizeSolanaPubkey(payload.tokenContractAddress),
-    fromWalletAddress: tryNormalizeSolanaPubkey(payload.fromWalletAddress),
-    toWalletAddress: tryNormalizeSolanaPubkey(payload.toWalletAddress),
-    primaryWalletAddress: tryNormalizeSolanaPubkey(payload.primaryWalletAddress),
-    action: actionText === 'BUY' || actionText === 'SELL' ? actionText : null,
-    usdcAmount: toFiniteNumber(payload.usdcAmount),
-    tokenAmount: toFiniteNumber(payload.tokenAmount),
-    feeAmountUsd: toFiniteNumber(payload.feeAmountUsd),
-    source:
-      readNonEmptyString(payload.source) === 'rpc_reconcile'
-        ? 'rpc_reconcile'
-        : 'webhook',
-    transactionStatus:
-      statusText === 'CONFIRMED' || statusText === 'FAILED' || statusText === 'PENDING'
-        ? statusText
-        : 'PENDING',
-    detailSource:
-      detailSourceText === 'payload' ||
-      detailSourceText === 'rpc' ||
-      detailSourceText === 'payload+rpc' ||
-      detailSourceText === 'unknown'
-        ? detailSourceText
-        : 'unknown',
-  };
-}
-
-function mergeStoredSignalTransactionDetails(
-  ...detailsList: Array<Partial<StoredSignalTransactionDetails> | null | undefined>
-): StoredSignalTransactionDetails {
-  const merged: StoredSignalTransactionDetails = {
-    tokenContractAddress: null,
-    fromWalletAddress: null,
-    toWalletAddress: null,
-    primaryWalletAddress: null,
-    action: null,
-    usdcAmount: null,
-    tokenAmount: null,
-    feeAmountUsd: null,
-    source: 'webhook',
-    transactionStatus: 'PENDING',
-    detailSource: 'unknown',
-  };
-
-  for (const details of detailsList) {
-    if (!details) continue;
-    merged.tokenContractAddress ??= details.tokenContractAddress ?? null;
-    merged.fromWalletAddress ??= details.fromWalletAddress ?? null;
-    merged.toWalletAddress ??= details.toWalletAddress ?? null;
-    merged.primaryWalletAddress ??= details.primaryWalletAddress ?? null;
-    merged.action ??= details.action ?? null;
-    merged.usdcAmount ??= details.usdcAmount ?? null;
-    merged.tokenAmount ??= details.tokenAmount ?? null;
-    merged.feeAmountUsd ??= details.feeAmountUsd ?? null;
-
-    if (details.transactionStatus === 'FAILED') {
-      merged.transactionStatus = 'FAILED';
-    } else if (
-      merged.transactionStatus !== 'FAILED' &&
-      details.transactionStatus === 'PENDING'
-    ) {
-      merged.transactionStatus = 'PENDING';
-    } else if (
-      merged.transactionStatus === 'PENDING' &&
-      details.transactionStatus === 'CONFIRMED'
-    ) {
-      merged.transactionStatus = 'CONFIRMED';
-    }
-
-    if (details.detailSource) {
-      merged.detailSource =
-        merged.detailSource === 'unknown'
-          ? details.detailSource
-          : merged.detailSource === details.detailSource
-            ? merged.detailSource
-            : 'payload+rpc';
-    }
-  }
-
-  return merged;
-}
-
-function extractWebhookTransactionDetailsFromPayload(
-  payloadText: string,
-  trackedContractAddress: string,
-): Partial<StoredSignalTransactionDetails> {
-  let payload: unknown;
-  try {
-    payload = parseJsonText<unknown>(payloadText);
-  } catch {
-    return {};
-  }
-
-  if (!isRecord(payload)) {
-    return {};
-  }
-
-  const activity = isRecord(payload.activity) ? payload.activity : null;
-  const log = isRecord(payload.log) ? payload.log : null;
-  const transaction = log && isRecord(log.transaction) ? log.transaction : null;
-  const from = transaction && isRecord(transaction.from) ? transaction.from : null;
-  const to = transaction && isRecord(transaction.to) ? transaction.to : null;
-  const rawContract = activity && isRecord(activity.rawContract)
-    ? activity.rawContract
-    : null;
-
-  const fromWalletAddress =
-    tryNormalizeSolanaPubkey(activity?.fromAddress) ??
-    tryNormalizeSolanaPubkey(from?.address) ??
-    null;
-  const toWalletAddress =
-    tryNormalizeSolanaPubkey(activity?.toAddress) ??
-    tryNormalizeSolanaPubkey(to?.address) ??
-    null;
-
-  const activityContractAddress =
-    tryNormalizeSolanaPubkey(rawContract?.address) ??
-    tryNormalizeSolanaPubkey(activity?.contractAddress) ??
-    tryNormalizeSolanaPubkey(activity?.tokenAddress) ??
-    tryNormalizeSolanaPubkey(activity?.mint) ??
-    null;
-  const logContractAddress =
-    tryNormalizeSolanaPubkey(log?.contractAddress) ??
-    tryNormalizeSolanaPubkey(log?.tokenAddress) ??
-    tryNormalizeSolanaPubkey(log?.mint) ??
-    tryNormalizeSolanaPubkey(log?.address) ??
-    null;
-  const tokenContractAddress =
-    [activityContractAddress, logContractAddress, trackedContractAddress]
-      .find((address) => address != null && address !== SOLANA_USDC_MINT) ??
-    trackedContractAddress;
-
-  const amountCandidate =
-    toFiniteNumber(activity?.amount) ??
-    toFiniteNumber(activity?.value) ??
-    toFiniteNumber(activity?.tokenAmount) ??
-    toFiniteNumber(log?.amount) ??
-    toFiniteNumber(log?.value) ??
-    toFiniteNumber(log?.tokenAmount);
-
-  const symbolHint = readNonEmptyString(activity?.asset)?.toUpperCase() ?? '';
-  const categoryHint = readNonEmptyString(activity?.category)?.toLowerCase() ?? '';
-  const action =
-    categoryHint.includes('buy')
-      ? 'BUY'
-      : categoryHint.includes('sell')
-        ? 'SELL'
-        : null;
-
-  const details: Partial<StoredSignalTransactionDetails> = {
-    tokenContractAddress,
-    fromWalletAddress,
-    toWalletAddress,
-    action,
-    detailSource: 'payload',
-    source: 'webhook',
-  };
-
-  const payloadFee =
-    toFiniteNumber(activity?.fee) ??
-    toFiniteNumber(activity?.feeUsd) ??
-    toFiniteNumber(activity?.feeUSD) ??
-    toFiniteNumber(log?.fee) ??
-    toFiniteNumber(log?.feeUsd) ??
-    toFiniteNumber(log?.feeUSD);
-  if (payloadFee != null) {
-    details.feeAmountUsd = Math.abs(payloadFee);
-  }
-
-  if (amountCandidate != null) {
-    if (
-      activityContractAddress === SOLANA_USDC_MINT ||
-      logContractAddress === SOLANA_USDC_MINT ||
-      symbolHint === 'USDC'
-    ) {
-      details.usdcAmount = Math.abs(amountCandidate);
-    } else if (
-      tokenContractAddress &&
-      (activityContractAddress === tokenContractAddress || logContractAddress === tokenContractAddress)
-    ) {
-      details.tokenAmount = Math.abs(amountCandidate);
-    }
-  }
-
-  return details;
-}
-
-// ─── input validation ─────────────────────────────────────────────────────────
-
-function validateLabel(label: string): void {
-  const t = label.trim();
-  if (t.length < 3 || t.length > 80) {
-    throw new ApiError(400, 'Label must be between 3 and 80 characters');
-  }
-}
-
-function validateUsername(username: string): void {
-  const t = username.trim();
-  if (t.length < 3 || t.length > 64) {
-    throw new ApiError(400, 'Username must be between 3 and 64 characters');
-  }
-  if (!/^[a-zA-Z0-9_.-]+$/.test(t)) {
-    throw new ApiError(
-      400,
-      "Username may only include letters, numbers, '.', '_' and '-'",
-    );
-  }
-}
-
-function validatePassword(password: string): void {
-  if (password.length < 12) {
-    throw new ApiError(400, 'Password must be at least 12 characters');
-  }
-}
-
-// ─── cookie helpers ───────────────────────────────────────────────────────────
-
-function sessionTokenFromCookie(cookieHeader: string | null): string | null {
-  if (!cookieHeader) return null;
-  for (const part of cookieHeader.split(';')) {
-    const trimmed = part.trim();
-    if (trimmed.startsWith(`${COOKIE_NAME}=`)) {
-      return trimmed.slice(COOKIE_NAME.length + 1);
-    }
-  }
-  return null;
-}
-
-function buildSessionCookie(
-  token: string,
-  ttlHours: number,
-  secure: boolean,
-): string {
-  const maxAge = ttlHours * 3600;
-  return (
-    `${COOKIE_NAME}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${maxAge}` +
-    (secure ? '; Secure' : '')
-  );
-}
-
-function clearSessionCookie(): string {
-  return `${COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0`;
-}
-
-function isSecure(request: Request): boolean {
-  return new URL(request.url).protocol === 'https:';
-}
+  SOLANA_USDC_MINT,
+  SOLANA_WRAPPED_SOL_MINT,
+  TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT,
+  TOKEN_HOLDER_SYNC_PROGRAM_IDS,
+  TOKEN_HOLDER_SYNC_SHARDS_PER_REFRESH,
+  TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+  TOKEN_MARKET_CACHE_TTL_MS,
+  SESSION_TTL_HOURS,
+} from './backend/workerShared';
 
 // ─── D1 database operations ───────────────────────────────────────────────────
-
-const D1_SCHEMA_STATEMENTS = [
-  `CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'admin',
-    created_at INTEGER NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
-    token_hash TEXT NOT NULL UNIQUE,
-    expires_at INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS settings (
-    user_id INTEGER NOT NULL,
-    key TEXT NOT NULL,
-    value TEXT NOT NULL,
-    PRIMARY KEY (user_id, key),
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS accounts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    type TEXT NOT NULL,
-    label TEXT NOT NULL,
-    wallet_address TEXT NOT NULL,
-    encrypted_private_key TEXT,
-    created_at INTEGER NOT NULL,
-    UNIQUE(user_id, type, wallet_address),
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    action TEXT NOT NULL,
-    target TEXT NOT NULL,
-    details TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  )`,
-  'CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash)',
-  'CREATE INDEX IF NOT EXISTS idx_accounts_user_type ON accounts(user_id, type)',
-  'CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created_at ON audit_logs(user_id, created_at DESC)',
-];
-
-const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
-  `CREATE TABLE IF NOT EXISTS tradable_tokens (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    network TEXT NOT NULL DEFAULT 'solana',
-    contract_address TEXT NOT NULL,
-    symbol TEXT,
-    name TEXT,
-    decimals INTEGER,
-    is_active INTEGER NOT NULL DEFAULT 1,
-    created_at INTEGER NOT NULL,
-    UNIQUE(network, contract_address)
-  )`,
-  `CREATE TABLE IF NOT EXISTS token_market_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_id INTEGER NOT NULL,
-    network TEXT NOT NULL DEFAULT 'solana',
-    contract_address TEXT NOT NULL,
-    token_name TEXT,
-    token_symbol TEXT,
-    price_usd REAL,
-    liquidity_usd REAL,
-    fdv REAL,
-    volume_24h REAL,
-    total_transactions_24h INTEGER,
-    outsiders_over_one_usd INTEGER,
-    dex_id TEXT,
-    pair_address TEXT,
-    fetched_at INTEGER NOT NULL,
-    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source TEXT NOT NULL,
-    external_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    wallet_address TEXT,
-    tx_signature TEXT,
-    payload TEXT NOT NULL,
-    details_json TEXT,
-    processed INTEGER NOT NULL DEFAULT 0,
-    processed_at INTEGER,
-    error_message TEXT,
-    retry_count INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    UNIQUE(source, external_id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS positions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    wallet_address TEXT NOT NULL,
-    token_id INTEGER NOT NULL,
-    quantity REAL NOT NULL DEFAULT 0,
-    avg_cost REAL NOT NULL DEFAULT 0,
-    realized_pnl REAL NOT NULL DEFAULT 0,
-    updated_at INTEGER NOT NULL,
-    UNIQUE(wallet_address, token_id),
-    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS trade_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_id INTEGER NOT NULL,
-    signal_id INTEGER,
-    setup_id INTEGER,
-    wallet_address TEXT NOT NULL,
-    action TEXT NOT NULL CHECK(action IN ('BUY', 'SELL')),
-    requested_amount REAL NOT NULL,
-    executed_amount REAL,
-    executed_price REAL,
-    tx_signature TEXT,
-    status TEXT NOT NULL DEFAULT 'PENDING'
-      CHECK(status IN ('PENDING', 'SUCCESS', 'FAILED')),
-    error_message TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id),
-    FOREIGN KEY(setup_id) REFERENCES historic_setups(id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS historic_setups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    token_id INTEGER,
-    time_range_target TEXT NOT NULL,
-    max_transactions INTEGER NOT NULL,
-    max_slippage REAL NOT NULL,
-    volume_target REAL NOT NULL DEFAULT 0,
-    net_buyin_target REAL NOT NULL DEFAULT 0,
-    volatility_target REAL NOT NULL DEFAULT 0,
-    pullback_target REAL NOT NULL DEFAULT 0,
-    contract_address TEXT,
-    metadata TEXT,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id)
-  )`,
-  `CREATE TABLE IF NOT EXISTS strategy_definitions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    strategy_type TEXT NOT NULL,
-    current_version_id INTEGER,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    UNIQUE(user_id, strategy_type),
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS strategy_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    strategy_id INTEGER NOT NULL,
-    version_no INTEGER NOT NULL,
-    schema_version INTEGER NOT NULL,
-    engine_version TEXT NOT NULL,
-    strategy_type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    params_json TEXT NOT NULL,
-    triggers_json TEXT NOT NULL,
-    targets_json TEXT NOT NULL,
-    risk_json TEXT NOT NULL,
-    execution_json TEXT NOT NULL,
-    metadata_json TEXT NOT NULL,
-    checksum TEXT NOT NULL,
-    change_note TEXT,
-    created_at INTEGER NOT NULL,
-    activated_at INTEGER,
-    UNIQUE(strategy_id, version_no),
-    FOREIGN KEY(strategy_id) REFERENCES strategy_definitions(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS strategy_evaluations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    strategy_version_id INTEGER NOT NULL,
-    source TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    external_id TEXT,
-    contract_address TEXT NOT NULL,
-    wallet_address TEXT,
-    tx_signature TEXT,
-    status TEXT NOT NULL,
-    should_execute INTEGER NOT NULL DEFAULT 0,
-    dry_run INTEGER NOT NULL DEFAULT 1,
-    summary_json TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY(strategy_version_id) REFERENCES strategy_versions(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS token_holder_addresses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_id INTEGER NOT NULL,
-    wallet_address TEXT NOT NULL,
-    amount_holding REAL NOT NULL DEFAULT 0,
-    source TEXT NOT NULL DEFAULT 'rpc_scan',
-    first_seen_at INTEGER NOT NULL,
-    last_seen_at INTEGER NOT NULL,
-    UNIQUE(token_id, wallet_address),
-    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS token_holder_transaction_deltas (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_id INTEGER NOT NULL,
-    tx_signature TEXT NOT NULL,
-    wallet_from TEXT,
-    wallet_to TEXT,
-    token_amount REAL NOT NULL,
-    source TEXT NOT NULL DEFAULT 'tx_delta',
-    applied_at INTEGER NOT NULL,
-    UNIQUE(token_id, tx_signature),
-    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS token_holder_aggregates (
-    token_id INTEGER PRIMARY KEY,
-    active_holder_count INTEGER NOT NULL DEFAULT 0,
-    internal_holder_count INTEGER NOT NULL DEFAULT 0,
-    watched_holder_count INTEGER NOT NULL DEFAULT 0,
-    outsider_holder_count INTEGER NOT NULL DEFAULT 0,
-    total_amount_holding REAL NOT NULL DEFAULT 0,
-    internal_amount_holding REAL NOT NULL DEFAULT 0,
-    watched_amount_holding REAL NOT NULL DEFAULT 0,
-    last_full_sync_at INTEGER,
-    last_delta_sync_at INTEGER,
-    updated_at INTEGER NOT NULL,
-    source TEXT NOT NULL DEFAULT 'rpc_full_sync',
-    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS token_holder_sync_states (
-    token_id INTEGER PRIMARY KEY,
-    run_id TEXT,
-    status TEXT NOT NULL DEFAULT 'idle'
-      CHECK(status IN ('idle', 'running', 'completed', 'failed')),
-    source TEXT NOT NULL DEFAULT 'rpc_owner_prefix_shards',
-    next_shard_index INTEGER NOT NULL DEFAULT 0,
-    processed_shard_count INTEGER NOT NULL DEFAULT 0,
-    total_shard_count INTEGER NOT NULL DEFAULT 512,
-    staged_holder_count INTEGER NOT NULL DEFAULT 0,
-    last_program_id TEXT,
-    last_owner_prefix INTEGER,
-    error_message TEXT,
-    started_at INTEGER,
-    updated_at INTEGER NOT NULL,
-    last_completed_at INTEGER,
-    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS token_holder_sync_stage (
-    token_id INTEGER NOT NULL,
-    run_id TEXT NOT NULL,
-    shard_index INTEGER NOT NULL,
-    wallet_address TEXT NOT NULL,
-    amount_holding REAL NOT NULL DEFAULT 0,
-    source TEXT NOT NULL DEFAULT 'rpc_owner_prefix_shards',
-    updated_at INTEGER NOT NULL,
-    PRIMARY KEY(token_id, run_id, shard_index, wallet_address),
-    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE CASCADE
-  )`,
-  `CREATE TABLE IF NOT EXISTS rpc_endpoints (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    network TEXT NOT NULL DEFAULT 'solana',
-    url TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    UNIQUE(user_id, network, url),
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  )`,
-  'CREATE INDEX IF NOT EXISTS idx_positions_wallet ON positions(wallet_address)',
-  'CREATE INDEX IF NOT EXISTS idx_signals_processed_created ON signals(processed, created_at)',
-  'CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source)',
-  'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_token_fetched ON token_market_snapshots(token_id, fetched_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_contract_fetched ON token_market_snapshots(network, contract_address, fetched_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_trade_logs_token_created ON trade_logs(token_id, created_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_trade_logs_wallet_created ON trade_logs(wallet_address, created_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_strategy_definitions_user_type ON strategy_definitions(user_id, strategy_type)',
-  'CREATE INDEX IF NOT EXISTS idx_strategy_versions_strategy_created ON strategy_versions(strategy_id, created_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_version_created ON strategy_evaluations(strategy_version_id, created_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_user_created ON strategy_evaluations(user_id, created_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_wallet ON token_holder_addresses(token_id, wallet_address)',
-  'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_amount ON token_holder_addresses(token_id, amount_holding DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_token_holder_transaction_deltas_token_sig ON token_holder_transaction_deltas(token_id, tx_signature)',
-  'CREATE INDEX IF NOT EXISTS idx_token_holder_aggregates_updated ON token_holder_aggregates(updated_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_token_holder_sync_states_status_updated ON token_holder_sync_states(status, updated_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_token_holder_sync_stage_token_run_updated ON token_holder_sync_stage(token_id, run_id, shard_index, updated_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_rpc_endpoints_user_network_created ON rpc_endpoints(user_id, network, created_at DESC)',
-];
-
-const D1_TRADE_DOMAIN_TABLE_STATEMENTS = D1_TRADE_DOMAIN_SCHEMA_STATEMENTS.filter(
-  (statement) => !statement.startsWith('CREATE INDEX'),
-);
-
-const D1_TRADE_DOMAIN_INDEX_STATEMENTS = D1_TRADE_DOMAIN_SCHEMA_STATEMENTS.filter(
-  (statement) => statement.startsWith('CREATE INDEX'),
-);
-
-interface CredentialsBody {
-  username: string;
-  password: string;
-}
-
-let schemaInitPromise: Promise<void> | undefined;
-let tradeDomainSchemaInitPromise: Promise<void> | undefined;
-
-async function dbEnsureTableColumn(
-  db: D1Database,
-  tableName: string,
-  columnName: string,
-  columnDefinition: string,
-): Promise<void> {
-  const rows = await db
-    .prepare(`PRAGMA table_info(${tableName})`)
-    .all<{
-      name: string;
-    }>();
-  if (rows.results.some((row) => row.name === columnName)) {
-    return;
-  }
-  await db
-    .prepare(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`)
-    .run();
-}
-
-async function dbEnsureSchema(db: D1Database): Promise<void> {
-  if (!schemaInitPromise) {
-    schemaInitPromise = db
-      .batch(D1_SCHEMA_STATEMENTS.map((statement) => db.prepare(statement)))
-      .then(() => undefined)
-      .catch((err) => {
-        schemaInitPromise = undefined;
-        throw err;
-      });
-  }
-  await schemaInitPromise;
-}
-
-async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
-  await dbEnsureSchema(db);
-  if (!tradeDomainSchemaInitPromise) {
-    tradeDomainSchemaInitPromise = db
-      .batch(
-        D1_TRADE_DOMAIN_TABLE_STATEMENTS.map((statement) =>
-          db.prepare(statement),
-        ),
-      )
-      .then(async () => {
-        await dbEnsureTableColumn(db, 'signals', 'details_json', 'TEXT');
-        await dbEnsureTableColumn(
-          db,
-          'token_holder_addresses',
-          'amount_holding',
-          'REAL NOT NULL DEFAULT 0',
-        );
-        await dbEnsureTableColumn(
-          db,
-          'token_holder_addresses',
-          'source',
-          "TEXT NOT NULL DEFAULT 'rpc_scan'",
-        );
-        await dbEnsureTableColumn(
-          db,
-          'token_holder_addresses',
-          'first_seen_at',
-          'INTEGER NOT NULL DEFAULT 0',
-        );
-        await dbEnsureTableColumn(
-          db,
-          'token_holder_addresses',
-          'last_seen_at',
-          'INTEGER NOT NULL DEFAULT 0',
-        );
-        await db.batch(
-          D1_TRADE_DOMAIN_INDEX_STATEMENTS.map((statement) =>
-            db.prepare(statement),
-          ),
-        );
-      })
-      .catch((err) => {
-        tradeDomainSchemaInitPromise = undefined;
-        throw err;
-      });
-  }
-  await tradeDomainSchemaInitPromise;
-}
-
-async function parseJsonBody<T>(request: Request): Promise<T> {
-  try {
-    return await request.json<T>();
-  } catch {
-    throw new ApiError(400, 'Request body must be valid JSON');
-  }
-}
-
-function parseJsonText<T>(body: string): T {
-  try {
-    return JSON.parse(body) as T;
-  } catch {
-    throw new ApiError(400, 'Request body must be valid JSON');
-  }
-}
-
-function parseCredentialsBody(body: unknown): CredentialsBody {
-  if (!body || typeof body !== 'object') {
-    throw new ApiError(400, 'Username and password are required');
-  }
-  const { username, password } = body as {
-    username?: unknown;
-    password?: unknown;
-  };
-  if (typeof username !== 'string' || typeof password !== 'string') {
-    throw new ApiError(400, 'Username and password are required');
-  }
-  return { username, password };
-}
-
-function parseManagedWalletImportRequest(
-  body: unknown,
-): ManagedWalletImportRequest {
-  if (!body || typeof body !== 'object') {
-    throw new ApiError(
-      400,
-      'Wallet label and either a private key or recovery phrase are required',
-    );
-  }
-  const { label, adminPassword, privateKey, recoveryPhrase, derivationPath } = body as {
-    label?: unknown;
-    adminPassword?: unknown;
-    privateKey?: unknown;
-    recoveryPhrase?: unknown;
-    derivationPath?: unknown;
-  };
-  if (typeof label !== 'string') {
-    throw new ApiError(400, 'Wallet label is required');
-  }
-  const hasPrivateKey =
-    typeof privateKey === 'string' && privateKey.trim().length > 0;
-  const hasRecoveryPhrase =
-    typeof recoveryPhrase === 'string' && recoveryPhrase.trim().length > 0;
-  if (hasPrivateKey === hasRecoveryPhrase) {
-    throw new ApiError(
-      400,
-      'Provide exactly one of privateKey or recoveryPhrase',
-    );
-  }
-  if (derivationPath != null && typeof derivationPath !== 'string') {
-    throw new ApiError(400, 'Derivation path must be a string');
-  }
-  if (adminPassword != null && typeof adminPassword !== 'string') {
-    throw new ApiError(400, 'Admin password must be a string');
-  }
-  return {
-    label,
-    adminPassword:
-      typeof adminPassword === 'string' && adminPassword.trim().length > 0
-        ? adminPassword
-        : undefined,
-    privateKey: hasPrivateKey ? (privateKey as string) : undefined,
-    recoveryPhrase: hasRecoveryPhrase ? (recoveryPhrase as string) : undefined,
-    derivationPath: typeof derivationPath === 'string' ? derivationPath : undefined,
-  };
-}
-
-function parseTradableTokenCreateRequest(
-  body: unknown,
-): TradableTokenCreateRequest {
-  if (!body || typeof body !== 'object') {
-    throw new ApiError(400, 'Network and contract address are required');
-  }
-  const { network, contractAddress } = body as {
-    network?: unknown;
-    contractAddress?: unknown;
-  };
-  if (typeof network !== 'string' || typeof contractAddress !== 'string') {
-    throw new ApiError(400, 'Network and contract address are required');
-  }
-  return { network, contractAddress };
-}
-
-function parseActiveTokenUpdateRequest(
-  body: unknown,
-): ActiveTokenUpdateRequest {
-  if (!body || typeof body !== 'object') {
-    throw new ApiError(400, 'Contract address is required');
-  }
-  const { contractAddress } = body as {
-    contractAddress?: unknown;
-  };
-  if (typeof contractAddress !== 'string') {
-    throw new ApiError(400, 'Contract address is required');
-  }
-  return { contractAddress };
-}
-
-function parseRpcEndpointCreateRequest(
-  body: unknown,
-): RpcEndpointCreateRequest {
-  if (!body || typeof body !== 'object') {
-    throw new ApiError(400, 'Network and RPC URL are required');
-  }
-  const { network, url } = body as {
-    network?: unknown;
-    url?: unknown;
-  };
-  if (typeof network !== 'string' || typeof url !== 'string') {
-    throw new ApiError(400, 'Network and RPC URL are required');
-  }
-  return { network, url };
-}
-
-async function dbSetupRequired(db: D1Database): Promise<boolean> {
-  await dbEnsureSchema(db);
-  const result = await db
-    .prepare('SELECT COUNT(*) AS cnt FROM users')
-    .first<{ cnt: number }>();
-  return (result?.cnt ?? 0) === 0;
-}
-
-async function dbCreateUser(
-  db: D1Database,
-  username: string,
-  password: string,
-): Promise<SessionUser> {
-  validateUsername(username);
-  validatePassword(password);
-  const passwordHash = await hashPassword(password);
-  const createdAt = nowTs();
-  try {
-    await db
-      .prepare(
-        'INSERT INTO users (username, password_hash, role, created_at) VALUES (?1, ?2, ?3, ?4)',
-      )
-      .bind(username.trim(), passwordHash, 'admin', createdAt)
-      .run();
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('UNIQUE constraint failed')) {
-      throw new ApiError(409, 'Username already exists');
-    }
-    throw err;
-  }
-  const user = await db
-    .prepare(
-      'SELECT id, username, role FROM users WHERE username = ?1',
-    )
-    .bind(username.trim())
-    .first<SessionUser>();
-  if (!user) throw new ApiError(500, 'Failed to create user');
-  return user;
-}
-
-async function dbAuthenticateUser(
-  db: D1Database,
-  username: string,
-  password: string,
-): Promise<SessionUser> {
-  const row = await db
-    .prepare(
-      'SELECT id, username, password_hash, role FROM users WHERE username = ?1',
-    )
-    .bind(username.trim())
-    .first<{ id: number; username: string; password_hash: string; role: string }>();
-  if (!row) throw new ApiError(401, 'Invalid username or password');
-  const valid = await verifyPassword(password, row.password_hash);
-  if (!valid) throw new ApiError(401, 'Invalid username or password');
-  return { id: row.id, username: row.username, role: row.role };
-}
-
-async function dbVerifyUserPassword(
-  db: D1Database,
-  userId: number,
-  password: string,
-): Promise<boolean> {
-  const row = await db
-    .prepare('SELECT password_hash FROM users WHERE id = ?1')
-    .bind(userId)
-    .first<{ password_hash: string }>();
-  if (!row) {
-    throw new ApiError(401, 'User not found');
-  }
-  return verifyPassword(password, row.password_hash);
-}
-
-async function dbCreateSession(
-  db: D1Database,
-  userId: number,
-  ttlHours: number,
-): Promise<string> {
-  const token = generateToken();
-  const tokenHash = await sha256Hex(token);
-  const createdAt = nowTs();
-  const expiresAt = createdAt + ttlHours * 3600;
-  const sessionId = `sess-${tokenHash}`;
-  await db
-    .prepare(
-      'INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5)',
-    )
-    .bind(sessionId, userId, tokenHash, expiresAt, createdAt)
-    .run();
-  return token;
-}
-
-async function dbGetUserBySessionToken(
-  db: D1Database,
-  token: string,
-): Promise<SessionUser | null> {
-  const tokenHash = await sha256Hex(token);
-  const now = nowTs();
-  // Prune expired sessions
-  await db
-    .prepare('DELETE FROM sessions WHERE expires_at <= ?1')
-    .bind(now)
-    .run();
-  const user = await db
-    .prepare(
-      `SELECT users.id, users.username, users.role
-       FROM sessions
-       INNER JOIN users ON users.id = sessions.user_id
-       WHERE sessions.token_hash = ?1 AND sessions.expires_at > ?2`,
-    )
-    .bind(tokenHash, now)
-    .first<SessionUser>();
-  return user ?? null;
-}
-
-async function dbDeleteSession(db: D1Database, token: string): Promise<void> {
-  const tokenHash = await sha256Hex(token);
-  await db
-    .prepare('DELETE FROM sessions WHERE token_hash = ?1')
-    .bind(tokenHash)
-    .run();
-}
-
-async function dbDeleteOtherSessions(
-  db: D1Database,
-  userId: number,
-  exceptToken: string | null,
-): Promise<void> {
-  if (exceptToken) {
-    const exceptTokenHash = await sha256Hex(exceptToken);
-    await db
-      .prepare('DELETE FROM sessions WHERE user_id = ?1 AND token_hash != ?2')
-      .bind(userId, exceptTokenHash)
-      .run();
-    return;
-  }
-  await db.prepare('DELETE FROM sessions WHERE user_id = ?1').bind(userId).run();
-}
-
-async function dbSaveSettings(
-  db: D1Database,
-  userId: number,
-  update: SettingsUpdateRequest,
-): Promise<void> {
-  validateContractAddress(update.contractAddress);
-  const normalizedContractAddress = update.contractAddress.trim()
-    ? normalizePubkey(update.contractAddress)
-    : '';
-  if (update.volatilityTarget < 0 || update.volatilityTarget > 100) {
-    throw new ApiError(400, 'Volatility target must be between 0 and 100');
-  }
-  if (update.pullbackTarget < 0 || update.pullbackTarget > 100) {
-    throw new ApiError(400, 'Pullback target must be between 0 and 100');
-  }
-  if (update.maxSlippage < 0 || update.maxSlippage > 100) {
-    throw new ApiError(400, 'Max slippage must be between 0 and 100');
-  }
-  if (update.maxTransactions <= 0) {
-    throw new ApiError(400, 'Max transactions must be greater than zero');
-  }
-  const allowedRanges = ['1h', '6h', '12h', '24h', '3d', '1w'];
-  if (!allowedRanges.includes(update.timeRangeTarget)) {
-    throw new ApiError(400, 'Unsupported time range target');
-  }
-
-  const pairs: [string, string][] = [
-    ['contractAddress', normalizedContractAddress],
-    ['volatilityTarget', String(update.volatilityTarget)],
-    ['pullbackTarget', String(update.pullbackTarget)],
-    ['volumeTarget', String(update.volumeTarget)],
-    ['netBuyinTarget', String(update.netBuyinTarget)],
-    ['timeRangeTarget', update.timeRangeTarget],
-    ['maxTransactions', String(update.maxTransactions)],
-    ['maxSlippage', String(update.maxSlippage)],
-    ['strategyNotes', update.strategyNotes.trim()],
-  ];
-
-  const stmts = pairs.map(([key, value]) =>
-    db
-      .prepare(
-        'INSERT INTO settings (user_id, key, value) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value',
-      )
-      .bind(userId, key, value),
-  );
-  await db.batch(stmts);
-}
-
-async function dbSaveActiveContractAddress(
-  db: D1Database,
-  userId: number,
-  contractAddress: string,
-): Promise<string> {
-  validateContractAddress(contractAddress);
-  const normalizedContractAddress = contractAddress.trim()
-    ? normalizePubkey(contractAddress)
-    : '';
-  await db
-    .prepare(
-      'INSERT INTO settings (user_id, key, value) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value',
-    )
-    .bind(userId, 'contractAddress', normalizedContractAddress)
-    .run();
-  return normalizedContractAddress;
-}
-
-async function dbLoadSettings(
-  db: D1Database,
-  userId: number,
-): Promise<SettingsState> {
-  const settings: SettingsState = {
-    contractAddress: '',
-    volatilityTarget: 4.5,
-    pullbackTarget: 2,
-    volumeTarget: 0,
-    netBuyinTarget: 0,
-    timeRangeTarget: '24h',
-    maxTransactions: 100,
-    maxSlippage: 1,
-    strategyNotes:
-      'Trading execution is intentionally disabled until a real execution engine is implemented and reviewed.',
-    managedKeyCount: 0,
-  };
-
-  const managedCount = await db
-    .prepare(
-      "SELECT COUNT(*) AS cnt FROM accounts WHERE user_id = ?1 AND type = 'managed'",
-    )
-    .bind(userId)
-    .first<{ cnt: number }>();
-  settings.managedKeyCount = managedCount?.cnt ?? 0;
-
-  const rows = await db
-    .prepare('SELECT key, value FROM settings WHERE user_id = ?1')
-    .bind(userId)
-    .all<{ key: string; value: string }>();
-
-  for (const row of rows.results) {
-    switch (row.key) {
-      case 'contractAddress':
-        settings.contractAddress = row.value;
-        break;
-      case 'volatilityTarget':
-        settings.volatilityTarget =
-          parseFloat(row.value) || settings.volatilityTarget;
-        break;
-      case 'pullbackTarget':
-        settings.pullbackTarget =
-          parseFloat(row.value) || settings.pullbackTarget;
-        break;
-      case 'volumeTarget':
-        settings.volumeTarget = parseFloat(row.value) || 0;
-        break;
-      case 'netBuyinTarget':
-        settings.netBuyinTarget = parseFloat(row.value) || 0;
-        break;
-      case 'timeRangeTarget':
-        settings.timeRangeTarget = row.value;
-        break;
-      case 'maxTransactions':
-        settings.maxTransactions =
-          parseInt(row.value, 10) || settings.maxTransactions;
-        break;
-      case 'maxSlippage':
-        settings.maxSlippage = parseFloat(row.value) || settings.maxSlippage;
-        break;
-      case 'strategyNotes':
-        settings.strategyNotes = row.value;
-        break;
-    }
-  }
-  return settings;
-}
-
-async function dbListAccounts(
-  db: D1Database,
-  userId: number,
-  type: string,
-): Promise<AccountRecord[]> {
-  const rows = await db
-    .prepare(
-      'SELECT id, label, wallet_address, type, created_at FROM accounts WHERE user_id = ?1 AND type = ?2 ORDER BY created_at DESC, id DESC',
-    )
-    .bind(userId, type)
-    .all<{
-      id: number;
-      label: string;
-      wallet_address: string;
-      type: string;
-      created_at: number;
-    }>();
-  return rows.results.map((row) => ({
-    id: row.id,
-    label: row.label,
-    address: row.wallet_address,
-    type: row.type,
-    createdAt: row.created_at,
-  }));
-}
-
-async function dbListManagedAccountAddresses(
-  db: D1Database,
-  userId: number,
-): Promise<string[]> {
-  const rows = await db
-    .prepare(
-      "SELECT wallet_address FROM accounts WHERE user_id = ?1 AND type = 'managed' ORDER BY created_at DESC, id DESC",
-    )
-    .bind(userId)
-    .all<{ wallet_address: string }>();
-  return rows.results.map((row) => row.wallet_address);
-}
-
-async function dbImportWatchAccount(
-  db: D1Database,
-  userId: number,
-  label: string,
-  addressInput: string,
-): Promise<AccountRecord> {
-  validateLabel(label);
-  const address = normalizePubkey(addressInput);
-  const createdAt = nowTs();
-  try {
-    await db
-      .prepare(
-        "INSERT INTO accounts (user_id, type, label, wallet_address, encrypted_private_key, created_at) VALUES (?1, 'watch', ?2, ?3, NULL, ?4)",
-      )
-      .bind(userId, label.trim(), address, createdAt)
-      .run();
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('UNIQUE constraint failed')) {
-      throw new ApiError(409, 'Account already imported for this user');
-    }
-    throw err;
-  }
-  const row = await db
-    .prepare(
-      "SELECT id FROM accounts WHERE user_id = ?1 AND type = 'watch' AND wallet_address = ?2",
-    )
-    .bind(userId, address)
-    .first<{ id: number }>();
-  return {
-    id: row?.id ?? 0,
-    label: label.trim(),
-    address,
-    type: 'watch',
-    createdAt,
-  };
-}
-
-async function dbImportManagedKey(
-  db: D1Database,
-  userId: number,
-  label: string,
-  privateKeyRaw: string,
-  encryptionKeyStr: string,
-): Promise<AccountRecord> {
-  validateLabel(label);
-  const keypairBytes = normalizePrivateKey(privateKeyRaw);
-  return dbImportManagedKeyBytes(
-    db,
-    userId,
-    label,
-    keypairBytes,
-    encryptionKeyStr,
-  );
-}
-
-async function dbImportManagedKeyBytes(
-  db: D1Database,
-  userId: number,
-  label: string,
-  keypairBytes: Uint8Array,
-  encryptionKeyStr: string,
-): Promise<AccountRecord> {
-  validateLabel(label);
-  const address = solanaPubkeyFromKeypairBytes(keypairBytes);
-  const encryptedKey = await encryptPrivateKey(keypairBytes, encryptionKeyStr);
-  const createdAt = nowTs();
-  try {
-    await db
-      .prepare(
-        "INSERT INTO accounts (user_id, type, label, wallet_address, encrypted_private_key, created_at) VALUES (?1, 'managed', ?2, ?3, ?4, ?5)",
-      )
-      .bind(userId, label.trim(), address, encryptedKey, createdAt)
-      .run();
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('UNIQUE constraint failed')) {
-      throw new ApiError(409, 'Managed account already imported for this user');
-    }
-    throw err;
-  }
-  const row = await db
-    .prepare(
-      "SELECT id FROM accounts WHERE user_id = ?1 AND type = 'managed' AND wallet_address = ?2",
-    )
-    .bind(userId, address)
-    .first<{ id: number }>();
-  return {
-    id: row?.id ?? 0,
-    label: label.trim(),
-    address,
-    type: 'managed',
-    createdAt,
-  };
-}
-
-async function dbLoadManagedKeypairBytes(
-  db: D1Database,
-  userId: number,
-  walletAddress: string,
-  encryptionKeyStr: string,
-): Promise<Uint8Array> {
-  const normalizedAddress = normalizePubkey(walletAddress);
-  const row = await db
-    .prepare(
-      "SELECT encrypted_private_key FROM accounts WHERE user_id = ?1 AND type = 'managed' AND wallet_address = ?2",
-    )
-    .bind(userId, normalizedAddress)
-    .first<{ encrypted_private_key: string | null }>();
-  if (!row?.encrypted_private_key) {
-    throw new ApiError(404, `Managed wallet ${normalizedAddress} not found or has no key`);
-  }
-  return decryptPrivateKey(row.encrypted_private_key, encryptionKeyStr);
-}
-
-async function dbAddAuditLog(
-  db: D1Database,
-  userId: number,
-  action: string,
-  target: string,
-  details: string,
-): Promise<void> {
-  await db
-    .prepare(
-      'INSERT INTO audit_logs (user_id, action, target, details, created_at) VALUES (?1, ?2, ?3, ?4, ?5)',
-    )
-    .bind(userId, action, target, details, nowTs())
-    .run();
-}
-
-async function dbListAuditLogs(
-  db: D1Database,
-  userId: number,
-  username: string,
-): Promise<AuditLog[]> {
-  const rows = await db
-    .prepare(
-      'SELECT id, action, target, details, created_at FROM audit_logs WHERE user_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 50',
-    )
-    .bind(userId)
-    .all<{
-      id: number;
-      action: string;
-      target: string;
-      details: string;
-      created_at: number;
-    }>();
-  return rows.results.map((row) => ({
-    id: row.id,
-    action: row.action,
-    target: row.target,
-    details: row.details,
-    actor: username,
-    createdAt: row.created_at,
-  }));
-}
-
-async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]> {
-  await dbEnsureTradeDomainSchema(db);
-  const rows = await db
-    .prepare(
-      `SELECT
-         tl.id,
-         tl.token_id,
-         tl.wallet_address,
-         tl.action,
-         tl.requested_amount,
-         tl.executed_amount,
-         tl.executed_price,
-         tl.tx_signature,
-         tl.status,
-         tl.error_message,
-         tl.created_at,
-         tl.updated_at,
-         tt.contract_address,
-         tt.symbol
-       FROM trade_logs tl
-       LEFT JOIN tradable_tokens tt ON tt.id = tl.token_id
-       ORDER BY tl.created_at DESC, tl.id DESC
-       LIMIT 50`,
-    )
-    .all<{
-      id: number;
-      token_id: number;
-      wallet_address: string;
-      action: 'BUY' | 'SELL';
-      requested_amount: number;
-      executed_amount: number | null;
-      executed_price: number | null;
-      tx_signature: string | null;
-      status: 'PENDING' | 'SUCCESS' | 'FAILED';
-      error_message: string | null;
-      created_at: number;
-      updated_at: number;
-      contract_address: string | null;
-      symbol: string | null;
-    }>();
-  return rows.results.map((row) => ({
-    id: row.id,
-    tokenId: row.token_id,
-    tokenContractAddress: row.contract_address,
-    tokenSymbol: row.symbol,
-    walletAddress: row.wallet_address,
-    action: row.action,
-    requestedAmount: row.requested_amount,
-    executedAmount: row.executed_amount,
-    executedPrice: row.executed_price,
-    txSignature: row.tx_signature,
-    status: row.status,
-    errorMessage: row.error_message,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
-}
-
-async function dbListWebhookTransactionLogs(
-  db: D1Database,
-  userId: number,
-): Promise<WebhookTransactionLogRecord[]> {
-  await dbEnsureTradeDomainSchema(db);
-  const [rows, tokens] = await Promise.all([
-    db
-      .prepare(
-        `SELECT
-           id,
-           event_type,
-           wallet_address,
-           tx_signature,
-           payload,
-           details_json,
-           processed,
-           error_message,
-           created_at
-         FROM signals
-         WHERE source LIKE ?1
-         ORDER BY created_at DESC, id DESC
-         LIMIT 200`,
-      )
-      .bind(`%:user:${userId}`)
-      .all<{
-        id: number;
-        event_type: string;
-        wallet_address: string | null;
-        tx_signature: string | null;
-        payload: string;
-        details_json: string | null;
-        processed: number;
-        error_message: string | null;
-        created_at: number;
-      }>(),
-    db
-      .prepare(
-        'SELECT contract_address, symbol FROM tradable_tokens WHERE network = ?1',
-      )
-      .bind('solana')
-      .all<{
-        contract_address: string;
-        symbol: string | null;
-      }>(),
-  ]);
-
-  const symbolByContract = new Map<string, string | null>();
-  for (const token of tokens.results) {
-    symbolByContract.set(normalizePubkey(token.contract_address), token.symbol);
-  }
-
-  const grouped = new Map<string, typeof rows.results>();
-  const orderedKeys: string[] = [];
-
-  for (const row of rows.results) {
-    const key = row.tx_signature?.trim() || `signal:${row.id}`;
-    const existing = grouped.get(key);
-    if (!existing) {
-      grouped.set(key, [row]);
-      orderedKeys.push(key);
-    } else {
-      existing.push(row);
-    }
-  }
-
-  return orderedKeys.slice(0, 50).map((key) => {
-    const group = grouped.get(key) ?? [];
-    const firstRow = group[0];
-    const mergedDetails = mergeStoredSignalTransactionDetails(
-      ...group.map((row) => parseStoredSignalTransactionDetails(row.details_json)),
-      {
-        tokenContractAddress:
-          group
-            .flatMap((row) => extractStoredSignalContractAddresses(row.payload))
-            .find((address) => address !== SOLANA_USDC_MINT) ??
-          group.flatMap((row) => extractStoredSignalContractAddresses(row.payload))[0] ??
-          null,
-      },
-    );
-    const tokenContractAddress = mergedDetails.tokenContractAddress;
-    const hasFailed = group.some(
-      (row) => !!row.error_message || mergedDetails.transactionStatus === 'FAILED',
-    );
-    const hasPending = group.some(
-      (row) => !row.error_message && row.processed !== 1,
-    );
-    const status: WebhookTransactionLogRecord['status'] = hasFailed
-      ? 'FAILED'
-      : hasPending || mergedDetails.transactionStatus === 'PENDING'
-        ? 'PENDING'
-        : 'CONFIRMED';
-
-    return {
-      id: firstRow.id,
-      tokenContractAddress,
-      tokenSymbol: tokenContractAddress
-        ? (symbolByContract.get(tokenContractAddress) ?? null)
-        : null,
-      walletAddress: mergedDetails.primaryWalletAddress ?? firstRow.wallet_address,
-      fromWalletAddress: mergedDetails.fromWalletAddress,
-      toWalletAddress: mergedDetails.toWalletAddress,
-      action: mergedDetails.action,
-      usdcAmount: mergedDetails.usdcAmount,
-      tokenAmount: mergedDetails.tokenAmount,
-      feeAmountUsd: mergedDetails.feeAmountUsd,
-      source: mergedDetails.source,
-      eventType: firstRow.event_type,
-      txSignature: firstRow.tx_signature,
-      status,
-      errorMessage: firstRow.error_message,
-      createdAt: firstRow.created_at,
-    };
-  });
-}
-
-async function dbListRecentSignalsForDebug(
-  db: D1Database,
-  userId: number,
-  limit: number,
-): Promise<Array<{
-  id: number;
-  source: string;
-  externalId: string;
-  eventType: string;
-  walletAddress: string | null;
-  txSignature: string | null;
-  processed: number;
-  errorMessage: string | null;
-  createdAt: number;
-  contractAddresses: string[];
-  details: StoredSignalTransactionDetails | null;
-  payloadPreview: string;
-}>> {
-  await dbEnsureTradeDomainSchema(db);
-  const rows = await db
-    .prepare(
-      `SELECT
-         id,
-         source,
-         external_id,
-         event_type,
-         wallet_address,
-         tx_signature,
-         processed,
-         error_message,
-         created_at,
-         details_json,
-         payload
-       FROM signals
-       WHERE source LIKE ?1
-       ORDER BY created_at DESC, id DESC
-       LIMIT ?2`,
-    )
-    .bind(`%:user:${userId}`, limit)
-    .all<{
-      id: number;
-      source: string;
-      external_id: string;
-      event_type: string;
-      wallet_address: string | null;
-      tx_signature: string | null;
-      processed: number;
-      error_message: string | null;
-      created_at: number;
-      details_json: string | null;
-      payload: string;
-    }>();
-
-  return rows.results.map((row) => ({
-    id: row.id,
-    source: row.source,
-    externalId: row.external_id,
-    eventType: row.event_type,
-    walletAddress: row.wallet_address,
-    txSignature: row.tx_signature,
-    processed: row.processed,
-    errorMessage: row.error_message,
-    createdAt: row.created_at,
-    contractAddresses: extractStoredSignalContractAddresses(row.payload),
-    details: parseStoredSignalTransactionDetails(row.details_json),
-    payloadPreview: row.payload.slice(0, 2000),
-  }));
-}
 
 async function fetchSolanaTokenHolderAddresses(
   rpcUrls: string | string[],
@@ -2640,465 +350,6 @@ async function fetchSolanaTokenHolderBalanceShard(
   return balances;
 }
 
-async function dbUpsertTokenHolderAddresses(
-  db: D1Database,
-  tokenId: number,
-  addresses: string[],
-  source = 'rpc_scan',
-): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
-  if (addresses.length === 0) {
-    return;
-  }
-  const timestamp = nowTs();
-  await db.batch(
-    addresses.map((address) =>
-      db
-        .prepare(
-          `INSERT INTO token_holder_addresses (
-             token_id,
-             wallet_address,
-             source,
-             first_seen_at,
-             last_seen_at
-           ) VALUES (?1, ?2, ?3, ?4, ?4)
-           ON CONFLICT(token_id, wallet_address)
-           DO UPDATE SET
-             source = excluded.source,
-             last_seen_at = excluded.last_seen_at`,
-        )
-        .bind(tokenId, address, source, timestamp),
-    ),
-  );
-}
-
-async function dbSyncTokenHolderBalances(
-  db: D1Database,
-  tokenId: number,
-  balances: Map<string, number>,
-  source = 'rpc_full_sync',
-): Promise<{
-  activeHolderCount: number;
-  upsertedCount: number;
-  zeroedCount: number;
-}> {
-  await dbEnsureTradeDomainSchema(db);
-  const timestamp = nowTs();
-  const existingRows = await db
-    .prepare(
-      'SELECT wallet_address FROM token_holder_addresses WHERE token_id = ?1 AND amount_holding > 0',
-    )
-    .bind(tokenId)
-    .all<{ wallet_address: string }>();
-  const existingAddresses = new Set(existingRows.results.map((row) => row.wallet_address));
-  const nextAddresses = new Set([...balances.keys()]);
-  const zeroedAddresses = [...existingAddresses].filter((address) => !nextAddresses.has(address));
-
-  const upserts = [...balances.entries()].map(([address, amountHolding]) =>
-    db
-      .prepare(
-        `INSERT INTO token_holder_addresses (
-           token_id,
-           wallet_address,
-           amount_holding,
-           source,
-           first_seen_at,
-           last_seen_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-         ON CONFLICT(token_id, wallet_address)
-         DO UPDATE SET
-           amount_holding = excluded.amount_holding,
-           source = excluded.source,
-           last_seen_at = excluded.last_seen_at`,
-      )
-      .bind(tokenId, address, amountHolding, source, timestamp),
-  );
-  const zeroes = zeroedAddresses.map((address) =>
-    db
-      .prepare(
-        `UPDATE token_holder_addresses
-         SET amount_holding = 0,
-             source = ?3,
-             last_seen_at = ?4
-         WHERE token_id = ?1 AND wallet_address = ?2`,
-      )
-      .bind(tokenId, address, source, timestamp),
-  );
-
-  if (upserts.length > 0 || zeroes.length > 0) {
-    await db.batch([...upserts, ...zeroes]);
-  }
-
-  return {
-    activeHolderCount: [...balances.entries()].filter(([, amount]) => amount > 0).length,
-    upsertedCount: upserts.length,
-    zeroedCount: zeroes.length,
-  };
-}
-
-async function dbGetTokenHolderSyncState(
-  db: D1Database,
-  tokenId: number,
-): Promise<TokenHolderSyncStateRecord | null> {
-  await dbEnsureTradeDomainSchema(db);
-  const row = await db
-    .prepare(
-      `SELECT
-         token_id,
-         run_id,
-         status,
-         source,
-         next_shard_index,
-         processed_shard_count,
-         total_shard_count,
-         staged_holder_count,
-         last_program_id,
-         last_owner_prefix,
-         error_message,
-         started_at,
-         updated_at,
-         last_completed_at
-       FROM token_holder_sync_states
-       WHERE token_id = ?1
-       LIMIT 1`,
-    )
-    .bind(tokenId)
-    .first<{
-      token_id: number;
-      run_id: string | null;
-      status: TokenHolderSyncStatus;
-      source: string;
-      next_shard_index: number;
-      processed_shard_count: number;
-      total_shard_count: number;
-      staged_holder_count: number;
-      last_program_id: string | null;
-      last_owner_prefix: number | null;
-      error_message: string | null;
-      started_at: number | null;
-      updated_at: number;
-      last_completed_at: number | null;
-    }>();
-  if (!row) {
-    return null;
-  }
-  return {
-    tokenId: row.token_id,
-    runId: row.run_id,
-    status: row.status,
-    source: row.source,
-    nextShardIndex: row.next_shard_index,
-    processedShardCount: row.processed_shard_count,
-    totalShardCount: row.total_shard_count,
-    stagedHolderCount: row.staged_holder_count,
-    lastProgramId: row.last_program_id,
-    lastOwnerPrefix: row.last_owner_prefix,
-    errorMessage: row.error_message,
-    startedAt: row.started_at,
-    updatedAt: row.updated_at,
-    lastCompletedAt: row.last_completed_at,
-  };
-}
-
-async function dbPutTokenHolderSyncState(
-  db: D1Database,
-  state: TokenHolderSyncStateRecord,
-): Promise<TokenHolderSyncStateRecord> {
-  await dbEnsureTradeDomainSchema(db);
-  await db
-    .prepare(
-      `INSERT INTO token_holder_sync_states (
-         token_id,
-         run_id,
-         status,
-         source,
-         next_shard_index,
-         processed_shard_count,
-         total_shard_count,
-         staged_holder_count,
-         last_program_id,
-         last_owner_prefix,
-         error_message,
-         started_at,
-         updated_at,
-         last_completed_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-       ON CONFLICT(token_id)
-       DO UPDATE SET
-         run_id = excluded.run_id,
-         status = excluded.status,
-         source = excluded.source,
-         next_shard_index = excluded.next_shard_index,
-         processed_shard_count = excluded.processed_shard_count,
-         total_shard_count = excluded.total_shard_count,
-         staged_holder_count = excluded.staged_holder_count,
-         last_program_id = excluded.last_program_id,
-         last_owner_prefix = excluded.last_owner_prefix,
-         error_message = excluded.error_message,
-         started_at = excluded.started_at,
-         updated_at = excluded.updated_at,
-         last_completed_at = excluded.last_completed_at`,
-    )
-    .bind(
-      state.tokenId,
-      state.runId,
-      state.status,
-      state.source,
-      state.nextShardIndex,
-      state.processedShardCount,
-      state.totalShardCount,
-      state.stagedHolderCount,
-      state.lastProgramId,
-      state.lastOwnerPrefix,
-      state.errorMessage,
-      state.startedAt,
-      state.updatedAt,
-      state.lastCompletedAt,
-    )
-    .run();
-  return state;
-}
-
-async function dbStartOrResumeTokenHolderSync(
-  db: D1Database,
-  tokenId: number,
-): Promise<TokenHolderSyncStateRecord> {
-  const existing = await dbGetTokenHolderSyncState(db, tokenId);
-  const timestamp = nowTs();
-  if (
-    existing?.runId &&
-    existing.nextShardIndex <= existing.totalShardCount &&
-    (existing.status === 'running' || existing.status === 'failed')
-  ) {
-    return await dbPutTokenHolderSyncState(db, {
-      ...existing,
-      status: 'running',
-      errorMessage: null,
-      updatedAt: timestamp,
-    });
-  }
-
-  await db
-    .prepare('DELETE FROM token_holder_sync_stage WHERE token_id = ?1')
-    .bind(tokenId)
-    .run();
-
-  return await dbPutTokenHolderSyncState(db, {
-    tokenId,
-    runId: crypto.randomUUID(),
-    status: 'running',
-    source: 'rpc_owner_prefix_shards',
-    nextShardIndex: 0,
-    processedShardCount: 0,
-    totalShardCount: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
-    stagedHolderCount: 0,
-    lastProgramId: null,
-    lastOwnerPrefix: null,
-    errorMessage: null,
-    startedAt: timestamp,
-    updatedAt: timestamp,
-    lastCompletedAt: existing?.lastCompletedAt ?? null,
-  });
-}
-
-async function dbCountTokenHolderSyncStageHolders(
-  db: D1Database,
-  tokenId: number,
-  runId: string,
-): Promise<number> {
-  await dbEnsureTradeDomainSchema(db);
-  const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS holder_count
-       FROM (
-         SELECT wallet_address
-         FROM token_holder_sync_stage
-         WHERE token_id = ?1 AND run_id = ?2
-         GROUP BY wallet_address
-         HAVING SUM(amount_holding) > 0
-       )`,
-    )
-    .bind(tokenId, runId)
-    .first<{ holder_count: number }>();
-  return row?.holder_count ?? 0;
-}
-
-async function dbStageTokenHolderBalanceShard(
-  db: D1Database,
-  tokenId: number,
-  runId: string,
-  shardIndex: number,
-  balances: Map<string, number>,
-  source = 'rpc_owner_prefix_shards',
-): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
-  if (balances.size === 0) {
-    return;
-  }
-  const timestamp = nowTs();
-  await db.batch(
-    [...balances.entries()].map(([address, amountHolding]) =>
-      db
-        .prepare(
-          `INSERT INTO token_holder_sync_stage (
-             token_id,
-             run_id,
-             shard_index,
-             wallet_address,
-             amount_holding,
-             source,
-             updated_at
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-           ON CONFLICT(token_id, run_id, shard_index, wallet_address)
-           DO UPDATE SET
-             amount_holding = excluded.amount_holding,
-             source = excluded.source,
-             updated_at = excluded.updated_at`,
-        )
-        .bind(
-          tokenId,
-          runId,
-          shardIndex,
-          address,
-          amountHolding,
-          source,
-          timestamp,
-        ),
-    ),
-  );
-}
-
-async function dbFinalizePagedTokenHolderSync(
-  db: D1Database,
-  userId: number,
-  state: TokenHolderSyncStateRecord,
-  source = 'rpc_owner_prefix_shards',
-): Promise<TokenHolderSyncSummary> {
-  await dbEnsureTradeDomainSchema(db);
-  if (!state.runId) {
-    return buildTokenHolderSyncSummary(state, {
-      status: 'failed',
-      errorMessage: 'Token holder sync run id is missing',
-    });
-  }
-
-  const timestamp = nowTs();
-  const activeHolderRow = await db
-    .prepare(
-      `SELECT COUNT(*) AS active_holder_count
-       FROM (
-         SELECT wallet_address
-         FROM token_holder_sync_stage
-         WHERE token_id = ?1 AND run_id = ?2
-         GROUP BY wallet_address
-         HAVING SUM(amount_holding) > 0
-       )`,
-    )
-    .bind(state.tokenId, state.runId)
-    .first<{ active_holder_count: number }>();
-  const zeroedCountRow = await db
-    .prepare(
-      `SELECT COUNT(*) AS zeroed_count
-       FROM token_holder_addresses
-       WHERE token_id = ?1
-         AND amount_holding > 0
-         AND wallet_address NOT IN (
-           SELECT wallet_address
-           FROM token_holder_sync_stage
-           WHERE token_id = ?1 AND run_id = ?2
-           GROUP BY wallet_address
-           HAVING SUM(amount_holding) > 0
-         )`,
-    )
-    .bind(state.tokenId, state.runId)
-    .first<{ zeroed_count: number }>();
-
-  await db
-    .prepare(
-      `INSERT INTO token_holder_addresses (
-         token_id,
-         wallet_address,
-         amount_holding,
-         source,
-         first_seen_at,
-         last_seen_at
-       )
-       SELECT
-         ?1,
-         wallet_address,
-         SUM(amount_holding) AS amount_holding,
-         ?3,
-         ?4,
-         ?4
-       FROM token_holder_sync_stage
-       WHERE token_id = ?1 AND run_id = ?2
-       GROUP BY wallet_address
-       HAVING SUM(amount_holding) > 0
-       ON CONFLICT(token_id, wallet_address)
-       DO UPDATE SET
-         amount_holding = excluded.amount_holding,
-         source = excluded.source,
-         last_seen_at = excluded.last_seen_at`,
-    )
-    .bind(state.tokenId, state.runId, source, timestamp)
-    .run();
-
-  await db
-    .prepare(
-      `UPDATE token_holder_addresses
-       SET amount_holding = 0,
-           source = ?3,
-           last_seen_at = ?4
-       WHERE token_id = ?1
-         AND amount_holding > 0
-         AND wallet_address NOT IN (
-           SELECT wallet_address
-           FROM token_holder_sync_stage
-           WHERE token_id = ?1 AND run_id = ?2
-           GROUP BY wallet_address
-           HAVING SUM(amount_holding) > 0
-         )`,
-    )
-    .bind(state.tokenId, state.runId, source, timestamp)
-    .run();
-
-  await dbRecomputeTokenHolderAggregate(db, userId, state.tokenId, {
-    source,
-    fullSyncAt: timestamp,
-  });
-
-  const activeHolderCount = activeHolderRow?.active_holder_count ?? 0;
-  const zeroedCount = zeroedCountRow?.zeroed_count ?? 0;
-  const completedState = await dbPutTokenHolderSyncState(db, {
-    ...state,
-    status: 'completed',
-    source,
-    nextShardIndex: state.totalShardCount,
-    processedShardCount: state.totalShardCount,
-    stagedHolderCount: activeHolderCount,
-    lastProgramId:
-      TOKEN_HOLDER_SYNC_PROGRAM_IDS[TOKEN_HOLDER_SYNC_PROGRAM_IDS.length - 1],
-    lastOwnerPrefix: TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT - 1,
-    errorMessage: null,
-    updatedAt: timestamp,
-    lastCompletedAt: timestamp,
-  });
-
-  await db
-    .prepare(
-      'DELETE FROM token_holder_sync_stage WHERE token_id = ?1 AND run_id = ?2',
-    )
-    .bind(state.tokenId, state.runId)
-    .run();
-
-  return buildTokenHolderSyncSummary(completedState, {
-    activeHolderCount,
-    stagedHolderCount: activeHolderCount,
-    upsertedCount: activeHolderCount,
-    zeroedCount,
-  });
-}
-
 async function syncSolanaTokenHolderBalancesPaged(
   db: D1Database,
   userId: number,
@@ -3168,11 +419,16 @@ async function syncSolanaTokenHolderBalancesPaged(
           currentState.runId,
         )
       : 0;
+    const isRateLimited = isSolanaRpcRateLimitError(err);
     const failedState = await dbPutTokenHolderSyncState(db, {
       ...currentState,
-      status: 'failed',
+      status: isRateLimited ? 'running' : 'failed',
       stagedHolderCount,
-      errorMessage: err instanceof Error ? err.message : String(err),
+      errorMessage: isRateLimited
+        ? 'Holder sync rate limited by the current Solana RPC endpoint. Retry after the endpoint cooldown or add a higher-capacity RPC.'
+        : err instanceof Error
+          ? err.message
+          : String(err),
       updatedAt: nowTs(),
     });
     return buildTokenHolderSyncSummary(failedState, {
@@ -3212,385 +468,6 @@ async function syncSolanaTokenHolderBalancesPaged(
     stagedHolderCount,
     activeHolderCount: stagedHolderCount,
   });
-}
-
-async function dbRecomputeTokenHolderAggregate(
-  db: D1Database,
-  userId: number,
-  tokenId: number,
-  options?: {
-    source?: string;
-    fullSyncAt?: number | null;
-    deltaSyncAt?: number | null;
-  },
-): Promise<TokenHolderAggregateRecord> {
-  await dbEnsureTradeDomainSchema(db);
-  const row = await db
-    .prepare(
-      `SELECT
-         COUNT(CASE WHEN tha.amount_holding > 0 THEN 1 END) AS active_holder_count,
-         COUNT(CASE WHEN tha.amount_holding > 0 AND a.type = 'managed' THEN 1 END) AS internal_holder_count,
-         COUNT(CASE WHEN tha.amount_holding > 0 AND a.type = 'watch' THEN 1 END) AS watched_holder_count,
-         COALESCE(SUM(CASE WHEN tha.amount_holding > 0 THEN tha.amount_holding ELSE 0 END), 0) AS total_amount_holding,
-         COALESCE(SUM(CASE WHEN tha.amount_holding > 0 AND a.type = 'managed' THEN tha.amount_holding ELSE 0 END), 0) AS internal_amount_holding,
-         COALESCE(SUM(CASE WHEN tha.amount_holding > 0 AND a.type = 'watch' THEN tha.amount_holding ELSE 0 END), 0) AS watched_amount_holding
-       FROM token_holder_addresses tha
-       LEFT JOIN accounts a
-         ON a.wallet_address = tha.wallet_address
-        AND a.user_id = ?1
-        AND a.type IN ('managed', 'watch')
-       WHERE tha.token_id = ?2`,
-    )
-    .bind(userId, tokenId)
-    .first<{
-      active_holder_count: number;
-      internal_holder_count: number;
-      watched_holder_count: number;
-      total_amount_holding: number;
-      internal_amount_holding: number;
-      watched_amount_holding: number;
-    }>();
-
-  const aggregate: TokenHolderAggregateRecord = {
-    tokenId,
-    activeHolderCount: row?.active_holder_count ?? 0,
-    internalHolderCount: row?.internal_holder_count ?? 0,
-    watchedHolderCount: row?.watched_holder_count ?? 0,
-    outsiderHolderCount: Math.max(0, (row?.active_holder_count ?? 0) - (row?.internal_holder_count ?? 0)),
-    totalAmountHolding: row?.total_amount_holding ?? 0,
-    internalAmountHolding: row?.internal_amount_holding ?? 0,
-    watchedAmountHolding: row?.watched_amount_holding ?? 0,
-    lastFullSyncAt: options?.fullSyncAt ?? null,
-    lastDeltaSyncAt: options?.deltaSyncAt ?? null,
-    updatedAt: nowTs(),
-    source: options?.source ?? 'recompute',
-  };
-
-  const existing = await db
-    .prepare(
-      `SELECT last_full_sync_at, last_delta_sync_at
-       FROM token_holder_aggregates
-       WHERE token_id = ?1
-       LIMIT 1`,
-    )
-    .bind(tokenId)
-    .first<{
-      last_full_sync_at: number | null;
-      last_delta_sync_at: number | null;
-    }>();
-
-  const nextLastFullSyncAt =
-    options?.fullSyncAt ?? existing?.last_full_sync_at ?? null;
-  const nextLastDeltaSyncAt =
-    options?.deltaSyncAt ?? existing?.last_delta_sync_at ?? null;
-
-  await db
-    .prepare(
-      `INSERT INTO token_holder_aggregates (
-         token_id,
-         active_holder_count,
-         internal_holder_count,
-         watched_holder_count,
-         outsider_holder_count,
-         total_amount_holding,
-         internal_amount_holding,
-         watched_amount_holding,
-         last_full_sync_at,
-         last_delta_sync_at,
-         updated_at,
-         source
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-       ON CONFLICT(token_id)
-       DO UPDATE SET
-         active_holder_count = excluded.active_holder_count,
-         internal_holder_count = excluded.internal_holder_count,
-         watched_holder_count = excluded.watched_holder_count,
-         outsider_holder_count = excluded.outsider_holder_count,
-         total_amount_holding = excluded.total_amount_holding,
-         internal_amount_holding = excluded.internal_amount_holding,
-         watched_amount_holding = excluded.watched_amount_holding,
-         last_full_sync_at = excluded.last_full_sync_at,
-         last_delta_sync_at = excluded.last_delta_sync_at,
-         updated_at = excluded.updated_at,
-         source = excluded.source`,
-    )
-    .bind(
-      aggregate.tokenId,
-      aggregate.activeHolderCount,
-      aggregate.internalHolderCount,
-      aggregate.watchedHolderCount,
-      aggregate.outsiderHolderCount,
-      aggregate.totalAmountHolding,
-      aggregate.internalAmountHolding,
-      aggregate.watchedAmountHolding,
-      nextLastFullSyncAt,
-      nextLastDeltaSyncAt,
-      aggregate.updatedAt,
-      aggregate.source,
-    )
-    .run();
-
-  return {
-    ...aggregate,
-    lastFullSyncAt: nextLastFullSyncAt,
-    lastDeltaSyncAt: nextLastDeltaSyncAt,
-  };
-}
-
-async function dbGetTokenHolderAggregate(
-  db: D1Database,
-  tokenId: number,
-): Promise<TokenHolderAggregateRecord | null> {
-  await dbEnsureTradeDomainSchema(db);
-  const row = await db
-    .prepare(
-      `SELECT
-         token_id,
-         active_holder_count,
-         internal_holder_count,
-         watched_holder_count,
-         outsider_holder_count,
-         total_amount_holding,
-         internal_amount_holding,
-         watched_amount_holding,
-         last_full_sync_at,
-         last_delta_sync_at,
-         updated_at,
-         source
-       FROM token_holder_aggregates
-       WHERE token_id = ?1
-       LIMIT 1`,
-    )
-    .bind(tokenId)
-    .first<{
-      token_id: number;
-      active_holder_count: number;
-      internal_holder_count: number;
-      watched_holder_count: number;
-      outsider_holder_count: number;
-      total_amount_holding: number;
-      internal_amount_holding: number;
-      watched_amount_holding: number;
-      last_full_sync_at: number | null;
-      last_delta_sync_at: number | null;
-      updated_at: number;
-      source: string;
-    }>();
-  if (!row) {
-    return null;
-  }
-  return {
-    tokenId: row.token_id,
-    activeHolderCount: row.active_holder_count,
-    internalHolderCount: row.internal_holder_count,
-    watchedHolderCount: row.watched_holder_count,
-    outsiderHolderCount: row.outsider_holder_count,
-    totalAmountHolding: row.total_amount_holding,
-    internalAmountHolding: row.internal_amount_holding,
-    watchedAmountHolding: row.watched_amount_holding,
-    lastFullSyncAt: row.last_full_sync_at,
-    lastDeltaSyncAt: row.last_delta_sync_at,
-    updatedAt: row.updated_at,
-    source: row.source,
-  };
-}
-
-async function dbHasTokenHolderRows(
-  db: D1Database,
-  tokenId: number,
-): Promise<boolean> {
-  await dbEnsureTradeDomainSchema(db);
-  const row = await db
-    .prepare(
-      `SELECT 1 AS has_rows
-       FROM token_holder_addresses
-       WHERE token_id = ?1
-       LIMIT 1`,
-    )
-    .bind(tokenId)
-    .first<{ has_rows: number }>();
-  return row?.has_rows === 1;
-}
-
-async function dbComputeTokenHolderAggregateFromStage(
-  db: D1Database,
-  userId: number,
-  tokenId: number,
-  runId: string,
-  updatedAt: number,
-): Promise<TokenHolderAggregateRecord | null> {
-  await dbEnsureTradeDomainSchema(db);
-  const row = await db
-    .prepare(
-      `WITH holder_rows AS (
-         SELECT wallet_address, SUM(amount_holding) AS amount_holding
-         FROM token_holder_sync_stage
-         WHERE token_id = ?2 AND run_id = ?3
-         GROUP BY wallet_address
-         HAVING SUM(amount_holding) > 0
-       )
-       SELECT
-         COUNT(CASE WHEN hr.amount_holding > 0 THEN 1 END) AS active_holder_count,
-         COUNT(CASE WHEN hr.amount_holding > 0 AND a.type = 'managed' THEN 1 END) AS internal_holder_count,
-         COUNT(CASE WHEN hr.amount_holding > 0 AND a.type = 'watch' THEN 1 END) AS watched_holder_count,
-         COALESCE(SUM(CASE WHEN hr.amount_holding > 0 THEN hr.amount_holding ELSE 0 END), 0) AS total_amount_holding,
-         COALESCE(SUM(CASE WHEN hr.amount_holding > 0 AND a.type = 'managed' THEN hr.amount_holding ELSE 0 END), 0) AS internal_amount_holding,
-         COALESCE(SUM(CASE WHEN hr.amount_holding > 0 AND a.type = 'watch' THEN hr.amount_holding ELSE 0 END), 0) AS watched_amount_holding
-       FROM holder_rows hr
-       LEFT JOIN accounts a
-         ON a.wallet_address = hr.wallet_address
-        AND a.user_id = ?1
-        AND a.type IN ('managed', 'watch')`,
-    )
-    .bind(userId, tokenId, runId)
-    .first<{
-      active_holder_count: number;
-      internal_holder_count: number;
-      watched_holder_count: number;
-      total_amount_holding: number;
-      internal_amount_holding: number;
-      watched_amount_holding: number;
-    }>();
-  if (!row || (row.active_holder_count ?? 0) === 0) {
-    return null;
-  }
-  return {
-    tokenId,
-    activeHolderCount: row.active_holder_count ?? 0,
-    internalHolderCount: row.internal_holder_count ?? 0,
-    watchedHolderCount: row.watched_holder_count ?? 0,
-    outsiderHolderCount: Math.max(
-      0,
-      (row.active_holder_count ?? 0) - (row.internal_holder_count ?? 0),
-    ),
-    totalAmountHolding: row.total_amount_holding ?? 0,
-    internalAmountHolding: row.internal_amount_holding ?? 0,
-    watchedAmountHolding: row.watched_amount_holding ?? 0,
-    lastFullSyncAt: null,
-    lastDeltaSyncAt: null,
-    updatedAt,
-    source: 'rpc_owner_prefix_shards_partial',
-  };
-}
-
-async function dbListOutsideTokenHoldersFromFinal(
-  db: D1Database,
-  userId: number,
-  tokenId: number,
-  limit = 200,
-): Promise<OutsideTokenHolderRecord[]> {
-  await dbEnsureTradeDomainSchema(db);
-  const rows = await db
-    .prepare(
-      `SELECT
-         tha.wallet_address,
-         tha.amount_holding,
-         tha.source,
-         tha.last_seen_at,
-         a.type AS account_type,
-         a.label AS account_label
-       FROM token_holder_addresses tha
-       LEFT JOIN accounts a
-         ON a.user_id = ?1
-        AND a.wallet_address = tha.wallet_address
-       WHERE tha.token_id = ?2
-         AND tha.amount_holding > 0
-         AND COALESCE(a.type, '') != 'managed'
-       ORDER BY tha.amount_holding DESC, tha.last_seen_at DESC, tha.wallet_address ASC
-       LIMIT ?3`,
-    )
-    .bind(userId, tokenId, limit)
-    .all<{
-      wallet_address: string;
-      amount_holding: number;
-      source: string;
-      last_seen_at: number;
-      account_type: string | null;
-      account_label: string | null;
-    }>();
-  return rows.results.map((row) => ({
-    address: row.wallet_address,
-    label: row.account_label,
-    amountHolding: row.amount_holding,
-    source: row.source,
-    ownership: row.account_type === 'watch' ? 'watch' : 'outside',
-    updatedAt: row.last_seen_at,
-  }));
-}
-
-async function dbListOutsideTokenHoldersFromStage(
-  db: D1Database,
-  userId: number,
-  tokenId: number,
-  runId: string,
-  limit = 200,
-): Promise<OutsideTokenHolderRecord[]> {
-  await dbEnsureTradeDomainSchema(db);
-  const rows = await db
-    .prepare(
-      `WITH holder_rows AS (
-         SELECT
-           wallet_address,
-           SUM(amount_holding) AS amount_holding,
-           MAX(updated_at) AS updated_at
-         FROM token_holder_sync_stage
-         WHERE token_id = ?2 AND run_id = ?3
-         GROUP BY wallet_address
-         HAVING SUM(amount_holding) > 0
-       )
-       SELECT
-         hr.wallet_address,
-         hr.amount_holding,
-         hr.updated_at,
-         a.type AS account_type,
-         a.label AS account_label
-       FROM holder_rows hr
-       LEFT JOIN accounts a
-         ON a.user_id = ?1
-        AND a.wallet_address = hr.wallet_address
-       WHERE COALESCE(a.type, '') != 'managed'
-       ORDER BY hr.amount_holding DESC, hr.updated_at DESC, hr.wallet_address ASC
-       LIMIT ?4`,
-    )
-    .bind(userId, tokenId, runId, limit)
-    .all<{
-      wallet_address: string;
-      amount_holding: number;
-      updated_at: number;
-      account_type: string | null;
-      account_label: string | null;
-    }>();
-  return rows.results.map((row) => ({
-    address: row.wallet_address,
-    label: row.account_label,
-    amountHolding: row.amount_holding,
-    source: 'rpc_owner_prefix_shards',
-    ownership: row.account_type === 'watch' ? 'watch' : 'outside',
-    updatedAt: row.updated_at,
-  }));
-}
-
-async function dbListOutsideTokenHolders(
-  db: D1Database,
-  userId: number,
-  tokenId: number,
-  limit = 200,
-): Promise<OutsideTokenHolderRecord[]> {
-  const syncState = await dbGetTokenHolderSyncState(db, tokenId);
-  if (
-    syncState?.runId &&
-    syncState.stagedHolderCount > 0 &&
-    (syncState.status === 'running' || syncState.status === 'failed')
-  ) {
-    return dbListOutsideTokenHoldersFromStage(
-      db,
-      userId,
-      tokenId,
-      syncState.runId,
-      limit,
-    );
-  }
-  return dbListOutsideTokenHoldersFromFinal(db, userId, tokenId, limit);
 }
 
 function serializeStrategyVersionContent(
@@ -3640,6 +517,12 @@ function dedupeStrategyVersionsForDisplay(
           serializeStrategyVersionContent(version.document) === activeSignature,
       ) ?? activeVersion,
   };
+}
+
+function isManualStrategyVersionDocument(
+  document: StrategyVersionDocument,
+): boolean {
+  return document.metadata.origin === 'manual';
 }
 
 async function dbApplyTokenHolderTransactionDelta(
@@ -4203,434 +1086,6 @@ async function dbCreateTradeLog(
       timestamp,
     )
     .run();
-}
-
-async function dbListRpcEndpoints(
-  db: D1Database,
-  userId: number,
-  network = 'solana',
-): Promise<RpcEndpoint[]> {
-  await dbEnsureTradeDomainSchema(db);
-  const rows = await db
-    .prepare(
-      'SELECT id, network, url, created_at FROM rpc_endpoints WHERE user_id = ?1 AND network = ?2 ORDER BY created_at DESC, id DESC',
-    )
-    .bind(userId, network)
-    .all<{
-      id: number;
-      network: string;
-      url: string;
-      created_at: number;
-    }>();
-  return rows.results.map((row) => ({
-    id: row.id,
-    network: row.network,
-    url: row.url,
-    createdAt: row.created_at,
-  }));
-}
-
-async function dbResolveSolanaRpcUrls(
-  db: D1Database,
-  userId: number,
-  envRpcUrl?: string,
-): Promise<string[]> {
-  const endpoints = await dbListRpcEndpoints(db, userId, 'solana');
-  return dedupeStrings([
-    ...endpoints.map((endpoint) => endpoint.url),
-    envRpcUrl ?? '',
-  ]);
-}
-
-async function dbAddRpcEndpoint(
-  db: D1Database,
-  userId: number,
-  input: RpcEndpointCreateRequest,
-): Promise<RpcEndpoint> {
-  await dbEnsureTradeDomainSchema(db);
-  const network = input.network.trim().toLowerCase();
-  if (network !== 'solana') {
-    throw new ApiError(400, 'Only the solana network is supported right now');
-  }
-  const url = normalizeRpcUrl(input.url);
-  const createdAt = nowTs();
-  try {
-    await db
-      .prepare(
-        'INSERT INTO rpc_endpoints (user_id, network, url, created_at) VALUES (?1, ?2, ?3, ?4)',
-      )
-      .bind(userId, network, url, createdAt)
-      .run();
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('UNIQUE constraint failed')) {
-      throw new ApiError(409, 'This RPC endpoint has already been added');
-    }
-    throw err;
-  }
-  const row = await db
-    .prepare(
-      'SELECT id, network, url, created_at FROM rpc_endpoints WHERE user_id = ?1 AND network = ?2 AND url = ?3',
-    )
-    .bind(userId, network, url)
-    .first<{
-      id: number;
-      network: string;
-      url: string;
-      created_at: number;
-    }>();
-  if (!row) throw new ApiError(500, 'Failed to load the saved RPC endpoint');
-  return {
-    id: row.id,
-    network: row.network,
-    url: row.url,
-    createdAt: row.created_at,
-  };
-}
-
-async function dbDeleteRpcEndpoint(
-  db: D1Database,
-  userId: number,
-  endpointId: number,
-): Promise<RpcEndpoint> {
-  await dbEnsureTradeDomainSchema(db);
-  const row = await db
-    .prepare(
-      'SELECT id, network, url, created_at FROM rpc_endpoints WHERE id = ?1 AND user_id = ?2',
-    )
-    .bind(endpointId, userId)
-    .first<{
-      id: number;
-      network: string;
-      url: string;
-      created_at: number;
-    }>();
-  if (!row) {
-    throw new ApiError(404, 'RPC endpoint not found');
-  }
-  await db.prepare('DELETE FROM rpc_endpoints WHERE id = ?1').bind(endpointId).run();
-  return {
-    id: row.id,
-    network: row.network,
-    url: row.url,
-    createdAt: row.created_at,
-  };
-}
-
-async function dbListTradableTokens(db: D1Database): Promise<TradableToken[]> {
-  await dbEnsureTradeDomainSchema(db);
-  const rows = await db
-    .prepare(
-      'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens ORDER BY id ASC',
-    )
-    .all<{
-      id: number;
-      network: string;
-      contract_address: string;
-      symbol: string | null;
-      name: string | null;
-      decimals: number | null;
-      is_active: number;
-    }>();
-  return rows.results.map((row) => ({
-    id: row.id,
-    network: row.network,
-    contractAddress: row.contract_address,
-    symbol: row.symbol,
-    name: row.name,
-    decimals: row.decimals,
-    isActive: row.is_active === 1,
-  }));
-}
-
-async function dbCreateTradableToken(
-  db: D1Database,
-  input: TradableTokenCreateRequest,
-  decimals: number | null,
-): Promise<TradableToken> {
-  await dbEnsureTradeDomainSchema(db);
-  const network = input.network.trim().toLowerCase();
-  if (network !== 'solana') {
-    throw new ApiError(400, 'Only the solana network is supported right now');
-  }
-  const contractAddress = normalizePubkey(input.contractAddress);
-  const createdAt = nowTs();
-
-  // Enrich with Jupiter token metadata (name, symbol, decimals)
-  let jupiterName: string | null = null;
-  let jupiterSymbol: string | null = null;
-  let resolvedDecimals = decimals;
-  try {
-    const jupiterMeta = await fetchJupiterTokenMetadata(contractAddress);
-    if (jupiterMeta) {
-      jupiterName = jupiterMeta.name;
-      jupiterSymbol = jupiterMeta.symbol;
-      if (resolvedDecimals == null && jupiterMeta.decimals != null) {
-        resolvedDecimals = jupiterMeta.decimals;
-      }
-    }
-  } catch {
-    // non-fatal: token may not be in Jupiter's verified list yet
-  }
-
-  await db
-    .prepare(
-      `INSERT INTO tradable_tokens (
-         network,
-         contract_address,
-         symbol,
-         name,
-         decimals,
-         is_active,
-         created_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
-       ON CONFLICT(network, contract_address) DO UPDATE SET
-         is_active = 1,
-         symbol = COALESCE(?3, tradable_tokens.symbol),
-         name = COALESCE(?4, tradable_tokens.name),
-         decimals = COALESCE(?5, tradable_tokens.decimals)`,
-    )
-    .bind(network, contractAddress, jupiterSymbol, jupiterName, resolvedDecimals, createdAt)
-    .run();
-  const row = await db
-    .prepare(
-      'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2',
-    )
-    .bind(network, contractAddress)
-    .first<{
-      id: number;
-      network: string;
-      contract_address: string;
-      symbol: string | null;
-      name: string | null;
-      decimals: number | null;
-      is_active: number;
-    }>();
-  if (!row) throw new ApiError(500, 'Failed to load the saved token');
-  return {
-    id: row.id,
-    network: row.network,
-    contractAddress: row.contract_address,
-    symbol: row.symbol,
-    name: row.name,
-    decimals: row.decimals,
-    isActive: row.is_active === 1,
-  };
-}
-
-async function dbUpdateTradableTokenMetadata(
-  db: D1Database,
-  tokenId: number,
-  snapshot: TokenMarketSnapshot,
-): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
-  await db
-    .prepare(
-      `UPDATE tradable_tokens
-       SET symbol = COALESCE(?2, symbol),
-           name = COALESCE(?3, name)
-       WHERE id = ?1`,
-    )
-    .bind(tokenId, snapshot.tokenSymbol, snapshot.tokenName)
-    .run();
-}
-
-async function dbResolveTradableTokenId(
-  db: D1Database,
-  contractAddress: string,
-): Promise<number | null> {
-  await dbEnsureTradeDomainSchema(db);
-  const row = await db
-    .prepare(
-      'SELECT id FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2 LIMIT 1',
-    )
-    .bind('solana', normalizePubkey(contractAddress))
-    .first<{ id: number }>();
-  return row?.id ?? null;
-}
-
-async function dbGetLatestTokenMarketSnapshot(
-  db: D1Database,
-  tokenId: number,
-): Promise<TokenMarketSnapshot | null> {
-  await dbEnsureTradeDomainSchema(db);
-  const row = await db
-    .prepare(
-      `SELECT
-         network,
-         contract_address,
-         token_name,
-         token_symbol,
-         price_usd,
-         liquidity_usd,
-         fdv,
-         volume_24h,
-         total_transactions_24h,
-         outsiders_over_one_usd,
-         dex_id,
-         pair_address,
-         fetched_at
-       FROM token_market_snapshots
-       WHERE token_id = ?1
-       ORDER BY CASE
-         WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
-         ELSE fetched_at
-       END DESC, id DESC
-       LIMIT 1`,
-    )
-    .bind(tokenId)
-    .first<{
-      network: string;
-      contract_address: string;
-      token_name: string | null;
-      token_symbol: string | null;
-      price_usd: number | null;
-      liquidity_usd: number | null;
-      fdv: number | null;
-      volume_24h: number | null;
-      total_transactions_24h: number | null;
-      outsiders_over_one_usd: number | null;
-      dex_id: string | null;
-      pair_address: string | null;
-      fetched_at: number;
-    }>();
-  if (!row) {
-    return null;
-  }
-  return {
-    network: row.network,
-    contractAddress: row.contract_address,
-    tokenName: row.token_name,
-    tokenSymbol: row.token_symbol,
-    priceUsd: row.price_usd,
-    liquidityUsd: row.liquidity_usd,
-    fdv: row.fdv,
-    volume24h: row.volume_24h,
-    totalTransactions24h: row.total_transactions_24h,
-    outsidersOverOneUsd: row.outsiders_over_one_usd,
-    dexId: row.dex_id,
-    pairAddress: row.pair_address,
-    fetchedAt: normalizeTimestampMs(row.fetched_at),
-  };
-}
-
-async function dbInsertTokenMarketSnapshot(
-  db: D1Database,
-  tokenId: number,
-  snapshot: TokenMarketSnapshot,
-): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
-  await db
-    .prepare(
-      `INSERT INTO token_market_snapshots (
-        token_id,
-        network,
-        contract_address,
-        token_name,
-        token_symbol,
-        price_usd,
-        liquidity_usd,
-        fdv,
-        volume_24h,
-        total_transactions_24h,
-        outsiders_over_one_usd,
-        dex_id,
-        pair_address,
-        fetched_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
-    )
-    .bind(
-      tokenId,
-      snapshot.network,
-      snapshot.contractAddress,
-      snapshot.tokenName,
-      snapshot.tokenSymbol,
-      snapshot.priceUsd,
-      snapshot.liquidityUsd,
-      snapshot.fdv,
-      snapshot.volume24h,
-      snapshot.totalTransactions24h,
-      snapshot.outsidersOverOneUsd,
-      snapshot.dexId,
-      snapshot.pairAddress,
-      snapshot.fetchedAt,
-    )
-    .run();
-}
-
-// Query market snapshots within a time range
-async function dbGetTokenMarketSnapshotsByTimeRange(
-  db: D1Database,
-  tokenId: number,
-  startTime: number,
-  endTime: number,
-  limit: number = 100,
-): Promise<TokenMarketSnapshot[]> {
-  await dbEnsureTradeDomainSchema(db);
-  const rows = await db
-    .prepare(
-      `SELECT
-         network,
-         contract_address,
-         token_name,
-         token_symbol,
-         price_usd,
-         liquidity_usd,
-         fdv,
-         volume_24h,
-         total_transactions_24h,
-         outsiders_over_one_usd,
-         dex_id,
-         pair_address,
-         fetched_at
-       FROM token_market_snapshots
-       WHERE token_id = ?1
-         AND CASE
-           WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
-           ELSE fetched_at
-         END >= ?2
-         AND CASE
-           WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
-           ELSE fetched_at
-         END <= ?3
-       ORDER BY CASE
-         WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
-         ELSE fetched_at
-       END DESC, id DESC
-       LIMIT ?4`,
-    )
-    .bind(tokenId, startTime, endTime, limit)
-    .all<{
-      network: string;
-      contract_address: string;
-      token_name: string | null;
-      token_symbol: string | null;
-      price_usd: number | null;
-      liquidity_usd: number | null;
-      fdv: number | null;
-      volume_24h: number | null;
-      total_transactions_24h: number | null;
-      outsiders_over_one_usd: number | null;
-      dex_id: string | null;
-      pair_address: string | null;
-      fetched_at: number;
-    }>();
-
-  return rows.results.map((row) => ({
-    network: row.network,
-    contractAddress: row.contract_address,
-    tokenName: row.token_name,
-    tokenSymbol: row.token_symbol,
-    priceUsd: row.price_usd,
-    liquidityUsd: row.liquidity_usd,
-    fdv: row.fdv,
-    volume24h: row.volume_24h,
-    totalTransactions24h: row.total_transactions_24h,
-    outsidersOverOneUsd: row.outsiders_over_one_usd,
-    dexId: row.dex_id,
-    pairAddress: row.pair_address,
-    fetchedAt: normalizeTimestampMs(row.fetched_at),
-  }));
 }
 
 async function dbCreateSignal(
@@ -5629,6 +2084,190 @@ async function dbListStrategyVersions(
   return rows.results.map(mapStrategyVersionRow).slice(0, fetchLimit);
 }
 
+async function dbDeletePreviousStrategyVersions(
+  db: D1Database,
+  userId: number,
+): Promise<{
+  deletedVersions: number;
+  deletedEvaluations: number;
+  keptVersion: StrategyVersionRecord | null;
+}> {
+  await dbEnsureTradeDomainSchema(db);
+  const definition = await dbGetOrCreatePrimaryStrategyDefinition(db, userId);
+  const rows = await db
+    .prepare(
+      `SELECT
+         id,
+         strategy_id,
+         version_no,
+         schema_version,
+         engine_version,
+         strategy_type,
+         status,
+         params_json,
+         triggers_json,
+         targets_json,
+         risk_json,
+         execution_json,
+         metadata_json,
+         checksum,
+         change_note,
+         created_at,
+         activated_at
+       FROM strategy_versions
+       WHERE strategy_id = ?1
+       ORDER BY version_no DESC, id DESC`,
+    )
+    .bind(definition.id)
+    .all<{
+      id: number;
+      strategy_id: number;
+      version_no: number;
+      schema_version: number;
+      engine_version: string;
+      strategy_type: string;
+      status: string;
+      params_json: string;
+      triggers_json: string;
+      targets_json: string;
+      risk_json: string;
+      execution_json: string;
+      metadata_json: string;
+      checksum: string;
+      change_note: string | null;
+      created_at: number;
+      activated_at: number | null;
+    }>();
+
+  const versions = rows.results.map(mapStrategyVersionRow);
+  const manualVersions = versions.filter((version) =>
+    isManualStrategyVersionDocument(version.document),
+  );
+  const deletedVersionsList = versions.filter(
+    (version) => !isManualStrategyVersionDocument(version.document),
+  );
+
+  if (versions.length === 0) {
+    return {
+      deletedVersions: 0,
+      deletedEvaluations: 0,
+      keptVersion: null,
+    };
+  }
+
+  const keepVersion = manualVersions.find(
+    (version) => version.id === definition.currentVersionId,
+  ) ?? manualVersions[0] ?? null;
+
+  if (deletedVersionsList.length === 0) {
+    const updatedAt = nowTs();
+    if (keepVersion) {
+      await db.batch(
+        manualVersions.map((version) =>
+          db
+            .prepare(
+              `UPDATE strategy_versions
+               SET status = ?2,
+                   activated_at = CASE
+                     WHEN id = ?1 THEN COALESCE(activated_at, ?3)
+                     ELSE activated_at
+                   END
+               WHERE id = ?1`,
+            )
+            .bind(
+              version.id,
+              version.id === keepVersion.id ? 'active' : 'published',
+              updatedAt,
+            ),
+        ),
+      );
+      await db
+        .prepare(
+          'UPDATE strategy_definitions SET current_version_id = ?2, updated_at = ?3 WHERE id = ?1',
+        )
+        .bind(definition.id, keepVersion.id, updatedAt)
+        .run();
+    } else {
+      await db
+        .prepare(
+          'UPDATE strategy_definitions SET current_version_id = NULL, updated_at = ?2 WHERE id = ?1',
+        )
+        .bind(definition.id, updatedAt)
+        .run();
+    }
+    return {
+      deletedVersions: 0,
+      deletedEvaluations: 0,
+      keptVersion: keepVersion,
+    };
+  }
+
+  let deletedEvaluations = 0;
+  for (const version of deletedVersionsList) {
+    deletedEvaluations +=
+      (
+        await db
+          .prepare(
+            'SELECT COUNT(*) AS count FROM strategy_evaluations WHERE strategy_version_id = ?1',
+          )
+          .bind(version.id)
+          .first<{ count: number }>()
+      )?.count ?? 0;
+  }
+
+  if (deletedVersionsList.length > 0) {
+    await db.batch(
+      deletedVersionsList.map((version) =>
+        db
+          .prepare('DELETE FROM strategy_versions WHERE id = ?1')
+          .bind(version.id),
+      ),
+    );
+  }
+
+  const updatedAt = nowTs();
+  if (manualVersions.length > 0 && keepVersion) {
+    await db.batch(
+      manualVersions.map((version) =>
+        db
+          .prepare(
+            `UPDATE strategy_versions
+             SET status = ?2,
+                 activated_at = CASE
+                   WHEN id = ?1 THEN COALESCE(activated_at, ?3)
+                   ELSE activated_at
+                 END
+             WHERE id = ?1`,
+          )
+          .bind(
+            version.id,
+            version.id === keepVersion.id ? 'active' : 'published',
+            updatedAt,
+          ),
+      ),
+    );
+    await db
+      .prepare(
+        'UPDATE strategy_definitions SET current_version_id = ?2, updated_at = ?3 WHERE id = ?1',
+      )
+      .bind(definition.id, keepVersion.id, updatedAt)
+      .run();
+  } else {
+    await db
+      .prepare(
+        'UPDATE strategy_definitions SET current_version_id = NULL, updated_at = ?2 WHERE id = ?1',
+      )
+      .bind(definition.id, updatedAt)
+      .run();
+  }
+
+  return {
+    deletedVersions: deletedVersionsList.length,
+    deletedEvaluations,
+    keptVersion: keepVersion,
+  };
+}
+
 async function dbListStrategyEvaluations(
   db: D1Database,
   userId: number,
@@ -5772,13 +2411,13 @@ async function runAndPersistStrategyEvaluation(
     changeNote?: string;
     origin?: 'settings-sync' | 'manual' | 'migration';
   },
-): Promise<{ version: StrategyVersionRecord; runtime: StrategyRuntimeResult }> {
-  const { version } = await dbSyncActiveStrategyVersionFromSettings(
-    db,
-    userId,
-    settings,
-    options,
-  );
+): Promise<{ version: StrategyVersionRecord; runtime: StrategyRuntimeResult } | null> {
+  void settings;
+  void options;
+  const version = await dbGetActiveStrategyVersion(db, userId);
+  if (!version) {
+    return null;
+  }
   const runtime = runStrategyRuntime({
     strategyDocument: version.document,
     trigger,
@@ -6640,7 +3279,9 @@ async function processTokenActivitySignal(
           origin: 'settings-sync',
         },
       );
-      strategySummary = `Strategy v${strategyResult.version.versionNo}: ${summarizeStrategyRuntime(strategyResult.runtime)}`;
+      strategySummary = strategyResult
+        ? `Strategy v${strategyResult.version.versionNo}: ${summarizeStrategyRuntime(strategyResult.runtime)}`
+        : 'No manual strategy version is active, so the webhook did not create an evaluation.';
     } catch (err: unknown) {
       console.warn(
         `Strategy evaluation failed for webhook ${input.eventType} on ${normalizedContractAddress}:`,
@@ -7206,24 +3847,12 @@ async function handleSaveSettings(
     user.id,
     updated,
   );
-  const strategySync = await dbSyncActiveStrategyVersionFromSettings(
-    env.TRADINGBOT_DB,
-    user.id,
-    updated,
-    {
-      author: user.username,
-      changeNote: updated.strategyNotes.trim() || 'Trading settings were updated',
-      origin: 'settings-sync',
-    },
-  );
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
     'settings.updated',
     'settings',
-    strategySync.created
-      ? `Trading settings were updated. Strategy version v${strategySync.version.versionNo} was published and activated.`
-      : `Trading settings were updated. Strategy version v${strategySync.version.versionNo} remains active.`,
+    'Trading settings were updated. No strategy version was created automatically.',
   );
 
   if (normalizedContractAddress && rpcUrls) {
@@ -7312,18 +3941,7 @@ async function handleSaveActiveToken(
   }
 
   const updatedSettings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-  const strategySync = await dbSyncActiveStrategyVersionFromSettings(
-    env.TRADINGBOT_DB,
-    user.id,
-    updatedSettings,
-    {
-      author: user.username,
-      changeNote: normalizedContractAddress
-        ? 'Active trading token changed'
-        : 'Active trading token cleared',
-      origin: 'settings-sync',
-    },
-  );
+  void updatedSettings;
 
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
@@ -7332,9 +3950,9 @@ async function handleSaveActiveToken(
     normalizedContractAddress || 'none',
     normalizedContractAddress
       ? marketSnapshot
-        ? `Activated the tracked token and initialized market data. Strategy version v${strategySync.version.versionNo} is now active.`
-        : `Activated the tracked token. Live market data will load on the next successful refresh. Strategy version v${strategySync.version.versionNo} is now active.`
-      : `Cleared the active tracked token. Strategy version v${strategySync.version.versionNo} is now active.`,
+        ? 'Activated the tracked token and initialized market data. No strategy version was created automatically.'
+        : 'Activated the tracked token. Live market data will load on the next successful refresh. No strategy version was created automatically.'
+      : 'Cleared the active tracked token. No strategy version was created automatically.',
   );
 
   return jsonResponse({
@@ -7349,7 +3967,6 @@ async function handleSaveActiveStrategy(
   env: Env,
 ): Promise<Response> {
   const user = await requireAdmin(request, env);
-  const currentSettings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
   const document = normalizeStrategyDocument(
     await parseJsonBody<unknown>(request),
   );
@@ -7362,6 +3979,15 @@ async function handleSaveActiveStrategy(
     parameters: {
       ...document.parameters,
       contractAddress: normalizedContractAddress,
+    },
+    metadata: {
+      ...document.metadata,
+      author: user.username,
+      changeNote:
+        document.metadata.changeNote ||
+        document.parameters.notes ||
+        'Strategy document updated',
+      origin: 'manual',
     },
   });
 
@@ -7453,6 +4079,34 @@ async function handleSaveActiveStrategy(
     activeStrategyVersion: strategySave.version,
     settings: updatedSettings,
     marketSnapshot,
+  });
+}
+
+// POST /api/strategy/versions/cleanup
+async function handleCleanupStrategyVersions(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const cleanup = await dbDeletePreviousStrategyVersions(
+    env.TRADINGBOT_DB,
+    user.id,
+  );
+
+  await dbAddAuditLog(
+    env.TRADINGBOT_DB,
+    user.id,
+    'strategy.versions_cleaned',
+    cleanup.keptVersion?.document.parameters.contractAddress || 'strategy',
+    cleanup.keptVersion
+      ? `Deleted ${cleanup.deletedVersions} automatic strategy version(s) and ${cleanup.deletedEvaluations} related evaluation(s). Kept manual v${cleanup.keptVersion.versionNo} active.`
+      : `Deleted ${cleanup.deletedVersions} automatic strategy version(s) and ${cleanup.deletedEvaluations} related evaluation(s). No manual strategy version remains active.`,
+  );
+
+  return jsonResponse({
+    deletedVersions: cleanup.deletedVersions,
+    deletedEvaluations: cleanup.deletedEvaluations,
+    activeStrategyVersion: cleanup.keptVersion,
   });
 }
 
@@ -7574,7 +4228,7 @@ async function handleGetMarketSnapshotsByTimeRange(
   const user = await requireAdmin(request, env);
   const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
   const contractAddress = settings.contractAddress.trim();
-  
+
   if (!contractAddress) {
     throw new ApiError(
       400,
@@ -7777,15 +4431,17 @@ async function handleForceRefreshMarketSnapshot(
         origin: 'settings-sync',
       },
     );
-    strategyEvaluationSummary = `Strategy v${strategyResult.version.versionNo}: ${summarizeStrategyRuntime(strategyResult.runtime)}`;
-    strategyEvaluationPayload = {
-      versionNo: strategyResult.version.versionNo,
-      status: strategyResult.runtime.evaluation.status,
-      qualified: strategyResult.runtime.evaluation.qualified,
-      shouldExecute: strategyResult.runtime.evaluation.shouldExecute,
-      dryRun: strategyResult.runtime.evaluation.dryRun,
-      reasons: strategyResult.runtime.evaluation.reasons,
-    };
+    if (strategyResult) {
+      strategyEvaluationSummary = `Strategy v${strategyResult.version.versionNo}: ${summarizeStrategyRuntime(strategyResult.runtime)}`;
+      strategyEvaluationPayload = {
+        versionNo: strategyResult.version.versionNo,
+        status: strategyResult.runtime.evaluation.status,
+        qualified: strategyResult.runtime.evaluation.qualified,
+        shouldExecute: strategyResult.runtime.evaluation.shouldExecute,
+        dryRun: strategyResult.runtime.evaluation.dryRun,
+        reasons: strategyResult.runtime.evaluation.reasons,
+      };
+    }
   } catch (err: unknown) {
     console.warn(`Strategy evaluation failed after manual refresh for ${contractAddress}:`, err);
   }
@@ -8229,6 +4885,8 @@ async function handleApi(
       return await handleSaveSettings(request, env);
     if (method === 'POST' && pathname === '/api/strategy/active')
       return await handleSaveActiveStrategy(request, env);
+    if (method === 'POST' && pathname === '/api/strategy/versions/cleanup')
+      return await handleCleanupStrategyVersions(request, env);
     if (method === 'POST' && pathname === '/api/tradable-tokens')
       return await handleAddTradableToken(request, env);
     if (method === 'POST' && pathname === '/api/market-snapshot/refresh')

@@ -12,12 +12,16 @@ type HistoricalSetupsPageProps = {
   activeStrategyVersion: StrategyVersionRecord | null;
   strategyVersions: StrategyVersionRecord[];
   strategyEvaluations: StrategyEvaluationRecord[];
+  onCleanupStrategyVersions: () => void;
+  isCleaningStrategyVersions: boolean;
 };
 
 export default function HistoricalSetupsPage({
   activeStrategyVersion,
   strategyVersions,
   strategyEvaluations,
+  onCleanupStrategyVersions,
+  isCleaningStrategyVersions,
 }: HistoricalSetupsPageProps) {
   const [activeView, setActiveView] = React.useState<'versions' | 'evaluations'>('versions');
 
@@ -35,19 +39,30 @@ export default function HistoricalSetupsPage({
 
   return (
     <div className="space-y-6">
-      <div className="inline-flex rounded-xl border border-slate-800 bg-slate-900 p-1 shadow-sm">
-        <TabButton
-          active={activeView === 'versions'}
-          onClick={() => setActiveView('versions')}
-          icon={<Archive size={14} />}
-          label="Strategy Versions"
-        />
-        <TabButton
-          active={activeView === 'evaluations'}
-          onClick={() => setActiveView('evaluations')}
-          icon={<FileText size={14} />}
-          label="Strategy Evaluations"
-        />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="inline-flex rounded-xl border border-slate-800 bg-slate-900 p-1 shadow-sm">
+          <TabButton
+            active={activeView === 'versions'}
+            onClick={() => setActiveView('versions')}
+            icon={<Archive size={14} />}
+            label="Strategy Versions"
+          />
+          <TabButton
+            active={activeView === 'evaluations'}
+            onClick={() => setActiveView('evaluations')}
+            icon={<FileText size={14} />}
+            label="Strategy Evaluations"
+          />
+        </div>
+        {activeView === 'versions' ? (
+          <button
+            onClick={onCleanupStrategyVersions}
+            disabled={isCleaningStrategyVersions}
+            className="rounded-md border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs font-medium uppercase tracking-wider text-rose-300 hover:bg-rose-500/20 disabled:opacity-60"
+          >
+            {isCleaningStrategyVersions ? 'Clearing...' : 'Clear Automatic Versions'}
+          </button>
+        ) : null}
       </div>
 
       {activeView === 'versions' ? (

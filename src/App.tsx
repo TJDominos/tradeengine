@@ -562,6 +562,33 @@ export default function App() {
       await refresh();
     });
 
+  const handleCleanupStrategyVersions = () =>
+    submitWithFeedback('strategy-cleanup', async () => {
+      if (
+        typeof window !== 'undefined' &&
+        !window.confirm(
+          'Clear all previous strategy versions and keep only the current active version?',
+        )
+      ) {
+        return;
+      }
+
+      const response = await api<{
+        deletedVersions: number;
+        deletedEvaluations: number;
+        activeStrategyVersion: EngineState['activeStrategyVersion'];
+      }>('/api/strategy/versions/cleanup', {
+        method: 'POST',
+      });
+
+      setNotice(
+        response.activeStrategyVersion
+          ? `Deleted ${response.deletedVersions} automatic strategy version(s) and ${response.deletedEvaluations} evaluation(s). Kept manual v${response.activeStrategyVersion.versionNo} active.`
+          : `Deleted ${response.deletedVersions} automatic strategy version(s) and ${response.deletedEvaluations} evaluation(s). No manual strategy version remains active.`,
+      );
+      await refresh();
+    });
+
   const handleUseToken = (contractAddress: string) =>
     submitWithFeedback('use-token', async () => {
       const result = await api<{ contractAddress: string; marketSnapshot: TokenMarketSnapshot | null }>(
@@ -1111,6 +1138,8 @@ export default function App() {
       activeStrategyVersion={engineState.activeStrategyVersion}
       strategyVersions={engineState.strategyVersions}
       strategyEvaluations={engineState.strategyEvaluations}
+      onCleanupStrategyVersions={handleCleanupStrategyVersions}
+      isCleaningStrategyVersions={submitting === 'strategy-cleanup'}
     />
   );
 
