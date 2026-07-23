@@ -240,41 +240,72 @@ async function fetchSolanaTokenHolderBalances(
   mint: string,
   decimals: number,
 ): Promise<Map<string, number>> {
-  // One getProgramAccounts call per token program (2 total) with a base64 data
-  // slice for owner (32 bytes) + amount (8 bytes). This is far lighter than the
-  // 512 owner-prefix shard scans and avoids the RPC rate limiting that left the
-  // sharded sync stuck at 0/512.
+  // Phase 1: get token-account pubkeys only (minimal response payload).
   const filters = [{ dataSize: 165 }, { memcmp: { offset: 0, bytes: mint } }];
-  const programResults = await Promise.allSettled(
+  const tokenAccountPubkeys = new Set<string>();
+  let successfulProgramCalls = 0;
+  const listResults = await Promise.allSettled(
     [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID].map((programId) =>
-      solanaRpc<
-        Array<{
-          account: {
-            data: [string, string] | string;
-          };
-        }>
-      >(rpcUrls, 'getProgramAccounts', [
+      solanaRpc<Array<{ pubkey: string }>>(rpcUrls, 'getProgramAccounts', [
         programId,
         {
           filters,
-          encoding: 'base64',
-          dataSlice: { offset: 32, length: 40 },
+          dataSlice: { offset: 0, length: 0 },
         },
       ]),
     ),
   );
 
-  const balances = new Map<string, number>();
-  let successfulQueryCount = 0;
-  for (const result of programResults) {
+  for (const result of listResults) {
     if (result.status !== 'fulfilled') {
       continue;
     }
-    successfulQueryCount += 1;
+    successfulProgramCalls += 1;
     for (const row of result.value) {
-      const data = Array.isArray(row.account.data)
-        ? row.account.data[0]
-        : row.account.data;
+      const pubkey = tryNormalizeSolanaPubkey(row.pubkey);
+      if (pubkey) {
+        tokenAccountPubkeys.add(pubkey);
+      }
+    }
+  }
+
+  if (successfulProgramCalls === 0) {
+    const rejectedResult = listResults.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    throw rejectedResult?.reason instanceof Error
+      ? rejectedResult.reason
+      : new ApiError(502, 'Failed to list token holder accounts from Solana RPC');
+  }
+
+  // Phase 2: batch-fetch account details and parse owner (32 bytes) + amount (8 bytes).
+  const balances = new Map<string, number>();
+  const allPubkeys = [...tokenAccountPubkeys];
+  const chunkSize = 100;
+  for (let index = 0; index < allPubkeys.length; index += chunkSize) {
+    const chunk = allPubkeys.slice(index, index + chunkSize);
+    const accountInfos = await solanaRpc<{
+      value: Array<
+        | {
+            data: [string, string] | string;
+          }
+        | null
+      >;
+    }>(rpcUrls, 'getMultipleAccounts', [
+      chunk,
+      {
+        encoding: 'base64',
+        dataSlice: { offset: 32, length: 40 },
+      },
+    ]);
+
+    for (const accountInfo of accountInfos.value ?? []) {
+      if (!accountInfo) {
+        continue;
+      }
+      const data = Array.isArray(accountInfo.data)
+        ? accountInfo.data[0]
+        : accountInfo.data;
       if (typeof data !== 'string' || data.length === 0) {
         continue;
       }
@@ -293,15 +324,6 @@ async function fetchSolanaTokenHolderBalances(
       }
       balances.set(owner, (balances.get(owner) ?? 0) + amountHolding);
     }
-  }
-
-  if (successfulQueryCount === 0) {
-    const rejectedResult = programResults.find(
-      (result): result is PromiseRejectedResult => result.status === 'rejected',
-    );
-    throw rejectedResult?.reason instanceof Error
-      ? rejectedResult.reason
-      : new ApiError(502, 'Failed to load token holder accounts from Solana RPC');
   }
 
   return balances;
@@ -597,6 +619,28 @@ async function syncSolanaTokenHolderBalancesFull(
       shardsProcessedThisRun: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
     });
   } catch (err: unknown) {
+    if (isSolanaRpcRateLimitError(err)) {
+      const rateLimitedState = await dbPutTokenHolderSyncState(db, {
+        tokenId,
+        runId: existingState?.runId ?? crypto.randomUUID(),
+        status: 'failed',
+        source: 'rpc_full_sync',
+        nextShardIndex: existingState?.nextShardIndex ?? 0,
+        processedShardCount: existingState?.processedShardCount ?? 0,
+        totalShardCount:
+          existingState?.totalShardCount ?? TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+        stagedHolderCount: existingState?.stagedHolderCount ?? 0,
+        lastProgramId: existingState?.lastProgramId ?? null,
+        lastOwnerPrefix: existingState?.lastOwnerPrefix ?? null,
+        errorMessage:
+          'Holder sync is rate-limited (HTTP 429) on all configured Solana RPC endpoints. Add a higher-capacity RPC endpoint and retry refresh.',
+        startedAt: existingState?.startedAt ?? timestamp,
+        updatedAt: timestamp,
+        lastCompletedAt: existingState?.lastCompletedAt ?? null,
+      });
+      return buildTokenHolderSyncSummary(rateLimitedState);
+    }
+
     const failedState = await dbPutTokenHolderSyncState(db, {
       tokenId,
       runId: existingState?.runId ?? crypto.randomUUID(),
@@ -2932,6 +2976,10 @@ async function syncTokenMarketSnapshotForUser(
   return snapshot;
 }
 
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function solanaRpc<T>(
   rpcUrls: string | string[],
   method: string,
@@ -2940,35 +2988,48 @@ async function solanaRpc<T>(
   const pool = dedupeStrings(
     (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls]).map((url) => url.trim()),
   );
+  const maxAttemptsPerEndpoint = 3;
   let lastErrorMessage = 'Unknown Solana RPC failure';
 
   for (const rpcUrl of pool) {
-    try {
-      const response = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: method, method, params }),
-      });
-      if (!response.ok) {
-        throw new ApiError(502, `Solana RPC request failed with ${response.status}`);
-      }
-      const body = await response.json<{
-        result?: T;
-        error?: { code?: number; message?: string };
-      }>();
-      if (body.error) {
-        throw new ApiError(
-          502,
-          `Solana RPC error: ${body.error.message ?? 'unknown error'}`,
+    for (let attempt = 0; attempt < maxAttemptsPerEndpoint; attempt += 1) {
+      try {
+        const response = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: method, method, params }),
+        });
+        if (!response.ok) {
+          throw new ApiError(502, `Solana RPC request failed with ${response.status}`);
+        }
+        const body = await response.json<{
+          result?: T;
+          error?: { code?: number; message?: string };
+        }>();
+        if (body.error) {
+          throw new ApiError(
+            502,
+            `Solana RPC error: ${body.error.message ?? 'unknown error'}`,
+          );
+        }
+        if (body.result == null) {
+          throw new ApiError(502, 'Solana RPC returned an empty result');
+        }
+        return body.result;
+      } catch (err: unknown) {
+        lastErrorMessage = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `Solana RPC attempt ${attempt + 1}/${maxAttemptsPerEndpoint} failed for ${rpcUrl}: ${lastErrorMessage}`,
         );
+
+        const isLastAttempt = attempt + 1 >= maxAttemptsPerEndpoint;
+        if (!isLastAttempt && isSolanaRpcRateLimitError(err)) {
+          // Backoff when providers return 429 so we do not instantly re-hit the limit.
+          await waitMs(250 * (attempt + 1));
+          continue;
+        }
+        break;
       }
-      if (body.result == null) {
-        throw new ApiError(502, 'Solana RPC returned an empty result');
-      }
-      return body.result;
-    } catch (err: unknown) {
-      lastErrorMessage = err instanceof Error ? err.message : String(err);
-      console.warn(`Solana RPC attempt failed for ${rpcUrl}: ${lastErrorMessage}`);
     }
   }
 
