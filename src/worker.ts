@@ -205,14 +205,30 @@ const HOLDER_SYNC_ACCOUNT_DETAILS_INTERVAL_MS = Math.ceil(
 const MARKET_REFRESH_RUNNING_STALE_AFTER_SEC = 15 * 60;
 
 function buildHolderProgramAccountsRpcUrls(
-  _rpcUrls: string | string[],
+  rpcUrls: string | string[],
 ): string[] {
+  const urls = (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls])
+    .map((url) => url.trim())
+    .filter((url) => url.length > 0);
+
+  if (urls.length > 0) {
+    return urls;
+  }
+
   return [HOLDER_SYNC_PROGRAM_ACCOUNTS_PRIMARY_RPC_URL];
 }
 
 function buildHolderAccountDetailsRpcUrls(
-  _rpcUrls: string | string[],
+  rpcUrls: string | string[],
 ): string[] {
+  const urls = (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls])
+    .map((url) => url.trim())
+    .filter((url) => url.length > 0);
+
+  if (urls.length > 0) {
+    return urls;
+  }
+
   return [HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL];
 }
 

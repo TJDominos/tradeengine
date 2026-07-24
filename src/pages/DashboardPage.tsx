@@ -55,6 +55,7 @@ export default function DashboardPage({
   const internalHolderCount = tokenHolderAggregate?.internalHolderCount ?? null;
   const internalAmountHolding = tokenHolderAggregate?.internalAmountHolding ?? null;
   const outsiderHolderCount = tokenHolderAggregate?.outsiderHolderCount ?? null;
+  const totalHolders = dashboardSnapshot?.totalHolders ?? null;
   const outsiderAmountHolding = tokenHolderAggregate
     ? Math.max(
         0,
@@ -75,6 +76,11 @@ export default function DashboardPage({
       : outsiderHolderCount != null
         ? formatNum(outsiderHolderCount)
         : 'Unavailable';
+  const totalHoldersValue = !hasActiveToken
+    ? 'Not Configured'
+    : totalHolders != null
+      ? formatNum(totalHolders)
+      : 'Unavailable';
   const internalHolderSubtitle = !hasActiveToken
     ? 'Set an active token to load holder data.'
     : tokenHolderAggregateLoading
@@ -128,6 +134,11 @@ export default function DashboardPage({
           title="Number of Transaction and Volumes"
           value={formatNum(transactionCount)}
           subtitle={`Selected range volume ${formatUSD(transactionVolumeUsd)}`}
+        />
+        <StatCard
+          title="Total Token Holders"
+          value={totalHoldersValue}
+          subtitle={marketSnapshotSubtitle}
         />
         <StatCard
           title="Internal Token Holders"
