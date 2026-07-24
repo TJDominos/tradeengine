@@ -94,6 +94,7 @@ export type TokenMarketSnapshot = {
   fdv: number | null;
   volume24h: number | null;
   totalTransactions24h: number | null;
+  totalHolders?: number | null;
   outsidersOverOneUsd: number | null;
   dexId: string | null;
   pairAddress: string | null;
@@ -113,6 +114,17 @@ export type TokenHolderAggregate = {
   lastDeltaSyncAt: number | null;
   updatedAt: number;
   source: string;
+};
+
+export type MarketRefreshStatus = {
+  contractAddress: string;
+  status: 'idle' | 'running' | 'completed' | 'failed';
+  requestId: string | null;
+  errorMessage: string | null;
+  summaryText: string | null;
+  startedAt: number | null;
+  updatedAt: number;
+  completedAt: number | null;
 };
 
 export type OutsideTokenHolder = {
@@ -178,6 +190,7 @@ export type EngineState = {
   strategyVersions: StrategyVersionRecord[];
   strategyEvaluations: StrategyEvaluationRecord[];
   tokenHolderAggregate: TokenHolderAggregate | null;
+  marketRefreshStatus: MarketRefreshStatus | null;
   outsideTokenHolders: OutsideTokenHolder[];
   rpcEndpoints: RpcEndpoint[];
   marketSnapshot: TokenMarketSnapshot | null;

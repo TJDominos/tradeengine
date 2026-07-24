@@ -176,6 +176,17 @@ export interface TokenHolderSyncSummary {
   errorMessage: string | null;
   lastCompletedAt: number | null;
 }
+export type MarketRefreshStatus = 'idle' | 'running' | 'completed' | 'failed';
+export interface MarketRefreshStatusRecord {
+  contractAddress: string;
+  status: MarketRefreshStatus;
+  requestId: string | null;
+  errorMessage: string | null;
+  summaryText: string | null;
+  startedAt: number | null;
+  updatedAt: number;
+  completedAt: number | null;
+}
 export interface StoredSignalTransactionDetails {
   tokenContractAddress: string | null;
   fromWalletAddress: string | null;
@@ -206,6 +217,7 @@ export interface TokenMarketSnapshot {
   fdv: number | null;
   volume24h: number | null;
   totalTransactions24h: number | null;
+  totalHolders?: number | null;
   outsidersOverOneUsd: number | null;
   dexId: string | null;
   pairAddress: string | null;

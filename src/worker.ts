@@ -96,6 +96,7 @@ import type {
   DerivedChainSignal,
   Env,
   HistoricalSetupRecord,
+  MarketRefreshStatusRecord,
   ManagedWalletImportRequest,
   OutsideTokenHolderRecord,
   RpcEndpoint,
@@ -201,6 +202,7 @@ const HOLDER_SYNC_ACCOUNT_DETAILS_REQUESTS_PER_SECOND = 4;
 const HOLDER_SYNC_ACCOUNT_DETAILS_INTERVAL_MS = Math.ceil(
   1000 / HOLDER_SYNC_ACCOUNT_DETAILS_REQUESTS_PER_SECOND,
 );
+const MARKET_REFRESH_RUNNING_STALE_AFTER_SEC = 15 * 60;
 
 function buildHolderProgramAccountsRpcUrls(
   _rpcUrls: string | string[],
@@ -214,62 +216,17 @@ function buildHolderAccountDetailsRpcUrls(
   return [HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL];
 }
 
-async function fetchSolanaTokenHolderAddresses(
+async function listSolanaTokenHolderAccountPubkeys(
   rpcUrls: string | string[],
   mint: string,
 ): Promise<string[]> {
-  const filters = [{ dataSize: 165 }, { memcmp: { offset: 0, bytes: mint } }];
-  const programResults = await Promise.allSettled(
-    [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID].map((programId) =>
-      solanaRpc<
-        Array<{
-          account: {
-            data: {
-              parsed?: {
-                info?: {
-                  owner?: string;
-                };
-              };
-            };
-          };
-        }>
-      >(rpcUrls, 'getProgramAccounts', [
-        programId,
-        { filters, encoding: 'jsonParsed' },
-      ]),
-    ),
-  );
-
-  const owners = new Set<string>();
-  for (const result of programResults) {
-    if (result.status !== 'fulfilled') {
-      continue;
-    }
-    for (const account of result.value) {
-      const owner = tryNormalizeSolanaPubkey(
-        account.account.data.parsed?.info?.owner,
-      );
-      if (owner) {
-        owners.add(owner);
-      }
-    }
-  }
-  return [...owners];
-}
-
-async function fetchSolanaTokenHolderBalances(
-  rpcUrls: string | string[],
-  mint: string,
-  decimals: number,
-): Promise<Map<string, number>> {
-  // Phase 1: get token-account pubkeys only (minimal response payload).
   const filters = [{ dataSize: 165 }, { memcmp: { offset: 0, bytes: mint } }];
   const tokenAccountPubkeys = new Set<string>();
   let successfulProgramCalls = 0;
   let lastListError: unknown = null;
   const programIds = [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID];
   const holderProgramAccountsRpcUrls = buildHolderProgramAccountsRpcUrls(rpcUrls);
-  const holderAccountDetailsRpcUrls = buildHolderAccountDetailsRpcUrls(rpcUrls);
+
   for (let index = 0; index < programIds.length; index += 1) {
     const programId = programIds[index];
     try {
@@ -310,12 +267,19 @@ async function fetchSolanaTokenHolderBalances(
       : new ApiError(502, 'Failed to list token holder accounts from Solana RPC');
   }
 
-  // Phase 2: batch-fetch account details and parse owner (32 bytes) + amount (8 bytes).
+  return [...tokenAccountPubkeys];
+}
+
+async function fetchSolanaTokenHolderBalancesForPubkeys(
+  rpcUrls: string | string[],
+  tokenAccountPubkeys: string[],
+  decimals: number,
+): Promise<Map<string, number>> {
+  const holderAccountDetailsRpcUrls = buildHolderAccountDetailsRpcUrls(rpcUrls);
   const balances = new Map<string, number>();
-  const allPubkeys = [...tokenAccountPubkeys];
   const chunkSize = 100;
-  for (let index = 0; index < allPubkeys.length; index += chunkSize) {
-    const chunk = allPubkeys.slice(index, index + chunkSize);
+  for (let index = 0; index < tokenAccountPubkeys.length; index += chunkSize) {
+    const chunk = tokenAccountPubkeys.slice(index, index + chunkSize);
     const accountInfos = await solanaRpc<{
       value: Array<
         | {
@@ -357,12 +321,28 @@ async function fetchSolanaTokenHolderBalances(
       balances.set(owner, (balances.get(owner) ?? 0) + amountHolding);
     }
 
-    if (index + chunkSize < allPubkeys.length) {
+    if (index + chunkSize < tokenAccountPubkeys.length) {
       await waitMs(HOLDER_SYNC_ACCOUNT_DETAILS_INTERVAL_MS);
     }
   }
 
   return balances;
+}
+
+async function fetchSolanaTokenHolderBalances(
+  rpcUrls: string | string[],
+  mint: string,
+  decimals: number,
+): Promise<Map<string, number>> {
+  const tokenAccountPubkeys = await listSolanaTokenHolderAccountPubkeys(
+    rpcUrls,
+    mint,
+  );
+  return fetchSolanaTokenHolderBalancesForPubkeys(
+    rpcUrls,
+    tokenAccountPubkeys,
+    decimals,
+  );
 }
 
 async function fetchSolanaTokenHolderBalanceShard(
@@ -592,10 +572,14 @@ async function syncSolanaTokenHolderBalancesFull(
 ): Promise<TokenHolderSyncSummary> {
   const timestamp = nowTs();
   const existingState = await dbGetTokenHolderSyncState(db, tokenId);
-  const holderAccountDetailsRpcUrls = buildHolderAccountDetailsRpcUrls(rpcUrls);
 
   try {
-    const decimals = await fetchSolanaMintDecimals(holderAccountDetailsRpcUrls, mint);
+    const decimals = await resolveHolderSyncTokenDecimals(
+      db,
+      tokenId,
+      mint,
+      rpcUrls,
+    );
     if (decimals == null) {
       const failedState = await dbPutTokenHolderSyncState(db, {
         tokenId,
@@ -616,11 +600,7 @@ async function syncSolanaTokenHolderBalancesFull(
       });
       return buildTokenHolderSyncSummary(failedState);
     }
-    const balances = await fetchSolanaTokenHolderBalances(
-      holderAccountDetailsRpcUrls,
-      mint,
-      decimals,
-    );
+    const balances = await fetchSolanaTokenHolderBalances(rpcUrls, mint, decimals);
     const { activeHolderCount, upsertedCount, zeroedCount } =
       await dbSyncTokenHolderBalances(db, tokenId, balances, 'rpc_full_sync');
 
@@ -700,6 +680,212 @@ async function syncSolanaTokenHolderBalancesFull(
     });
 
     return buildTokenHolderSyncSummary(failedState);
+  }
+}
+
+async function dbGetMarketRefreshState(
+  db: D1Database,
+  userId: number,
+  contractAddress: string,
+): Promise<MarketRefreshStatusRecord | null> {
+  await dbEnsureTradeDomainSchema(db);
+  const normalizedContractAddress = normalizePubkey(contractAddress);
+  const row = await db
+    .prepare(
+      `SELECT
+         contract_address,
+         status,
+         request_id,
+         error_message,
+         summary_text,
+         started_at,
+         updated_at,
+         completed_at
+       FROM market_refresh_states
+       WHERE user_id = ?1 AND contract_address = ?2
+       LIMIT 1`,
+    )
+    .bind(userId, normalizedContractAddress)
+    .first<{
+      contract_address: string;
+      status: MarketRefreshStatusRecord['status'];
+      request_id: string | null;
+      error_message: string | null;
+      summary_text: string | null;
+      started_at: number | null;
+      updated_at: number;
+      completed_at: number | null;
+    }>();
+  if (!row) {
+    return null;
+  }
+  return {
+    contractAddress: row.contract_address,
+    status: row.status,
+    requestId: row.request_id,
+    errorMessage: row.error_message,
+    summaryText: row.summary_text,
+    startedAt: row.started_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at,
+  };
+}
+
+async function dbTryStartMarketRefresh(
+  db: D1Database,
+  userId: number,
+  contractAddress: string,
+): Promise<{ acquired: boolean; state: MarketRefreshStatusRecord }> {
+  await dbEnsureTradeDomainSchema(db);
+  const normalizedContractAddress = normalizePubkey(contractAddress);
+  const requestId = crypto.randomUUID();
+  const now = nowTs();
+  const staleBefore = now - MARKET_REFRESH_RUNNING_STALE_AFTER_SEC;
+
+  await db
+    .prepare(
+      `INSERT INTO market_refresh_states (
+         user_id,
+         contract_address,
+         status,
+         request_id,
+         error_message,
+         summary_text,
+         started_at,
+         updated_at,
+         completed_at
+       ) VALUES (?1, ?2, 'running', ?3, NULL, NULL, ?4, ?4, NULL)
+       ON CONFLICT(user_id, contract_address)
+       DO UPDATE SET
+         status = CASE
+           WHEN market_refresh_states.status != 'running' OR market_refresh_states.updated_at < ?5
+             THEN 'running'
+           ELSE market_refresh_states.status
+         END,
+         request_id = CASE
+           WHEN market_refresh_states.status != 'running' OR market_refresh_states.updated_at < ?5
+             THEN excluded.request_id
+           ELSE market_refresh_states.request_id
+         END,
+         error_message = CASE
+           WHEN market_refresh_states.status != 'running' OR market_refresh_states.updated_at < ?5
+             THEN NULL
+           ELSE market_refresh_states.error_message
+         END,
+         summary_text = CASE
+           WHEN market_refresh_states.status != 'running' OR market_refresh_states.updated_at < ?5
+             THEN NULL
+           ELSE market_refresh_states.summary_text
+         END,
+         started_at = CASE
+           WHEN market_refresh_states.status != 'running' OR market_refresh_states.updated_at < ?5
+             THEN excluded.started_at
+           ELSE market_refresh_states.started_at
+         END,
+         updated_at = CASE
+           WHEN market_refresh_states.status != 'running' OR market_refresh_states.updated_at < ?5
+             THEN excluded.updated_at
+           ELSE market_refresh_states.updated_at
+         END,
+         completed_at = CASE
+           WHEN market_refresh_states.status != 'running' OR market_refresh_states.updated_at < ?5
+             THEN NULL
+           ELSE market_refresh_states.completed_at
+         END`,
+    )
+    .bind(userId, normalizedContractAddress, requestId, now, staleBefore)
+    .run();
+
+  const state = await dbGetMarketRefreshState(db, userId, normalizedContractAddress);
+  if (!state) {
+    throw new ApiError(500, 'Failed to load market refresh state');
+  }
+
+  return {
+    acquired: state.requestId === requestId && state.status === 'running',
+    state,
+  };
+}
+
+async function dbCompleteMarketRefresh(
+  db: D1Database,
+  userId: number,
+  contractAddress: string,
+  requestId: string,
+  summaryText: string,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  const now = nowTs();
+  await db
+    .prepare(
+      `UPDATE market_refresh_states
+       SET status = 'completed',
+           error_message = NULL,
+           summary_text = ?4,
+           updated_at = ?5,
+           completed_at = ?5
+       WHERE user_id = ?1 AND contract_address = ?2 AND request_id = ?3`,
+    )
+    .bind(userId, normalizePubkey(contractAddress), requestId, summaryText, now)
+    .run();
+}
+
+async function dbFailMarketRefresh(
+  db: D1Database,
+  userId: number,
+  contractAddress: string,
+  requestId: string,
+  errorMessage: string,
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  const now = nowTs();
+  await db
+    .prepare(
+      `UPDATE market_refresh_states
+       SET status = 'failed',
+           error_message = ?4,
+           summary_text = NULL,
+           updated_at = ?5,
+           completed_at = ?5
+       WHERE user_id = ?1 AND contract_address = ?2 AND request_id = ?3`,
+    )
+    .bind(userId, normalizePubkey(contractAddress), requestId, errorMessage, now)
+    .run();
+}
+
+async function resolveHolderSyncTokenDecimals(
+  db: D1Database,
+  tokenId: number,
+  mint: string,
+  rpcUrls: string | string[],
+): Promise<number | null> {
+  const storedDecimals = (
+    await db
+      .prepare('SELECT decimals FROM tradable_tokens WHERE id = ?1')
+      .bind(tokenId)
+      .first<{ decimals: number | null }>()
+  )?.decimals;
+  if (storedDecimals != null) {
+    return storedDecimals;
+  }
+
+  try {
+    const jupiterMeta = await fetchJupiterTokenMetadata(mint);
+    if (jupiterMeta?.decimals != null) {
+      return jupiterMeta.decimals;
+    }
+  } catch (err: unknown) {
+    console.warn(`Failed to resolve holder sync decimals from Jupiter for ${mint}:`, err);
+  }
+
+  try {
+    return await fetchSolanaMintDecimals(
+      buildHolderProgramAccountsRpcUrls(rpcUrls),
+      mint,
+    );
+  } catch (err: unknown) {
+    console.warn(`Failed to resolve holder sync decimals from Solana RPC for ${mint}:`, err);
+    return null;
   }
 }
 
@@ -2952,6 +3138,7 @@ async function syncTokenMarketSnapshotForUser(
         fdv: jupiterMeta?.fdv ?? null,
         volume24h: jupiterMeta?.volume24h ?? null,
         totalTransactions24h: jupiterMeta?.totalTransactions24h ?? null,
+        totalHolders: jupiterMeta?.totalHolders ?? latestStoredSnapshot?.totalHolders ?? null,
         outsidersOverOneUsd: null,
         dexId: jupiterMeta?.dexId ?? null,
         pairAddress: jupiterMeta?.pairAddress ?? null,
@@ -4066,10 +4253,16 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
 
   let marketSnapshot: TokenMarketSnapshot | null = null;
   let tokenHolderAggregate: TokenHolderAggregateRecord | null = null;
+  let marketRefreshStatus: MarketRefreshStatusRecord | null = null;
   let outsideTokenHolders: OutsideTokenHolderRecord[] = [];
   let tokenId: number | null = null;
   if (settings.contractAddress.trim()) {
     try {
+      marketRefreshStatus = await dbGetMarketRefreshState(
+        env.TRADINGBOT_DB,
+        user.id,
+        settings.contractAddress,
+      );
       tokenId = await dbResolveTradableTokenId(
         env.TRADINGBOT_DB,
         settings.contractAddress,
@@ -4169,6 +4362,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     strategyVersions,
     strategyEvaluations,
     tokenHolderAggregate,
+    marketRefreshStatus,
     outsideTokenHolders,
     rpcEndpoints,
     marketSnapshot,
@@ -4608,27 +4802,32 @@ async function handleGetMarketSnapshotsByTimeRange(
   return jsonResponse({ snapshots });
 }
 
-// POST /api/market-snapshot/refresh
-async function handleForceRefreshMarketSnapshot(
-  request: Request,
+async function runManualMarketRefreshWorkflow(
   env: Env,
-): Promise<Response> {
-  const user = await requireAdmin(request, env);
-  const url = new URL(request.url);
-  const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-  const contractAddress = settings.contractAddress.trim();
-  if (!contractAddress) {
-    throw new ApiError(
-      400,
-      'Set an active trading token before forcing a live market refresh',
-    );
-  }
-
-  const rpcUrls = await dbResolveSolanaRpcUrls(
-    env.TRADINGBOT_DB,
-    user.id,
-    env.SOLANA_RPC_URL,
-  );
+  user: SessionUser,
+  settings: SettingsState,
+  contractAddress: string,
+  rpcUrls: string[],
+  startTimeMs: number | null,
+  endTimeMs: number | null,
+): Promise<{
+  marketSnapshot: TokenMarketSnapshot | null;
+  strategyEvaluation: Record<string, unknown> | null;
+  rpcReconciliation: {
+    scannedSignatures: number;
+    insertedSignals: number;
+    duplicates: number;
+    skippedIrrelevant: number;
+  };
+  windowCompleteness: {
+    expectedTransactions: number;
+    completeTransactionsBefore: number;
+    enrichedTransactions: number;
+    completeTransactionsAfter: number;
+  };
+  holderSyncSummary: TokenHolderSyncSummary;
+  summaryText: string;
+}> {
   const marketSnapshot = await syncTokenMarketSnapshotForUser(
     env.TRADINGBOT_DB,
     user.id,
@@ -4640,17 +4839,6 @@ async function handleForceRefreshMarketSnapshot(
       fallbackToStoredOnError: false,
     },
   );
-
-  const startTimeMs = (() => {
-    const raw = url.searchParams.get('startTime');
-    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
-    return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
-  })();
-  const endTimeMs = (() => {
-    const raw = url.searchParams.get('endTime');
-    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
-    return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
-  })();
 
   const tokenId = await dbResolveTradableTokenId(
     env.TRADINGBOT_DB,
@@ -4767,6 +4955,23 @@ async function handleForceRefreshMarketSnapshot(
     console.warn(`Strategy evaluation failed after manual refresh for ${contractAddress}:`, err);
   }
 
+  const holderCountMessage =
+    marketSnapshot?.totalHolders != null
+      ? ` Holder count reported: ${marketSnapshot.totalHolders}.`
+      : '';
+  const holderSyncNotice =
+    holderSyncSummary.status === 'completed'
+      ? ` Holder sync completed with ${holderSyncSummary.activeHolderCount} holders.`
+      : holderSyncSummary.status === 'failed'
+        ? ` Holder sync failed: ${holderSyncSummary.errorMessage ?? 'unknown error'}.`
+        : holderSyncSummary.status === 'running'
+          ? ` Holder sync ${holderSyncSummary.processedShardCount}/${holderSyncSummary.totalShardCount} shards, staged ${holderSyncSummary.stagedHolderCount} holders so far.`
+          : '';
+  const summaryText =
+    marketSnapshot?.priceUsd != null
+      ? `Market data refreshed.${holderCountMessage} Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} transaction record(s).${holderSyncNotice}`
+      : 'Token metadata loaded. Price data not yet available in Jupiter.';
+
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
@@ -4777,13 +4982,120 @@ async function handleForceRefreshMarketSnapshot(
       : `Forced a live market snapshot refresh and stored a new historical record. Window transactions ${windowCompleteness.expectedTransactions}, complete before ${windowCompleteness.completeTransactionsBefore}, enriched ${windowCompleteness.enrichedTransactions}, complete after ${windowCompleteness.completeTransactionsAfter}. RPC reconciliation scanned ${rpcReconciliation.scannedSignatures} signatures and inserted ${rpcReconciliation.insertedSignals} missing transactions. ${holderSyncAuditDetails}`,
   );
 
-  return jsonResponse({
+  return {
     marketSnapshot,
     strategyEvaluation: strategyEvaluationPayload,
     rpcReconciliation,
     windowCompleteness,
     holderSyncSummary,
-  });
+    summaryText,
+  };
+}
+
+// POST /api/market-snapshot/refresh
+async function handleForceRefreshMarketSnapshot(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const user = await requireAdmin(request, env);
+  const url = new URL(request.url);
+  const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+  const contractAddress = settings.contractAddress.trim();
+  if (!contractAddress) {
+    throw new ApiError(
+      400,
+      'Set an active trading token before forcing a live market refresh',
+    );
+  }
+
+  const rpcUrls = await dbResolveSolanaRpcUrls(
+    env.TRADINGBOT_DB,
+    user.id,
+    env.SOLANA_RPC_URL,
+  );
+  const startTimeMs = (() => {
+    const raw = url.searchParams.get('startTime');
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
+  })();
+  const endTimeMs = (() => {
+    const raw = url.searchParams.get('endTime');
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
+  })();
+
+  const currentSnapshot = await loadStoredMarketSnapshotByContractAddress(
+    env.TRADINGBOT_DB,
+    contractAddress,
+  );
+  const refreshStart = await dbTryStartMarketRefresh(
+    env.TRADINGBOT_DB,
+    user.id,
+    contractAddress,
+  );
+
+  if (!refreshStart.acquired) {
+    return jsonResponse(
+      {
+        accepted: true,
+        status: 'running',
+        marketSnapshot: currentSnapshot,
+        marketRefreshStatus: refreshStart.state,
+      },
+      202,
+    );
+  }
+
+  const requestId = refreshStart.state.requestId;
+  if (!requestId) {
+    throw new ApiError(500, 'Failed to initialize market refresh request');
+  }
+
+  ctx.waitUntil(
+    (async () => {
+      try {
+        const result = await runManualMarketRefreshWorkflow(
+          env,
+          user,
+          settings,
+          contractAddress,
+          rpcUrls,
+          startTimeMs,
+          endTimeMs,
+        );
+        await dbCompleteMarketRefresh(
+          env.TRADINGBOT_DB,
+          user.id,
+          contractAddress,
+          requestId,
+          result.summaryText,
+        );
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        console.error(`Background market refresh failed for ${contractAddress}:`, err);
+        await dbFailMarketRefresh(
+          env.TRADINGBOT_DB,
+          user.id,
+          contractAddress,
+          requestId,
+          errorMessage,
+        ).catch((updateErr) => {
+          console.error('Failed to persist market refresh failure state:', updateErr);
+        });
+      }
+    })(),
+  );
+
+  return jsonResponse(
+    {
+      accepted: true,
+      status: 'started',
+      marketSnapshot: currentSnapshot,
+      marketRefreshStatus: refreshStart.state,
+    },
+    202,
+  );
 }
 
 // POST /api/rpc-endpoints
@@ -5211,7 +5523,7 @@ async function handleApi(
     if (method === 'POST' && pathname === '/api/tradable-tokens')
       return await handleAddTradableToken(request, env);
     if (method === 'POST' && pathname === '/api/market-snapshot/refresh')
-      return await handleForceRefreshMarketSnapshot(request, env);
+      return await handleForceRefreshMarketSnapshot(request, env, ctx);
     if (method === 'GET' && pathname === '/api/market-snapshots')
       return await handleGetMarketSnapshotsByTimeRange(request, url, env);
     if (method === 'POST' && pathname === '/api/rpc-endpoints')

@@ -139,13 +139,41 @@ export default function App() {
   const dashboardAutoRefreshInFlightRef = React.useRef(false);
   const latestMarketSnapshotFetchedAtRef = React.useRef<number | null>(null);
   const loadedMarketSnapshotHistoryAtRef = React.useRef<number | null>(null);
+  const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
 
   const dateFilterReady = dateRange.from !== '' && dateRange.to !== '';
   const hasDateRange = dateFilterActive && dateFilterReady;
+  const marketRefreshRunning = engineState?.marketRefreshStatus?.status === 'running';
+  const isRefreshPending = submitting === 'refresh' || marketRefreshRunning;
 
   useEffect(() => {
     latestMarketSnapshotFetchedAtRef.current = engineState?.marketSnapshot?.fetchedAt ?? null;
   }, [engineState?.marketSnapshot?.fetchedAt]);
+
+  useEffect(() => {
+    const status = engineState?.marketRefreshStatus;
+    if (!status) {
+      return;
+    }
+    const statusKey = `${status.requestId ?? 'none'}:${status.status}:${status.updatedAt}`;
+    const previousKey = lastMarketRefreshStatusKeyRef.current;
+    if (previousKey === statusKey) {
+      return;
+    }
+    lastMarketRefreshStatusKeyRef.current = statusKey;
+    if (!previousKey) {
+      return;
+    }
+    if (status.status === 'completed' && status.summaryText) {
+      setError('');
+      setNotice(status.summaryText);
+      return;
+    }
+    if (status.status === 'failed' && status.errorMessage) {
+      setNotice('');
+      setError(`Refresh failed: ${status.errorMessage}`);
+    }
+  }, [engineState?.marketRefreshStatus]);
 
   useEffect(() => {
     setTradingAlgorithm(loadStoredString('tradeengine.tradingAlgorithm', workerAlgorithmTemplate));
@@ -377,32 +405,15 @@ export default function App() {
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
       if (auth?.authenticated && settings.contractAddress.trim()) {
-        setNotice('Fetching market data and syncing token holders...');
+        setNotice('Refresh started. Fetching market data and syncing token holders in background...');
         const refreshQuery = hasDateRange
           ? `?startTime=${toRangeStartMs(dateRange.from)}&endTime=${toRangeEndMs(dateRange.to)}`
           : '';
         const result = await api<{
+          accepted: boolean;
+          status: 'started' | 'running';
           marketSnapshot: TokenMarketSnapshot | null;
-          windowCompleteness?: {
-            expectedTransactions: number;
-            completeTransactionsBefore: number;
-            enrichedTransactions: number;
-            completeTransactionsAfter: number;
-          };
-          rpcReconciliation?: {
-            scannedSignatures: number;
-            insertedSignals: number;
-            duplicates: number;
-            skippedIrrelevant: number;
-          };
-          holderSyncSummary?: {
-            status: 'idle' | 'running' | 'completed' | 'failed';
-            processedShardCount: number;
-            totalShardCount: number;
-            stagedHolderCount: number;
-            activeHolderCount: number;
-            errorMessage: string | null;
-          };
+          marketRefreshStatus: EngineState['marketRefreshStatus'];
         }>(
           `/api/market-snapshot/refresh${refreshQuery}`,
           { method: 'POST' },
@@ -416,31 +427,21 @@ export default function App() {
                 }
               : current,
           );
-          await loadState();
-          await loadMarketSnapshotHistory({
-            snapshotFetchedAt: result.marketSnapshot.fetchedAt,
-          });
-          const holderSyncMessage = result.holderSyncSummary
-            ? result.holderSyncSummary.status === 'completed'
-              ? ` Holder sync completed with ${result.holderSyncSummary.activeHolderCount} holders.`
-              : result.holderSyncSummary.status === 'failed'
-                ? ` Holder sync failed: ${result.holderSyncSummary.errorMessage ?? 'unknown error'}.`
-                : result.holderSyncSummary.status === 'running'
-                  ? ` Holder sync ${result.holderSyncSummary.processedShardCount}/${result.holderSyncSummary.totalShardCount} shards, staged ${result.holderSyncSummary.stagedHolderCount} holders so far.`
-                  : ''
-            : '';
-          setNotice(
-            result.marketSnapshot.priceUsd != null
-              ? result.rpcReconciliation || result.windowCompleteness
-                ? `Market data refreshed. Window transactions ${result.windowCompleteness?.expectedTransactions ?? 0}, complete before ${result.windowCompleteness?.completeTransactionsBefore ?? 0}, enriched ${result.windowCompleteness?.enrichedTransactions ?? 0}, complete after ${result.windowCompleteness?.completeTransactionsAfter ?? 0}. RPC reconciliation scanned ${result.rpcReconciliation?.scannedSignatures ?? 0} signatures and inserted ${result.rpcReconciliation?.insertedSignals ?? 0} transaction record(s).${holderSyncMessage}`
-                : 'Market data refreshed.'
-              : 'Token metadata loaded. Price data not yet available in Jupiter.',
-          );
-        } else {
-          setNotice(
-            'No data found for this token in Jupiter. The contract address may be incorrect or the token is not yet indexed.',
-          );
         }
+        const state = await loadState();
+        if (state.marketRefreshStatus?.status === 'failed' && state.marketRefreshStatus.errorMessage) {
+          setError(`Refresh failed: ${state.marketRefreshStatus.errorMessage}`);
+          return;
+        }
+        if (state.marketRefreshStatus?.status === 'completed' && state.marketRefreshStatus.summaryText) {
+          setNotice(state.marketRefreshStatus.summaryText);
+          return;
+        }
+        setNotice(
+          result.status === 'running'
+            ? 'Refresh is already running in background.'
+            : 'Refresh started in background. The dashboard will update automatically when it finishes.',
+        );
       } else {
         setNotice('No active trading token. Select a token first to refresh market data.');
       }
@@ -459,7 +460,8 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!auth?.authenticated || activeTab !== 'dashboard') return;
+    if (!auth?.authenticated) return;
+    if (activeTab !== 'dashboard' && !marketRefreshRunning) return;
 
     let disposed = false;
 
@@ -473,6 +475,7 @@ export default function App() {
         const snapshotFetchedAt = state.marketSnapshot?.fetchedAt ?? null;
         if (
           !disposed &&
+          activeTab === 'dashboard' &&
           settings.contractAddress.trim() &&
           hasDateRange &&
           snapshotFetchedAt !== loadedMarketSnapshotHistoryAtRef.current
@@ -493,7 +496,7 @@ export default function App() {
 
     const intervalId = window.setInterval(() => {
       void pollDashboard();
-    }, DASHBOARD_AUTO_REFRESH_INTERVAL_MS);
+    }, marketRefreshRunning ? 5_000 : DASHBOARD_AUTO_REFRESH_INTERVAL_MS);
 
     return () => {
       disposed = true;
@@ -502,6 +505,7 @@ export default function App() {
   }, [
     activeTab,
     auth?.authenticated,
+    marketRefreshRunning,
     hasDateRange,
     loadMarketSnapshotHistory,
     loadState,
@@ -1167,7 +1171,7 @@ export default function App() {
         contractAddress={settings.contractAddress || CONTRACT_ADDRESS}
         lastUpdated={lastUpdated}
         isTradingActive={isTradingActive}
-        isRefreshing={submitting === 'refresh'}
+        isRefreshing={isRefreshPending}
         onToggleTrading={handleStartTrading}
         onOpenAdmin={() => setIsAdminModalOpen(true)}
         onRefresh={handleRefresh}
