@@ -27,7 +27,6 @@ import PageTabs from './components/PageTabs';
 import SimulationModal from './components/SimulationModal';
 import {
   CONTRACT_ADDRESS,
-  DASHBOARD_AUTO_REFRESH_INTERVAL_MS,
   ITEMS_PER_PAGE,
   workerAlgorithmTemplate,
 } from './app/constants';
@@ -136,19 +135,12 @@ export default function App() {
   const settingsDirtyRef = React.useRef(false);
   const strategyDraftDirtyRef = React.useRef(false);
   const activeSubmissionRef = React.useRef<string | null>(null);
-  const dashboardAutoRefreshInFlightRef = React.useRef(false);
-  const latestMarketSnapshotFetchedAtRef = React.useRef<number | null>(null);
-  const loadedMarketSnapshotHistoryAtRef = React.useRef<number | null>(null);
   const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
 
   const dateFilterReady = dateRange.from !== '' && dateRange.to !== '';
   const hasDateRange = dateFilterActive && dateFilterReady;
   const marketRefreshRunning = engineState?.marketRefreshStatus?.status === 'running';
   const isRefreshPending = submitting === 'refresh' || marketRefreshRunning;
-
-  useEffect(() => {
-    latestMarketSnapshotFetchedAtRef.current = engineState?.marketSnapshot?.fetchedAt ?? null;
-  }, [engineState?.marketSnapshot?.fetchedAt]);
 
   useEffect(() => {
     const status = engineState?.marketRefreshStatus;
@@ -346,7 +338,7 @@ export default function App() {
       await refresh();
     });
 
-  const loadMarketSnapshotHistory = React.useCallback(async (options?: { silent?: boolean; snapshotFetchedAt?: number | null }) => {
+  const loadMarketSnapshotHistory = React.useCallback(async () => {
     if (!auth?.authenticated || !settings.contractAddress.trim()) {
       return;
     }
@@ -365,15 +357,11 @@ export default function App() {
     const startTime = toRangeStartMs(dateRange.from);
     const endTime = toRangeEndMs(dateRange.to);
     if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime > endTime) {
-      if (!options?.silent) {
-        setError('Invalid date range');
-      }
+      setError('Invalid date range');
       return;
     }
 
-    if (!options?.silent) {
-      setLoadingMarketSnapshots(true);
-    }
+    setLoadingMarketSnapshots(true);
     try {
       const result = await api<{ snapshots: TokenMarketSnapshot[] }>(
         `/api/market-snapshots?startTime=${startTime}&endTime=${endTime}&limit=500`,
@@ -387,25 +375,17 @@ export default function App() {
             }
           : current,
       );
-      loadedMarketSnapshotHistoryAtRef.current =
-        options?.snapshotFetchedAt ?? latestMarketSnapshotFetchedAtRef.current;
     } catch (err: unknown) {
-      if (!options?.silent) {
-        setError(err instanceof Error ? err.message : 'Failed to load market snapshot history');
-      } else {
-        console.warn('Dashboard snapshot history auto-refresh failed:', err);
-      }
+      setError(err instanceof Error ? err.message : 'Failed to load market snapshot history');
     } finally {
-      if (!options?.silent) {
-        setLoadingMarketSnapshots(false);
-      }
+      setLoadingMarketSnapshots(false);
     }
   }, [auth?.authenticated, dateRange.from, dateRange.to, settings.contractAddress]);
 
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
       if (auth?.authenticated && settings.contractAddress.trim()) {
-        setNotice('Refresh started. Fetching market data and syncing token holders in background...');
+        setNotice('Refresh started. Fetching market data and syncing token holders...');
         const refreshQuery = hasDateRange
           ? `?startTime=${toRangeStartMs(dateRange.from)}&endTime=${toRangeEndMs(dateRange.to)}`
           : '';
@@ -428,19 +408,11 @@ export default function App() {
               : current,
           );
         }
-        const state = await loadState();
-        if (state.marketRefreshStatus?.status === 'failed' && state.marketRefreshStatus.errorMessage) {
-          setError(`Refresh failed: ${state.marketRefreshStatus.errorMessage}`);
-          return;
-        }
-        if (state.marketRefreshStatus?.status === 'completed' && state.marketRefreshStatus.summaryText) {
-          setNotice(state.marketRefreshStatus.summaryText);
-          return;
-        }
+        await loadState();
         setNotice(
           result.status === 'running'
-            ? 'Refresh is already running in background.'
-            : 'Refresh started in background. The dashboard will update automatically when it finishes.',
+            ? 'Refresh is already running. Waiting for the active request to finish.'
+            : 'Refresh started. Keep this page open while fetching progresses.',
         );
       } else {
         setNotice('No active trading token. Select a token first to refresh market data.');
@@ -460,57 +432,26 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!auth?.authenticated) return;
-    if (activeTab !== 'dashboard' && !marketRefreshRunning) return;
+    const requestId = engineState?.marketRefreshStatus?.requestId;
+    if (!marketRefreshRunning || !requestId) {
+      return;
+    }
 
-    let disposed = false;
-
-    const pollDashboard = async () => {
-      if (dashboardAutoRefreshInFlightRef.current) {
-        return;
-      }
-      dashboardAutoRefreshInFlightRef.current = true;
-      try {
-        const state = await loadState();
-        const snapshotFetchedAt = state.marketSnapshot?.fetchedAt ?? null;
-        if (
-          !disposed &&
-          activeTab === 'dashboard' &&
-          settings.contractAddress.trim() &&
-          hasDateRange &&
-          snapshotFetchedAt !== loadedMarketSnapshotHistoryAtRef.current
-        ) {
-          await loadMarketSnapshotHistory({
-            silent: true,
-            snapshotFetchedAt,
-          });
-        }
-      } catch (err: unknown) {
-        if (!disposed) {
-          console.warn('Dashboard auto-refresh failed:', err);
-        }
-      } finally {
-        dashboardAutoRefreshInFlightRef.current = false;
-      }
+    const cancelRefresh = () => {
+      const payload = JSON.stringify({ requestId });
+      const blob = new Blob([payload], { type: 'application/json' });
+      navigator.sendBeacon('/api/market-snapshot/refresh/cancel', blob);
     };
 
-    const intervalId = window.setInterval(() => {
-      void pollDashboard();
-    }, marketRefreshRunning ? 5_000 : DASHBOARD_AUTO_REFRESH_INTERVAL_MS);
-
+    window.addEventListener('pagehide', cancelRefresh);
+    window.addEventListener('beforeunload', cancelRefresh);
     return () => {
-      disposed = true;
-      window.clearInterval(intervalId);
+      window.removeEventListener('pagehide', cancelRefresh);
+      window.removeEventListener('beforeunload', cancelRefresh);
     };
-  }, [
-    activeTab,
-    auth?.authenticated,
-    marketRefreshRunning,
-    hasDateRange,
-    loadMarketSnapshotHistory,
-    loadState,
-    settings.contractAddress,
-  ]);
+  }, [engineState?.marketRefreshStatus?.requestId, marketRefreshRunning]);
+
+  // Intentionally no dashboard auto-polling: state and snapshots refresh only on manual actions.
 
   const handleStartTrading = () => {
     setIsTradingActive((current) => {
