@@ -14,6 +14,18 @@ import {
   TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
 } from './workerShared';
 
+const D1_BATCH_WRITE_CHUNK_SIZE = 100;
+
+async function dbRunBatchesInChunks(
+  db: D1Database,
+  statements: D1PreparedStatement[],
+  chunkSize = D1_BATCH_WRITE_CHUNK_SIZE,
+): Promise<void> {
+  for (let index = 0; index < statements.length; index += chunkSize) {
+    await db.batch(statements.slice(index, index + chunkSize));
+  }
+}
+
 export async function dbUpsertTokenHolderAddresses(
   db: D1Database,
   tokenId: number,
@@ -25,7 +37,8 @@ export async function dbUpsertTokenHolderAddresses(
     return;
   }
   const timestamp = nowTs();
-  await db.batch(
+  await dbRunBatchesInChunks(
+    db,
     addresses.map((address) =>
       db
         .prepare(
@@ -100,11 +113,11 @@ export async function dbSyncTokenHolderBalances(
   );
 
   if (upserts.length > 0 || zeroes.length > 0) {
-    await db.batch([...upserts, ...zeroes]);
+    await dbRunBatchesInChunks(db, [...upserts, ...zeroes]);
   }
 
   return {
-    activeHolderCount: [...balances.entries()].filter(([, amount]) => amount > 0).length,
+    activeHolderCount: balances.size,
     upsertedCount: upserts.length,
     zeroedCount: zeroes.length,
   };
@@ -310,7 +323,8 @@ export async function dbStageTokenHolderBalanceShard(
     return;
   }
   const timestamp = nowTs();
-  await db.batch(
+  await dbRunBatchesInChunks(
+    db,
     [...balances.entries()].map(([address, amountHolding]) =>
       db
         .prepare(
