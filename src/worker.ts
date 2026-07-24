@@ -192,6 +192,11 @@ import {
 
 // ─── D1 database operations ───────────────────────────────────────────────────
 
+const HOLDER_SYNC_REQUESTS_PER_SECOND = 4;
+const HOLDER_SYNC_REQUEST_INTERVAL_MS = Math.ceil(
+  1000 / HOLDER_SYNC_REQUESTS_PER_SECOND,
+);
+
 async function fetchSolanaTokenHolderAddresses(
   rpcUrls: string | string[],
   mint: string,
@@ -244,37 +249,45 @@ async function fetchSolanaTokenHolderBalances(
   const filters = [{ dataSize: 165 }, { memcmp: { offset: 0, bytes: mint } }];
   const tokenAccountPubkeys = new Set<string>();
   let successfulProgramCalls = 0;
-  const listResults = await Promise.allSettled(
-    [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID].map((programId) =>
-      solanaRpc<Array<{ pubkey: string }>>(rpcUrls, 'getProgramAccounts', [
-        programId,
-        {
-          filters,
-          dataSlice: { offset: 0, length: 0 },
-        },
-      ]),
-    ),
-  );
-
-  for (const result of listResults) {
-    if (result.status !== 'fulfilled') {
-      continue;
-    }
-    successfulProgramCalls += 1;
-    for (const row of result.value) {
-      const pubkey = tryNormalizeSolanaPubkey(row.pubkey);
-      if (pubkey) {
-        tokenAccountPubkeys.add(pubkey);
+  let lastListError: unknown = null;
+  const programIds = [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID];
+  for (let index = 0; index < programIds.length; index += 1) {
+    const programId = programIds[index];
+    try {
+      const rows = await solanaRpc<Array<{ pubkey: string }>>(
+        rpcUrls,
+        'getProgramAccounts',
+        [
+          programId,
+          {
+            filters,
+            dataSlice: { offset: 0, length: 0 },
+          },
+        ],
+      );
+      successfulProgramCalls += 1;
+      for (const row of rows) {
+        const pubkey = tryNormalizeSolanaPubkey(row.pubkey);
+        if (pubkey) {
+          tokenAccountPubkeys.add(pubkey);
+        }
       }
+    } catch (err: unknown) {
+      lastListError = err;
+      console.warn(
+        `Holder pubkey listing failed for program ${programId}:`,
+        err,
+      );
+    }
+
+    if (index < programIds.length - 1) {
+      await waitMs(HOLDER_SYNC_REQUEST_INTERVAL_MS);
     }
   }
 
   if (successfulProgramCalls === 0) {
-    const rejectedResult = listResults.find(
-      (result): result is PromiseRejectedResult => result.status === 'rejected',
-    );
-    throw rejectedResult?.reason instanceof Error
-      ? rejectedResult.reason
+    throw lastListError instanceof Error
+      ? lastListError
       : new ApiError(502, 'Failed to list token holder accounts from Solana RPC');
   }
 
@@ -323,6 +336,10 @@ async function fetchSolanaTokenHolderBalances(
         continue;
       }
       balances.set(owner, (balances.get(owner) ?? 0) + amountHolding);
+    }
+
+    if (index + chunkSize < allPubkeys.length) {
+      await waitMs(HOLDER_SYNC_REQUEST_INTERVAL_MS);
     }
   }
 
