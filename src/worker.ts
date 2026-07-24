@@ -192,10 +192,35 @@ import {
 
 // ─── D1 database operations ───────────────────────────────────────────────────
 
-const HOLDER_SYNC_REQUESTS_PER_SECOND = 4;
-const HOLDER_SYNC_REQUEST_INTERVAL_MS = Math.ceil(
-  1000 / HOLDER_SYNC_REQUESTS_PER_SECOND,
+const HOLDER_SYNC_PROGRAM_ACCOUNTS_PRIMARY_RPC_URL =
+  'https://api.mainnet-beta.solana.com';
+const HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL =
+  'https://mainnet.helius-rpc.com/fda76be1-7d09-4880-80db-837831934193';
+const HOLDER_SYNC_PROGRAM_ACCOUNTS_INTERVAL_MS = 10_000;
+const HOLDER_SYNC_ACCOUNT_DETAILS_REQUESTS_PER_SECOND = 4;
+const HOLDER_SYNC_ACCOUNT_DETAILS_INTERVAL_MS = Math.ceil(
+  1000 / HOLDER_SYNC_ACCOUNT_DETAILS_REQUESTS_PER_SECOND,
 );
+
+function buildHolderProgramAccountsRpcUrls(
+  rpcUrls: string | string[],
+): string[] {
+  const fallbackUrls = Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls];
+  return dedupeStrings([
+    HOLDER_SYNC_PROGRAM_ACCOUNTS_PRIMARY_RPC_URL,
+    ...fallbackUrls,
+  ]);
+}
+
+function buildHolderAccountDetailsRpcUrls(
+  rpcUrls: string | string[],
+): string[] {
+  const fallbackUrls = Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls];
+  return dedupeStrings([
+    HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL,
+    ...fallbackUrls,
+  ]);
+}
 
 async function fetchSolanaTokenHolderAddresses(
   rpcUrls: string | string[],
@@ -251,11 +276,13 @@ async function fetchSolanaTokenHolderBalances(
   let successfulProgramCalls = 0;
   let lastListError: unknown = null;
   const programIds = [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID];
+  const holderProgramAccountsRpcUrls = buildHolderProgramAccountsRpcUrls(rpcUrls);
+  const holderAccountDetailsRpcUrls = buildHolderAccountDetailsRpcUrls(rpcUrls);
   for (let index = 0; index < programIds.length; index += 1) {
     const programId = programIds[index];
     try {
       const rows = await solanaRpc<Array<{ pubkey: string }>>(
-        rpcUrls,
+        holderProgramAccountsRpcUrls,
         'getProgramAccounts',
         [
           programId,
@@ -281,7 +308,7 @@ async function fetchSolanaTokenHolderBalances(
     }
 
     if (index < programIds.length - 1) {
-      await waitMs(HOLDER_SYNC_REQUEST_INTERVAL_MS);
+      await waitMs(HOLDER_SYNC_PROGRAM_ACCOUNTS_INTERVAL_MS);
     }
   }
 
@@ -304,7 +331,7 @@ async function fetchSolanaTokenHolderBalances(
           }
         | null
       >;
-    }>(rpcUrls, 'getMultipleAccounts', [
+    }>(holderAccountDetailsRpcUrls, 'getMultipleAccounts', [
       chunk,
       {
         encoding: 'base64',
@@ -339,7 +366,7 @@ async function fetchSolanaTokenHolderBalances(
     }
 
     if (index + chunkSize < allPubkeys.length) {
-      await waitMs(HOLDER_SYNC_REQUEST_INTERVAL_MS);
+      await waitMs(HOLDER_SYNC_ACCOUNT_DETAILS_INTERVAL_MS);
     }
   }
 
