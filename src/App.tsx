@@ -1013,7 +1013,18 @@ export default function App() {
 
   const managedWallets = engineState.internalAccs;
   const tokenHolderAggregateLoading =
-    Boolean(activeTokenContractAddress) && !engineState.tokenHolderAggregate;
+    Boolean(activeTokenContractAddress) &&
+    !engineState.tokenHolderAggregate &&
+    (engineState.outsideTokenHolders?.length ?? 0) === 0;
+  const outsideHolderPartial =
+    !tokenHolderAggregateLoading &&
+    (
+      engineState.tokenHolderAggregate?.source === 'rpc_owner_prefix_shards_partial' ||
+      (
+        !engineState.tokenHolderAggregate &&
+        (engineState.outsideTokenHolders?.length ?? 0) > 0
+      )
+    );
   const outsideHolderCount = engineState.tokenHolderAggregate?.outsiderHolderCount ?? null;
   const outsideHolderTotalAmount = engineState.tokenHolderAggregate
     ? Math.max(
@@ -1114,6 +1125,7 @@ export default function App() {
       outsideHolderCount={outsideHolderCount}
       outsideHolderTotalAmount={outsideHolderTotalAmount}
       outsideHolderLoading={tokenHolderAggregateLoading}
+      outsideHolderPartial={outsideHolderPartial}
       activeTokenSymbol={activeTokenSymbol}
       walletBalances={walletBalances}
       walletBalanceErrors={walletBalanceErrors}

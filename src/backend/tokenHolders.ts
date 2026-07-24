@@ -853,16 +853,18 @@ export async function dbListOutsideTokenHolders(
   const syncState = await dbGetTokenHolderSyncState(db, tokenId);
   if (
     syncState?.runId &&
-    syncState.stagedHolderCount > 0 &&
     (syncState.status === 'running' || syncState.status === 'failed')
   ) {
-    return dbListOutsideTokenHoldersFromStage(
+    const stageRows = await dbListOutsideTokenHoldersFromStage(
       db,
       userId,
       tokenId,
       syncState.runId,
       limit,
     );
+    if (stageRows.length > 0) {
+      return stageRows;
+    }
   }
   return dbListOutsideTokenHoldersFromFinal(db, userId, tokenId, limit);
 }

@@ -36,6 +36,7 @@ type AccountsPageProps = {
   outsideHolderCount: number | null;
   outsideHolderTotalAmount: number | null;
   outsideHolderLoading: boolean;
+  outsideHolderPartial: boolean;
   activeTokenSymbol: string;
   walletBalances: Record<string, WalletBalance>;
   walletBalanceErrors: Record<string, string>;
@@ -66,6 +67,7 @@ export default function AccountsPage({
   outsideHolderCount,
   outsideHolderTotalAmount,
   outsideHolderLoading,
+  outsideHolderPartial,
   activeTokenSymbol,
   walletBalances,
   walletBalanceErrors,
@@ -88,6 +90,13 @@ export default function AccountsPage({
     : outsideHolderTotalAmount != null
       ? `${formatNum(outsideHolderTotalAmount)} ${activeTokenSymbol}`
       : 'Unavailable';
+  const outsideHolderStatusValue = outsideHolderLoading
+    ? 'Syncing'
+    : outsideHolderPartial
+      ? 'Partial (syncing)'
+      : outsideHolderCount != null
+        ? 'Ready'
+        : 'Unavailable';
 
   return (
     <div className="space-y-6">
@@ -125,10 +134,7 @@ export default function AccountsPage({
           <SummaryMetric label="Outside holders" value={outsideHolderCountValue} />
           <SummaryMetric label={`${activeTokenSymbol} total`} value={outsideHolderAmountValue} />
           <SummaryMetric label="Listed holders" value={String(filteredOutsideHoldersCount)} />
-          <SummaryMetric
-            label="Status"
-            value={outsideHolderLoading ? 'Syncing' : outsideHolderCount != null ? 'Ready' : 'Unavailable'}
-          />
+          <SummaryMetric label="Status" value={outsideHolderStatusValue} />
         </div>
       </div>
 

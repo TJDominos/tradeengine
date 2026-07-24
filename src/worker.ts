@@ -4335,7 +4335,6 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
         );
         if (
           holderSyncState?.runId &&
-          holderSyncState.stagedHolderCount > 0 &&
           (holderSyncState.status === 'running' || holderSyncState.status === 'failed')
         ) {
           tokenHolderAggregate =
