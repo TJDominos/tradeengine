@@ -79,6 +79,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     liquidity_usd REAL,
     fdv REAL,
     volume_24h REAL,
+    total_holders INTEGER,
     total_transactions_24h INTEGER,
     outsiders_over_one_usd INTEGER,
     dex_id TEXT,
@@ -393,6 +394,12 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           'token_holder_addresses',
           'last_seen_at',
           'INTEGER NOT NULL DEFAULT 0',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'token_market_snapshots',
+          'total_holders',
+          'INTEGER',
         );
         await db.batch(
           D1_TRADE_DOMAIN_INDEX_STATEMENTS.map((statement) =>

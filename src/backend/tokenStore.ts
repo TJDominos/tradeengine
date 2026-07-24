@@ -271,6 +271,7 @@ export async function dbGetLatestTokenMarketSnapshot(
          liquidity_usd,
          fdv,
          volume_24h,
+        total_holders,
          total_transactions_24h,
          outsiders_over_one_usd,
          dex_id,
@@ -294,6 +295,7 @@ export async function dbGetLatestTokenMarketSnapshot(
       liquidity_usd: number | null;
       fdv: number | null;
       volume_24h: number | null;
+      total_holders: number | null;
       total_transactions_24h: number | null;
       outsiders_over_one_usd: number | null;
       dex_id: string | null;
@@ -313,7 +315,7 @@ export async function dbGetLatestTokenMarketSnapshot(
     fdv: row.fdv,
     volume24h: row.volume_24h,
     totalTransactions24h: row.total_transactions_24h,
-    totalHolders: null,
+    totalHolders: row.total_holders,
     outsidersOverOneUsd: row.outsiders_over_one_usd,
     dexId: row.dex_id,
     pairAddress: row.pair_address,
@@ -339,12 +341,13 @@ export async function dbInsertTokenMarketSnapshot(
         liquidity_usd,
         fdv,
         volume_24h,
+        total_holders,
         total_transactions_24h,
         outsiders_over_one_usd,
         dex_id,
         pair_address,
         fetched_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
     )
     .bind(
       tokenId,
@@ -356,6 +359,7 @@ export async function dbInsertTokenMarketSnapshot(
       snapshot.liquidityUsd,
       snapshot.fdv,
       snapshot.volume24h,
+      snapshot.totalHolders,
       snapshot.totalTransactions24h,
       snapshot.outsidersOverOneUsd,
       snapshot.dexId,
@@ -385,6 +389,7 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
          liquidity_usd,
          fdv,
          volume_24h,
+        total_holders,
          total_transactions_24h,
          outsiders_over_one_usd,
          dex_id,
@@ -416,6 +421,7 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
       liquidity_usd: number | null;
       fdv: number | null;
       volume_24h: number | null;
+      total_holders: number | null;
       total_transactions_24h: number | null;
       outsiders_over_one_usd: number | null;
       dex_id: string | null;
@@ -433,7 +439,7 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
     fdv: row.fdv,
     volume24h: row.volume_24h,
     totalTransactions24h: row.total_transactions_24h,
-    totalHolders: null,
+    totalHolders: row.total_holders,
     outsidersOverOneUsd: row.outsiders_over_one_usd,
     dexId: row.dex_id,
     pairAddress: row.pair_address,

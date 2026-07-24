@@ -2986,9 +2986,29 @@ async function fetchSolanaOutsiderHolderCountOverOneUsd(
   const managedSet = new Set(
     managedAccountAddresses.map((address) => normalizePubkey(address)),
   );
-  const programResults = await Promise.allSettled(
-    [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID].map((programId) =>
-      solanaRpc<
+  const programIds = [SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID];
+  const programResults: PromiseSettledResult<
+    Array<{
+      account: {
+        data: {
+          parsed?: {
+            info?: {
+              owner?: string;
+              tokenAmount?: {
+                amount?: string;
+                decimals?: number;
+              };
+            };
+          };
+        };
+      };
+    }>
+  >[] = [];
+
+  for (let index = 0; index < programIds.length; index += 1) {
+    const programId = programIds[index];
+    try {
+      const rows = await solanaRpc<
         Array<{
           account: {
             data: {
@@ -3007,9 +3027,16 @@ async function fetchSolanaOutsiderHolderCountOverOneUsd(
       >(rpcUrls, 'getProgramAccounts', [
         programId,
         { filters, encoding: 'jsonParsed' },
-      ]),
-    ),
-  );
+      ]);
+      programResults.push({ status: 'fulfilled', value: rows });
+    } catch (err: unknown) {
+      programResults.push({ status: 'rejected', reason: err });
+    }
+
+    if (index < programIds.length - 1) {
+      await waitMs(3000);
+    }
+  }
 
   let decimals: number | null = null;
   let successfulQueryCount = 0;
@@ -3268,8 +3295,8 @@ async function solanaRpc<T>(
 
         const isLastAttempt = attempt + 1 >= maxAttemptsPerEndpoint;
         if (!isLastAttempt && isSolanaRpcRateLimitError(err)) {
-          // Backoff when providers return 429 so we do not instantly re-hit the limit.
-          await waitMs(250 * (attempt + 1));
+          // Heavy RPC queries need a longer cooldown after 429 responses.
+          await waitMs(3000 * (attempt + 1));
           continue;
         }
         break;
@@ -4362,6 +4389,18 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
         marketSnapshot?.priceUsd ?? null,
       )
     : 0;
+
+  if (
+    marketSnapshot &&
+    (marketSnapshot.totalHolders == null ||
+      !Number.isFinite(marketSnapshot.totalHolders)) &&
+    tokenHolderAggregate?.activeHolderCount != null
+  ) {
+    marketSnapshot = {
+      ...marketSnapshot,
+      totalHolders: tokenHolderAggregate.activeHolderCount,
+    };
+  }
 
   return jsonResponse({
     auth: { username: user.username, role: user.role },
