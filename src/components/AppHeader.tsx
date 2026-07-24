@@ -4,6 +4,7 @@ type AppHeaderProps = {
   contractAddress: string;
   lastUpdated: string;
   isTradingActive: boolean;
+  isRefreshing: boolean;
   onToggleTrading: () => void;
   onOpenAdmin: () => void;
   onRefresh: () => void;
@@ -14,6 +15,7 @@ export default function AppHeader({
   contractAddress,
   lastUpdated,
   isTradingActive,
+  isRefreshing,
   onToggleTrading,
   onOpenAdmin,
   onRefresh,
@@ -51,9 +53,15 @@ export default function AppHeader({
         </button>
         <button
           onClick={onRefresh}
-          className="flex h-10 cursor-pointer items-center gap-2 rounded-md bg-blue-600 px-4 text-sm font-medium text-white shadow-sm hover:bg-blue-700"
+          disabled={isRefreshing}
+          className={`flex h-10 items-center gap-2 rounded-md px-4 text-sm font-medium text-white shadow-sm ${
+            isRefreshing
+              ? 'cursor-not-allowed bg-blue-500/70'
+              : 'cursor-pointer bg-blue-600 hover:bg-blue-700'
+          }`}
         >
-          <RefreshCw size={16} /> Refresh
+          <RefreshCw size={16} className={isRefreshing ? 'animate-spin' : ''} />
+          {isRefreshing ? 'Fetching...' : 'Refresh'}
         </button>
         <button
           onClick={onLogout}

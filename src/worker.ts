@@ -203,23 +203,15 @@ const HOLDER_SYNC_ACCOUNT_DETAILS_INTERVAL_MS = Math.ceil(
 );
 
 function buildHolderProgramAccountsRpcUrls(
-  rpcUrls: string | string[],
+  _rpcUrls: string | string[],
 ): string[] {
-  const fallbackUrls = Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls];
-  return dedupeStrings([
-    HOLDER_SYNC_PROGRAM_ACCOUNTS_PRIMARY_RPC_URL,
-    ...fallbackUrls,
-  ]);
+  return [HOLDER_SYNC_PROGRAM_ACCOUNTS_PRIMARY_RPC_URL];
 }
 
 function buildHolderAccountDetailsRpcUrls(
-  rpcUrls: string | string[],
+  _rpcUrls: string | string[],
 ): string[] {
-  const fallbackUrls = Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls];
-  return dedupeStrings([
-    HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL,
-    ...fallbackUrls,
-  ]);
+  return [HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL];
 }
 
 async function fetchSolanaTokenHolderAddresses(
@@ -600,9 +592,10 @@ async function syncSolanaTokenHolderBalancesFull(
 ): Promise<TokenHolderSyncSummary> {
   const timestamp = nowTs();
   const existingState = await dbGetTokenHolderSyncState(db, tokenId);
+  const holderAccountDetailsRpcUrls = buildHolderAccountDetailsRpcUrls(rpcUrls);
 
   try {
-    const decimals = await fetchSolanaMintDecimals(rpcUrls, mint);
+    const decimals = await fetchSolanaMintDecimals(holderAccountDetailsRpcUrls, mint);
     if (decimals == null) {
       const failedState = await dbPutTokenHolderSyncState(db, {
         tokenId,
@@ -623,7 +616,11 @@ async function syncSolanaTokenHolderBalancesFull(
       });
       return buildTokenHolderSyncSummary(failedState);
     }
-    const balances = await fetchSolanaTokenHolderBalances(rpcUrls, mint, decimals);
+    const balances = await fetchSolanaTokenHolderBalances(
+      holderAccountDetailsRpcUrls,
+      mint,
+      decimals,
+    );
     const { activeHolderCount, upsertedCount, zeroedCount } =
       await dbSyncTokenHolderBalances(db, tokenId, balances, 'rpc_full_sync');
 

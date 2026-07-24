@@ -135,6 +135,7 @@ export default function App() {
   
   const settingsDirtyRef = React.useRef(false);
   const strategyDraftDirtyRef = React.useRef(false);
+  const activeSubmissionRef = React.useRef<string | null>(null);
   const dashboardAutoRefreshInFlightRef = React.useRef(false);
   const latestMarketSnapshotFetchedAtRef = React.useRef<number | null>(null);
   const loadedMarketSnapshotHistoryAtRef = React.useRef<number | null>(null);
@@ -264,6 +265,10 @@ export default function App() {
   }, [auth?.authenticated, engineState, activeTab, isAdminModalOpen, refreshWalletBalances]);
 
   const submitWithFeedback = async (name: string, action: () => Promise<void>) => {
+    if (activeSubmissionRef.current) {
+      return;
+    }
+    activeSubmissionRef.current = name;
     setSubmitting(name);
     setError('');
     setNotice('');
@@ -272,6 +277,7 @@ export default function App() {
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Request failed');
     } finally {
+      activeSubmissionRef.current = null;
       setSubmitting(null);
     }
   };
@@ -371,6 +377,7 @@ export default function App() {
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
       if (auth?.authenticated && settings.contractAddress.trim()) {
+        setNotice('Fetching market data and syncing token holders...');
         const refreshQuery = hasDateRange
           ? `?startTime=${toRangeStartMs(dateRange.from)}&endTime=${toRangeEndMs(dateRange.to)}`
           : '';
@@ -1160,6 +1167,7 @@ export default function App() {
         contractAddress={settings.contractAddress || CONTRACT_ADDRESS}
         lastUpdated={lastUpdated}
         isTradingActive={isTradingActive}
+        isRefreshing={submitting === 'refresh'}
         onToggleTrading={handleStartTrading}
         onOpenAdmin={() => setIsAdminModalOpen(true)}
         onRefresh={handleRefresh}
