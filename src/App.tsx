@@ -1012,8 +1012,10 @@ export default function App() {
     : 0;
 
   const managedWallets = engineState.internalAccs;
+  const holderSyncRunning = engineState.tokenHolderSyncState?.status === 'running';
   const tokenHolderAggregateLoading =
     Boolean(activeTokenContractAddress) &&
+    holderSyncRunning &&
     !engineState.tokenHolderAggregate &&
     (engineState.outsideTokenHolders?.length ?? 0) === 0;
   const outsideHolderPartial =

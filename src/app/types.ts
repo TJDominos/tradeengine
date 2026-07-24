@@ -116,6 +116,23 @@ export type TokenHolderAggregate = {
   source: string;
 };
 
+export type TokenHolderSyncState = {
+  tokenId: number;
+  runId: string | null;
+  status: 'idle' | 'running' | 'completed' | 'failed';
+  source: string;
+  nextShardIndex: number;
+  processedShardCount: number;
+  totalShardCount: number;
+  stagedHolderCount: number;
+  lastProgramId: string | null;
+  lastOwnerPrefix: number | null;
+  errorMessage: string | null;
+  startedAt: number | null;
+  updatedAt: number;
+  lastCompletedAt: number | null;
+};
+
 export type MarketRefreshStatus = {
   contractAddress: string;
   status: 'idle' | 'running' | 'completed' | 'failed';
@@ -190,6 +207,7 @@ export type EngineState = {
   strategyVersions: StrategyVersionRecord[];
   strategyEvaluations: StrategyEvaluationRecord[];
   tokenHolderAggregate: TokenHolderAggregate | null;
+  tokenHolderSyncState: TokenHolderSyncState | null;
   marketRefreshStatus: MarketRefreshStatus | null;
   outsideTokenHolders: OutsideTokenHolder[];
   rpcEndpoints: RpcEndpoint[];

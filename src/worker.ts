@@ -4296,6 +4296,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
 
   let marketSnapshot: TokenMarketSnapshot | null = null;
   let tokenHolderAggregate: TokenHolderAggregateRecord | null = null;
+  let tokenHolderSyncState: TokenHolderSyncStateRecord | null = null;
   let marketRefreshStatus: MarketRefreshStatusRecord | null = null;
   let outsideTokenHolders: OutsideTokenHolderRecord[] = [];
   let tokenId: number | null = null;
@@ -4325,7 +4326,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
 
     try {
       if (tokenId) {
-        const holderSyncState = await dbGetTokenHolderSyncState(
+        tokenHolderSyncState = await dbGetTokenHolderSyncState(
           env.TRADINGBOT_DB,
           tokenId,
         );
@@ -4334,16 +4335,16 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
           tokenId,
         );
         if (
-          holderSyncState?.runId &&
-          (holderSyncState.status === 'running' || holderSyncState.status === 'failed')
+          tokenHolderSyncState?.runId &&
+          (tokenHolderSyncState.status === 'running' || tokenHolderSyncState.status === 'failed')
         ) {
           tokenHolderAggregate =
             (await dbComputeTokenHolderAggregateFromStage(
               env.TRADINGBOT_DB,
               user.id,
               tokenId,
-              holderSyncState.runId,
-              holderSyncState.updatedAt,
+              tokenHolderSyncState.runId,
+              tokenHolderSyncState.updatedAt,
             )) ?? tokenHolderAggregate;
         }
         if (
@@ -4416,6 +4417,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     strategyVersions,
     strategyEvaluations,
     tokenHolderAggregate,
+    tokenHolderSyncState,
     marketRefreshStatus,
     outsideTokenHolders,
     rpcEndpoints,
