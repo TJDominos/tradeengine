@@ -968,14 +968,23 @@ export default function App() {
         (engineState.outsideTokenHolders?.length ?? 0) > 0
       )
     );
-  const outsideHolderCount = engineState.tokenHolderAggregate?.outsiderHolderCount ?? null;
+  const outsideHolderCount =
+    engineState.tokenHolderAggregate?.outsiderHolderCount ??
+    ((engineState.outsideTokenHolders?.length ?? 0) > 0
+      ? engineState.outsideTokenHolders.length
+      : null);
   const outsideHolderTotalAmount = engineState.tokenHolderAggregate
     ? Math.max(
         0,
         engineState.tokenHolderAggregate.totalAmountHolding -
           engineState.tokenHolderAggregate.internalAmountHolding,
       )
-    : null;
+    : (engineState.outsideTokenHolders?.length ?? 0) > 0
+      ? engineState.outsideTokenHolders.reduce(
+          (sum, holder) => sum + holder.amountHolding,
+          0,
+        )
+      : null;
 
   const renderDashboardLogs = () => (
     <DashboardLogsSection
