@@ -270,6 +270,18 @@ export async function dbStartOrResumeTokenHolderSync(
     .bind(tokenId)
     .run();
 
+  // Reset prior materialized amounts so this run can expose only fresh shard data.
+  await db
+    .prepare(
+      `UPDATE token_holder_addresses
+       SET amount_holding = 0,
+           source = 'rpc_owner_prefix_shards_reset',
+           last_seen_at = ?2
+       WHERE token_id = ?1`,
+    )
+    .bind(tokenId, timestamp)
+    .run();
+
   return await dbPutTokenHolderSyncState(db, {
     tokenId,
     runId: crypto.randomUUID(),
@@ -354,6 +366,131 @@ export async function dbStageTokenHolderBalanceShard(
         ),
     ),
   );
+}
+
+export async function dbApplyTokenHolderBalanceShardDelta(
+  db: D1Database,
+  tokenId: number,
+  runId: string,
+  shardIndex: number,
+  balances: Map<string, number>,
+  source = 'rpc_owner_prefix_shards_progress',
+): Promise<void> {
+  await dbEnsureTradeDomainSchema(db);
+  const existingRows = await db
+    .prepare(
+      `SELECT wallet_address, amount_holding
+       FROM token_holder_sync_stage
+       WHERE token_id = ?1 AND run_id = ?2 AND shard_index = ?3`,
+    )
+    .bind(tokenId, runId, shardIndex)
+    .all<{ wallet_address: string; amount_holding: number }>();
+  const previous = new Map<string, number>();
+  for (const row of existingRows.results) {
+    previous.set(row.wallet_address, row.amount_holding);
+  }
+
+  const deltas = new Map<string, number>();
+  for (const [address, nextAmount] of balances.entries()) {
+    const prevAmount = previous.get(address) ?? 0;
+    const delta = nextAmount - prevAmount;
+    if (Math.abs(delta) > 1e-12) {
+      deltas.set(address, delta);
+    }
+  }
+  for (const [address, prevAmount] of previous.entries()) {
+    if (!balances.has(address) && Math.abs(prevAmount) > 1e-12) {
+      deltas.set(address, -prevAmount);
+    }
+  }
+
+  const timestamp = nowTs();
+
+  await db
+    .prepare(
+      `DELETE FROM token_holder_sync_stage
+       WHERE token_id = ?1 AND run_id = ?2 AND shard_index = ?3`,
+    )
+    .bind(tokenId, runId, shardIndex)
+    .run();
+
+  if (balances.size > 0) {
+    await dbRunBatchesInChunks(
+      db,
+      [...balances.entries()].map(([address, amountHolding]) =>
+        db
+          .prepare(
+            `INSERT INTO token_holder_sync_stage (
+               token_id,
+               run_id,
+               shard_index,
+               wallet_address,
+               amount_holding,
+               source,
+               updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+          )
+          .bind(
+            tokenId,
+            runId,
+            shardIndex,
+            address,
+            amountHolding,
+            source,
+            timestamp,
+          ),
+      ),
+    );
+  }
+
+  if (deltas.size === 0) {
+    return;
+  }
+
+  await dbRunBatchesInChunks(
+    db,
+    [...deltas.entries()].map(([address, deltaAmount]) =>
+      db
+        .prepare(
+          `INSERT INTO token_holder_addresses (
+             token_id,
+             wallet_address,
+             amount_holding,
+             source,
+             first_seen_at,
+             last_seen_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+           ON CONFLICT(token_id, wallet_address)
+           DO UPDATE SET
+             amount_holding = CASE
+               WHEN token_holder_addresses.amount_holding + excluded.amount_holding < 0
+                 THEN 0
+               ELSE token_holder_addresses.amount_holding + excluded.amount_holding
+             END,
+             source = excluded.source,
+             last_seen_at = excluded.last_seen_at`,
+        )
+        .bind(tokenId, address, deltaAmount, source, timestamp),
+    ),
+  );
+
+  await db
+    .prepare(
+      `UPDATE token_holder_addresses
+       SET amount_holding = 0,
+           source = ?3,
+           last_seen_at = ?4
+       WHERE token_id = ?1
+         AND wallet_address IN (
+           SELECT wallet_address
+           FROM token_holder_sync_stage
+           WHERE token_id = ?1 AND run_id = ?2
+           GROUP BY wallet_address
+           HAVING SUM(amount_holding) <= 0
+         )`,
+    )
+    .bind(tokenId, runId, source, timestamp)
+    .run();
 }
 
 export async function dbFinalizePagedTokenHolderSync(

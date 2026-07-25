@@ -74,6 +74,7 @@ import {
   dbVerifyUserPassword,
 } from './backend/userStore';
 import {
+  dbApplyTokenHolderBalanceShardDelta,
   dbComputeTokenHolderAggregateFromStage,
   dbCountTokenHolderSyncStageHolders,
   dbFinalizePagedTokenHolderSync,
@@ -83,7 +84,6 @@ import {
   dbListOutsideTokenHolders,
   dbPutTokenHolderSyncState,
   dbRecomputeTokenHolderAggregate,
-  dbStageTokenHolderBalanceShard,
   dbStartOrResumeTokenHolderSync,
   dbSyncTokenHolderBalances,
   dbUpsertTokenHolderAddresses,
@@ -508,7 +508,7 @@ async function syncSolanaTokenHolderBalancesPaged(
         throw lastShardError ?? new Error('Failed to fetch token holder shard');
       }
       if (currentState.runId) {
-        await dbStageTokenHolderBalanceShard(
+        await dbApplyTokenHolderBalanceShardDelta(
           db,
           tokenId,
           currentState.runId,
