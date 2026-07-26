@@ -344,6 +344,7 @@ export function normalizeWhitespace(value: string): string {
 export function normalizePrivateKey(raw: string): Uint8Array {
   const trimmed = raw.trim();
   if (!trimmed) throw new ApiError(400, 'Private key is required');
+  let decoded: Uint8Array;
   if (trimmed.startsWith('[')) {
     let values: number[];
     try {
@@ -354,16 +355,28 @@ export function normalizePrivateKey(raw: string): Uint8Array {
     if (!Array.isArray(values) || values.some((v) => typeof v !== 'number')) {
       throw new ApiError(400, 'Private key JSON array could not be parsed');
     }
-    return new Uint8Array(values);
+    decoded = new Uint8Array(values);
+  } else {
+    try {
+      decoded = base58Decode(trimmed);
+    } catch {
+      throw new ApiError(
+        400,
+        'Private key must be a base58 string or JSON array',
+      );
+    }
   }
-  try {
-    return base58Decode(trimmed);
-  } catch {
-    throw new ApiError(
-      400,
-      'Private key must be a base58 string or JSON array',
-    );
+
+  if (decoded.length === 32) {
+    return nacl.sign.keyPair.fromSeed(decoded).secretKey;
   }
+  if (decoded.length === 64) {
+    return decoded;
+  }
+  throw new ApiError(
+    400,
+    'Private key must decode to a 32-byte seed or 64-byte Solana keypair',
+  );
 }
 
 export function normalizeRecoveryPhrase(raw: string): string {

@@ -448,12 +448,34 @@ export async function dbLoadManagedKeypairBytes(
   const normalizedAddress = normalizePubkey(walletAddress);
   const row = await db
     .prepare(
-      "SELECT encrypted_private_key FROM accounts WHERE user_id = ?1 AND type = 'managed' AND wallet_address = ?2",
+      `SELECT type, encrypted_private_key
+       FROM accounts
+       WHERE user_id = ?1 AND wallet_address = ?2
+       ORDER BY CASE WHEN type = 'managed' THEN 0 ELSE 1 END
+       LIMIT 1`,
     )
     .bind(userId, normalizedAddress)
-    .first<{ encrypted_private_key: string | null }>();
-  if (!row?.encrypted_private_key) {
-    throw new ApiError(404, `Managed wallet ${normalizedAddress} not found or has no key`);
+    .first<{
+      type: string;
+      encrypted_private_key: string | null;
+    }>();
+  if (!row) {
+    throw new ApiError(
+      404,
+      `Wallet ${normalizedAddress} is not imported for the current user`,
+    );
+  }
+  if (row.type !== 'managed') {
+    throw new ApiError(
+      400,
+      `Wallet ${normalizedAddress} is imported as watch-only. Import its private key in Admin before using it as a signing wallet`,
+    );
+  }
+  if (!row.encrypted_private_key) {
+    throw new ApiError(
+      500,
+      `Managed wallet ${normalizedAddress} is missing encrypted key material`,
+    );
   }
   return decryptPrivateKey(row.encrypted_private_key, encryptionKeyStr);
 }

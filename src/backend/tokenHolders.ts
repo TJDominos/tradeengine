@@ -331,6 +331,15 @@ export async function dbStageTokenHolderBalanceShard(
   source = 'rpc_owner_prefix_shards',
 ): Promise<void> {
   await dbEnsureTradeDomainSchema(db);
+
+  await db
+    .prepare(
+      `DELETE FROM token_holder_sync_stage
+       WHERE token_id = ?1 AND run_id = ?2 AND shard_index = ?3`,
+    )
+    .bind(tokenId, runId, shardIndex)
+    .run();
+
   if (balances.size === 0) {
     return;
   }
@@ -348,12 +357,7 @@ export async function dbStageTokenHolderBalanceShard(
              amount_holding,
              source,
              updated_at
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-           ON CONFLICT(token_id, run_id, shard_index, wallet_address)
-           DO UPDATE SET
-             amount_holding = excluded.amount_holding,
-             source = excluded.source,
-             updated_at = excluded.updated_at`,
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
         )
         .bind(
           tokenId,
