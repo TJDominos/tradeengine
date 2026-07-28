@@ -969,16 +969,12 @@ export default function App() {
       )
     );
   const outsideHolderCount =
-    engineState.tokenHolderAggregate?.outsiderHolderCount ??
+    engineState.tokenHolderAggregate?.activeHolderCount ??
     ((engineState.outsideTokenHolders?.length ?? 0) > 0
       ? engineState.outsideTokenHolders.length
       : null);
   const outsideHolderTotalAmount = engineState.tokenHolderAggregate
-    ? Math.max(
-        0,
-        engineState.tokenHolderAggregate.totalAmountHolding -
-          engineState.tokenHolderAggregate.internalAmountHolding,
-      )
+    ? engineState.tokenHolderAggregate.totalAmountHolding
     : (engineState.outsideTokenHolders?.length ?? 0) > 0
       ? engineState.outsideTokenHolders.reduce(
           (sum, holder) => sum + holder.amountHolding,

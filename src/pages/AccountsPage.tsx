@@ -128,10 +128,10 @@ export default function AccountsPage({
       <SummaryBlock title="Internal Account Summary" icon={<Wallet size={16} className="text-blue-400" />} data={internalSummary} />
       <div className="space-y-4 rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-sm">
         <h3 className="flex items-center gap-2 border-b border-slate-800 pb-2 font-semibold text-slate-200">
-          <Users size={16} className="text-amber-400" /> Outside Holder Summary
+          <Users size={16} className="text-amber-400" /> Holder Summary
         </h3>
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          <SummaryMetric label="Outside holders" value={outsideHolderCountValue} />
+          <SummaryMetric label="Tracked holders" value={outsideHolderCountValue} />
           <SummaryMetric label={`${activeTokenSymbol} total`} value={outsideHolderAmountValue} />
           <SummaryMetric label="Listed holders" value={String(filteredOutsideHoldersCount)} />
           <SummaryMetric label="Status" value={outsideHolderStatusValue} />
@@ -164,7 +164,7 @@ export default function AccountsPage({
       <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
         <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/80 p-4">
           <h3 className="flex items-center gap-2 font-semibold text-slate-200">
-            <Users size={16} className="text-amber-400" /> Outside Holder List
+            <Users size={16} className="text-amber-400" /> Holder List
             <span className="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-400">{filteredOutsideHoldersCount} found</span>
           </h3>
           <button
@@ -189,8 +189,12 @@ export default function AccountsPage({
             <tbody className="divide-y divide-slate-800">
               {outsideHolderRows.map((holder) => (
                 <tr key={holder.address} className="transition-colors hover:bg-slate-800/50">
-                  <td className={`px-4 py-2 text-xs font-medium ${holder.ownership === 'watch' ? 'text-amber-300' : 'text-sky-300'}`}>
-                    {holder.ownership === 'watch' ? 'Watch' : 'Outside'}
+                  <td className={`px-4 py-2 text-xs font-medium ${holder.ownership === 'internal' ? 'text-emerald-300' : holder.ownership === 'watch' ? 'text-amber-300' : 'text-sky-300'}`}>
+                    {holder.ownership === 'internal'
+                      ? 'Internal'
+                      : holder.ownership === 'watch'
+                        ? 'Watch'
+                        : 'Outside'}
                   </td>
                   <td className="px-4 py-2 text-xs font-bold text-slate-200">{holder.label ?? '-'}</td>
                   <td className="px-4 py-2 font-mono text-xs text-slate-400">{compactAddress(holder.address)}</td>

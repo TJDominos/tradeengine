@@ -474,6 +474,32 @@ export function isHeliusRpcUrl(value: string): boolean {
   }
 }
 
+export function normalizeHeliusRpcUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (!parsed.hostname.toLowerCase().includes('helius-rpc.com')) {
+      return parsed.toString();
+    }
+    if (!parsed.searchParams.get('api-key')) {
+      const legacyKey = parsed.pathname
+        .split('/')
+        .map((segment) => segment.trim())
+        .find((segment) => segment.length > 0);
+      if (legacyKey) {
+        parsed.pathname = '/';
+        parsed.searchParams.set('api-key', legacyKey);
+      }
+    }
+    return parsed.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
 export function dedupeStrings(values: string[]): string[] {
   const seen = new Set<string>();
   const deduped: string[] = [];

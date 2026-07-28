@@ -903,7 +903,6 @@ export async function dbListOutsideTokenHoldersFromFinal(
         AND a.wallet_address = tha.wallet_address
        WHERE tha.token_id = ?2
          AND tha.amount_holding > 0
-         AND COALESCE(a.type, '') != 'managed'
        ORDER BY tha.amount_holding DESC, tha.last_seen_at DESC, tha.wallet_address ASC
        LIMIT ?3`,
     )
@@ -921,7 +920,12 @@ export async function dbListOutsideTokenHoldersFromFinal(
     label: row.account_label,
     amountHolding: row.amount_holding,
     source: row.source,
-    ownership: row.account_type === 'watch' ? 'watch' : 'outside',
+    ownership:
+      row.account_type === 'managed'
+        ? 'internal'
+        : row.account_type === 'watch'
+          ? 'watch'
+          : 'outside',
     updatedAt: row.last_seen_at,
   }));
 }
@@ -956,7 +960,6 @@ export async function dbListOutsideTokenHoldersFromStage(
        LEFT JOIN accounts a
          ON a.user_id = ?1
         AND a.wallet_address = hr.wallet_address
-       WHERE COALESCE(a.type, '') != 'managed'
        ORDER BY hr.amount_holding DESC, hr.updated_at DESC, hr.wallet_address ASC
        LIMIT ?4`,
     )
@@ -973,7 +976,12 @@ export async function dbListOutsideTokenHoldersFromStage(
     label: row.account_label,
     amountHolding: row.amount_holding,
     source: 'rpc_owner_prefix_shards',
-    ownership: row.account_type === 'watch' ? 'watch' : 'outside',
+    ownership:
+      row.account_type === 'managed'
+        ? 'internal'
+        : row.account_type === 'watch'
+          ? 'watch'
+          : 'outside',
     updatedAt: row.updated_at,
   }));
 }

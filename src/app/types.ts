@@ -150,7 +150,7 @@ export type OutsideTokenHolder = {
   label: string | null;
   amountHolding: number;
   source: string;
-  ownership: 'watch' | 'outside';
+  ownership: 'internal' | 'watch' | 'outside';
   updatedAt: number;
 };
 

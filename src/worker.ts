@@ -157,6 +157,7 @@ import {
   normalizePrivateKey,
   normalizePubkey,
   normalizeRpcUrl,
+  normalizeHeliusRpcUrl,
   parseStoredSignalTransactionDetails,
   readNonEmptyString,
   readTokenMarketCache,
@@ -242,6 +243,20 @@ function preferHeliusRpcUrls(urls: string[]): string[] {
   });
 }
 
+function buildHolderDasRpcUrls(rpcUrls: string | string[]): string[] {
+  const heliusUrls = preferHeliusRpcUrls(
+    normalizeHolderRpcUrls(rpcUrls)
+      .filter((url) => isHeliusRpcUrl(url))
+      .map((url) => normalizeHeliusRpcUrl(url)),
+  );
+
+  if (heliusUrls.length > 0) {
+    return heliusUrls;
+  }
+
+  return [normalizeHeliusRpcUrl(HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL)];
+}
+
 function readUnsignedBigInt(value: unknown): bigint | null {
   if (typeof value === 'bigint') {
     return value >= 0n ? value : null;
@@ -282,10 +297,8 @@ function buildHolderAccountDetailsRpcUrls(
 }
 
 function buildHolderDasRpcUrl(rpcUrls: string | string[]): string {
-  return (
-    buildHolderAccountDetailsRpcUrls(rpcUrls)[0] ??
-    HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL
-  );
+  return buildHolderDasRpcUrls(rpcUrls)[0] ??
+    normalizeHeliusRpcUrl(HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL);
 }
 
 async function fetchHeliusTokenHolderBalances(
