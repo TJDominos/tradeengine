@@ -1,7 +1,12 @@
 import { ApiError } from './errors';
 import { fetchJupiterTokenMetadata } from './jupiter';
 import { nowTs, normalizeTimestampMs } from './time';
-import { dedupeStrings, normalizePubkey, normalizeRpcUrl } from './workerCore';
+import {
+  dedupeStrings,
+  isHeliusRpcUrl,
+  normalizePubkey,
+  normalizeRpcUrl,
+} from './workerCore';
 import { dbEnsureTradeDomainSchema } from './workerSchema';
 import type {
   RpcEndpoint,
@@ -11,6 +16,20 @@ import type {
   TradableTokenCreateRequest,
 } from './workerShared';
 
+function sortRpcEndpointsByPreference(endpoints: RpcEndpoint[]): RpcEndpoint[] {
+  return [...endpoints].sort((left, right) => {
+    if (left.isActive !== right.isActive) {
+      return Number(right.isActive) - Number(left.isActive);
+    }
+    const leftIsHelius = isHeliusRpcUrl(left.url);
+    const rightIsHelius = isHeliusRpcUrl(right.url);
+    if (leftIsHelius !== rightIsHelius) {
+      return leftIsHelius ? -1 : 1;
+    }
+    return right.createdAt - left.createdAt || right.id - left.id;
+  });
+}
+
 export async function dbListRpcEndpoints(
   db: D1Database,
   userId: number,
@@ -19,21 +38,25 @@ export async function dbListRpcEndpoints(
   await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
-      'SELECT id, network, url, created_at FROM rpc_endpoints WHERE user_id = ?1 AND network = ?2 ORDER BY created_at DESC, id DESC',
+      'SELECT id, network, url, is_active, created_at FROM rpc_endpoints WHERE user_id = ?1 AND network = ?2 ORDER BY created_at DESC, id DESC',
     )
     .bind(userId, network)
     .all<{
       id: number;
       network: string;
       url: string;
+      is_active: number;
       created_at: number;
     }>();
-  return rows.results.map((row) => ({
-    id: row.id,
-    network: row.network,
-    url: row.url,
-    createdAt: row.created_at,
-  }));
+  return sortRpcEndpointsByPreference(
+    rows.results.map((row) => ({
+      id: row.id,
+      network: row.network,
+      url: row.url,
+      isActive: row.is_active !== 0,
+      createdAt: row.created_at,
+    })),
+  );
 }
 
 export async function dbResolveSolanaRpcUrls(
@@ -41,7 +64,9 @@ export async function dbResolveSolanaRpcUrls(
   userId: number,
   envRpcUrl?: string,
 ): Promise<string[]> {
-  const endpoints = await dbListRpcEndpoints(db, userId, 'solana');
+  const endpoints = (await dbListRpcEndpoints(db, userId, 'solana')).filter(
+    (endpoint) => endpoint.isActive,
+  );
   return dedupeStrings([
     ...endpoints.map((endpoint) => endpoint.url),
     envRpcUrl ?? '',
@@ -63,7 +88,7 @@ export async function dbAddRpcEndpoint(
   try {
     await db
       .prepare(
-        'INSERT INTO rpc_endpoints (user_id, network, url, created_at) VALUES (?1, ?2, ?3, ?4)',
+        'INSERT INTO rpc_endpoints (user_id, network, url, created_at, is_active) VALUES (?1, ?2, ?3, ?4, 1)',
       )
       .bind(userId, network, url, createdAt)
       .run();
@@ -76,13 +101,14 @@ export async function dbAddRpcEndpoint(
   }
   const row = await db
     .prepare(
-      'SELECT id, network, url, created_at FROM rpc_endpoints WHERE user_id = ?1 AND network = ?2 AND url = ?3',
+      'SELECT id, network, url, is_active, created_at FROM rpc_endpoints WHERE user_id = ?1 AND network = ?2 AND url = ?3',
     )
     .bind(userId, network, url)
     .first<{
       id: number;
       network: string;
       url: string;
+      is_active: number;
       created_at: number;
     }>();
   if (!row) throw new ApiError(500, 'Failed to load the saved RPC endpoint');
@@ -90,6 +116,7 @@ export async function dbAddRpcEndpoint(
     id: row.id,
     network: row.network,
     url: row.url,
+    isActive: row.is_active !== 0,
     createdAt: row.created_at,
   };
 }
@@ -102,13 +129,14 @@ export async function dbDeleteRpcEndpoint(
   await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
-      'SELECT id, network, url, created_at FROM rpc_endpoints WHERE id = ?1 AND user_id = ?2',
+      'SELECT id, network, url, is_active, created_at FROM rpc_endpoints WHERE id = ?1 AND user_id = ?2',
     )
     .bind(endpointId, userId)
     .first<{
       id: number;
       network: string;
       url: string;
+      is_active: number;
       created_at: number;
     }>();
   if (!row) {
@@ -119,6 +147,7 @@ export async function dbDeleteRpcEndpoint(
     id: row.id,
     network: row.network,
     url: row.url,
+    isActive: row.is_active !== 0,
     createdAt: row.created_at,
   };
 }

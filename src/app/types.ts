@@ -81,6 +81,7 @@ export type RpcEndpoint = {
   id: number;
   network: string;
   url: string;
+  isActive: boolean;
   createdAt: number;
 };
 

@@ -153,6 +153,7 @@ import {
   isSolanaRpcRateLimitError,
   jsonResponse,
   mergeStoredSignalTransactionDetails,
+  isHeliusRpcUrl,
   normalizePrivateKey,
   normalizePubkey,
   normalizeRpcUrl,
@@ -206,7 +207,8 @@ import {
 const HOLDER_SYNC_PROGRAM_ACCOUNTS_PRIMARY_RPC_URL =
   'https://api.mainnet-beta.solana.com';
 const HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL =
-  'https://mainnet.helius-rpc.com/fda76be1-7d09-4880-80db-837831934193';
+  'https://mainnet.helius-rpc.com/?api-key=fda76be1-7d09-4880-80db-837831934193';
+const HOLDER_SYNC_DAS_PAGE_LIMIT = 1000;
 const HOLDER_SYNC_PROGRAM_ACCOUNTS_INTERVAL_MS = 10_000;
 const HOLDER_SYNC_ACCOUNT_DETAILS_REQUESTS_PER_SECOND = 4;
 const HOLDER_SYNC_ACCOUNT_DETAILS_INTERVAL_MS = Math.ceil(
@@ -214,12 +216,51 @@ const HOLDER_SYNC_ACCOUNT_DETAILS_INTERVAL_MS = Math.ceil(
 );
 const MARKET_REFRESH_RUNNING_STALE_AFTER_SEC = 15 * 60;
 
+interface HeliusDasTokenAccountsResult {
+  total?: number;
+  limit?: number;
+  cursor?: unknown;
+  token_accounts?: Array<{
+    owner?: unknown;
+    amount?: unknown;
+  }>;
+}
+
+function normalizeHolderRpcUrls(rpcUrls: string | string[]): string[] {
+  return dedupeStrings(
+    (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls])
+      .map((url) => url.trim())
+      .filter((url) => url.length > 0),
+  );
+}
+
+function preferHeliusRpcUrls(urls: string[]): string[] {
+  return [...urls].sort((left, right) => {
+    const leftScore = isHeliusRpcUrl(left) ? 0 : 1;
+    const rightScore = isHeliusRpcUrl(right) ? 0 : 1;
+    return leftScore - rightScore;
+  });
+}
+
+function readUnsignedBigInt(value: unknown): bigint | null {
+  if (typeof value === 'bigint') {
+    return value >= 0n ? value : null;
+  }
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : null;
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    return BigInt(value);
+  }
+  return null;
+}
+
 function buildHolderProgramAccountsRpcUrls(
   rpcUrls: string | string[],
 ): string[] {
-  const urls = (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls])
-    .map((url) => url.trim())
-    .filter((url) => url.length > 0);
+  const urls = normalizeHolderRpcUrls(rpcUrls).filter(
+    (url) => !isHeliusRpcUrl(url),
+  );
 
   if (urls.length > 0) {
     return urls;
@@ -231,15 +272,74 @@ function buildHolderProgramAccountsRpcUrls(
 function buildHolderAccountDetailsRpcUrls(
   rpcUrls: string | string[],
 ): string[] {
-  const urls = (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls])
-    .map((url) => url.trim())
-    .filter((url) => url.length > 0);
+  const urls = preferHeliusRpcUrls(normalizeHolderRpcUrls(rpcUrls));
 
   if (urls.length > 0) {
     return urls;
   }
 
   return [HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL];
+}
+
+function buildHolderDasRpcUrl(rpcUrls: string | string[]): string {
+  return (
+    buildHolderAccountDetailsRpcUrls(rpcUrls)[0] ??
+    HOLDER_SYNC_ACCOUNT_DETAILS_PRIMARY_RPC_URL
+  );
+}
+
+async function fetchHeliusTokenHolderBalances(
+  rpcUrls: string | string[],
+  mint: string,
+  decimals: number,
+): Promise<Map<string, number>> {
+  const balances = new Map<string, number>();
+  const rpcUrl = buildHolderDasRpcUrl(rpcUrls);
+  const seenCursors = new Set<string>();
+  const denominator = 10 ** decimals;
+  let cursor: string | null = null;
+  let page = 1;
+
+  for (;;) {
+    const result = await solanaRpc<HeliusDasTokenAccountsResult>(
+      [rpcUrl],
+      'getTokenAccounts',
+      {
+        mint,
+        page,
+        limit: HOLDER_SYNC_DAS_PAGE_LIMIT,
+        ...(cursor ? { cursor } : {}),
+        options: { showZeroBalance: false },
+      },
+    );
+
+    const tokenAccounts = Array.isArray(result.token_accounts)
+      ? result.token_accounts
+      : [];
+
+    for (const tokenAccount of tokenAccounts) {
+      const owner = tryNormalizeSolanaPubkey(tokenAccount.owner);
+      const rawAmount = readUnsignedBigInt(tokenAccount.amount);
+      if (!owner || rawAmount == null || rawAmount <= 0n) {
+        continue;
+      }
+      const amountHolding = Number(rawAmount) / denominator;
+      if (!Number.isFinite(amountHolding) || amountHolding <= 0) {
+        continue;
+      }
+      balances.set(owner, (balances.get(owner) ?? 0) + amountHolding);
+    }
+
+    const nextCursor = readNonEmptyString(result.cursor);
+    if (!nextCursor || tokenAccounts.length === 0 || seenCursors.has(nextCursor)) {
+      break;
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+    page += 1;
+  }
+
+  return balances;
 }
 
 async function listSolanaTokenHolderAccountPubkeys(
@@ -378,6 +478,7 @@ async function fetchSolanaTokenHolderBalanceShard(
   ownerPrefix: number,
   decimals: number,
 ): Promise<Map<string, number>> {
+  const holderProgramAccountsRpcUrls = buildHolderProgramAccountsRpcUrls(rpcUrls);
   const ownerPrefixFilter = base58Encode(Uint8Array.of(ownerPrefix));
   const filters =
     programId === SOLANA_TOKEN_2022_PROGRAM_ID
@@ -397,7 +498,7 @@ async function fetchSolanaTokenHolderBalanceShard(
         data: [string, string] | string;
       };
     }>
-  >(rpcUrls, 'getProgramAccounts', [
+  >(holderProgramAccountsRpcUrls, 'getProgramAccounts', [
     programId,
     {
       filters,
@@ -433,6 +534,91 @@ async function fetchSolanaTokenHolderBalanceShard(
   return balances;
 }
 
+async function completeTokenHolderBalanceSync(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  balances: Map<string, number>,
+  source: string,
+  timestamp: number,
+  existingState: TokenHolderSyncStateRecord | null,
+  shardsProcessedThisRun = 0,
+): Promise<TokenHolderSyncSummary> {
+  const { activeHolderCount, upsertedCount, zeroedCount } =
+    await dbSyncTokenHolderBalances(db, tokenId, balances, source);
+
+  await dbRecomputeTokenHolderAggregate(db, userId, tokenId, {
+    source,
+    fullSyncAt: timestamp,
+  });
+
+  await db
+    .prepare('DELETE FROM token_holder_sync_stage WHERE token_id = ?1')
+    .bind(tokenId)
+    .run();
+
+  const completedState = await dbPutTokenHolderSyncState(db, {
+    tokenId,
+    runId: existingState?.runId ?? crypto.randomUUID(),
+    status: 'completed',
+    source,
+    nextShardIndex: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+    processedShardCount: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+    totalShardCount: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+    stagedHolderCount: activeHolderCount,
+    lastProgramId:
+      source === 'helius_das'
+        ? null
+        : TOKEN_HOLDER_SYNC_PROGRAM_IDS[TOKEN_HOLDER_SYNC_PROGRAM_IDS.length - 1],
+    lastOwnerPrefix:
+      source === 'helius_das'
+        ? null
+        : TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT - 1,
+    errorMessage: null,
+    startedAt: existingState?.startedAt ?? timestamp,
+    updatedAt: timestamp,
+    lastCompletedAt: timestamp,
+  });
+
+  return buildTokenHolderSyncSummary(completedState, {
+    activeHolderCount,
+    stagedHolderCount: activeHolderCount,
+    upsertedCount,
+    zeroedCount,
+    shardsProcessedThisRun,
+  });
+}
+
+async function trySyncSolanaTokenHolderBalancesWithHeliusDas(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  mint: string,
+  rpcUrls: string | string[],
+  decimals: number,
+  existingState: TokenHolderSyncStateRecord | null,
+): Promise<TokenHolderSyncSummary | null> {
+  try {
+    const balances = await fetchHeliusTokenHolderBalances(rpcUrls, mint, decimals);
+    if (balances.size === 0) {
+      return null;
+    }
+    return await completeTokenHolderBalanceSync(
+      db,
+      userId,
+      tokenId,
+      balances,
+      'helius_das',
+      nowTs(),
+      existingState,
+      1,
+    );
+  } catch (err: unknown) {
+    console.warn(`Helius DAS holder sync failed for ${mint}:`, err);
+    return null;
+  }
+}
+
 async function syncSolanaTokenHolderBalancesPaged(
   db: D1Database,
   userId: number,
@@ -462,6 +648,19 @@ async function syncSolanaTokenHolderBalancesPaged(
       updatedAt: nowTs(),
     });
     return buildTokenHolderSyncSummary(failedState);
+  }
+
+  const heliusDasSummary = await trySyncSolanaTokenHolderBalancesWithHeliusDas(
+    db,
+    userId,
+    tokenId,
+    mint,
+    rpcUrls,
+    decimals,
+    state,
+  );
+  if (heliusDasSummary) {
+    return heliusDasSummary;
   }
 
   let currentState = state;
@@ -654,45 +853,32 @@ async function syncSolanaTokenHolderBalancesFull(
       });
       return buildTokenHolderSyncSummary(failedState);
     }
-    const balances = await fetchSolanaTokenHolderBalances(rpcUrls, mint, decimals);
-    const { activeHolderCount, upsertedCount, zeroedCount } =
-      await dbSyncTokenHolderBalances(db, tokenId, balances, 'rpc_full_sync');
+    let balances: Map<string, number> | null = null;
+    let source = 'helius_das';
+    try {
+      balances = await fetchHeliusTokenHolderBalances(rpcUrls, mint, decimals);
+      if (balances.size === 0) {
+        balances = null;
+      }
+    } catch (err: unknown) {
+      console.warn(`Helius DAS full holder sync failed for ${mint}:`, err);
+      balances = null;
+    }
+    if (!balances) {
+      source = 'rpc_full_sync';
+      balances = await fetchSolanaTokenHolderBalances(rpcUrls, mint, decimals);
+    }
 
-    await dbRecomputeTokenHolderAggregate(db, userId, tokenId, {
-      source: 'rpc_full_sync',
-      fullSyncAt: timestamp,
-    });
-
-    await db
-      .prepare('DELETE FROM token_holder_sync_stage WHERE token_id = ?1')
-      .bind(tokenId)
-      .run();
-
-    const completedState = await dbPutTokenHolderSyncState(db, {
+    return await completeTokenHolderBalanceSync(
+      db,
+      userId,
       tokenId,
-      runId: existingState?.runId ?? crypto.randomUUID(),
-      status: 'completed',
-      source: 'rpc_full_sync',
-      nextShardIndex: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
-      processedShardCount: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
-      totalShardCount: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
-      stagedHolderCount: activeHolderCount,
-      lastProgramId:
-        TOKEN_HOLDER_SYNC_PROGRAM_IDS[TOKEN_HOLDER_SYNC_PROGRAM_IDS.length - 1],
-      lastOwnerPrefix: TOKEN_HOLDER_SYNC_OWNER_PREFIX_COUNT - 1,
-      errorMessage: null,
-      startedAt: existingState?.startedAt ?? timestamp,
-      updatedAt: timestamp,
-      lastCompletedAt: timestamp,
-    });
-
-    return buildTokenHolderSyncSummary(completedState, {
-      activeHolderCount,
-      stagedHolderCount: activeHolderCount,
-      upsertedCount,
-      zeroedCount,
-      shardsProcessedThisRun: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
-    });
+      balances,
+      source,
+      timestamp,
+      existingState,
+      source === 'helius_das' ? 1 : TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+    );
   } catch (err: unknown) {
     if (isSolanaRpcRateLimitError(err)) {
       const rateLimitedState = await dbPutTokenHolderSyncState(db, {
@@ -3331,7 +3517,7 @@ function waitMs(ms: number): Promise<void> {
 async function solanaRpc<T>(
   rpcUrls: string | string[],
   method: string,
-  params: unknown[],
+  params: unknown,
 ): Promise<T> {
   const pool = dedupeStrings(
     (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls]).map((url) => url.trim()),

@@ -273,6 +273,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     user_id INTEGER NOT NULL,
     network TEXT NOT NULL DEFAULT 'solana',
     url TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL,
     UNIQUE(user_id, network, url),
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -400,6 +401,12 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           'token_market_snapshots',
           'total_holders',
           'INTEGER',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'rpc_endpoints',
+          'is_active',
+          'INTEGER NOT NULL DEFAULT 1',
         );
         await db.batch(
           D1_TRADE_DOMAIN_INDEX_STATEMENTS.map((statement) =>

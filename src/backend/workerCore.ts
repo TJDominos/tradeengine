@@ -462,6 +462,18 @@ export function normalizeRpcUrl(value: string): string {
   return parsed.toString();
 }
 
+export function isHeliusRpcUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  try {
+    return new URL(trimmed).hostname.toLowerCase().includes('helius-rpc.com');
+  } catch {
+    return trimmed.toLowerCase().includes('helius-rpc.com');
+  }
+}
+
 export function dedupeStrings(values: string[]): string[] {
   const seen = new Set<string>();
   const deduped: string[] = [];
