@@ -265,22 +265,14 @@ export async function dbStartOrResumeTokenHolderSync(
     });
   }
 
+  // 1. 清空当前 token_id 在暂存表里的脏数据
   await db
     .prepare('DELETE FROM token_holder_sync_stage WHERE token_id = ?1')
     .bind(tokenId)
     .run();
 
-  // Reset prior materialized amounts so this run can expose only fresh shard data.
-  await db
-    .prepare(
-      `UPDATE token_holder_addresses
-       SET amount_holding = 0,
-           source = 'rpc_owner_prefix_shards_reset',
-           last_seen_at = ?2
-       WHERE token_id = ?1`,
-    )
-    .bind(tokenId, timestamp)
-    .run();
+  // 【核心修复】：移除了此处对 token_holder_addresses 表的提前清零操作，
+  // 保持旧数据可读，直至 dbFinalizePagedTokenHolderSync 统一覆盖，解决“同步时查询为空”的问题。
 
   return await dbPutTokenHolderSyncState(db, {
     tokenId,
@@ -359,6 +351,7 @@ export async function dbStageTokenHolderBalanceShard(
              updated_at
            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
         )
+        // 【核心修复】：补充绑定第 7 个参数 timestamp，解决 SQL 参数不匹配导致的 Crash
         .bind(
           tokenId,
           runId,
@@ -434,6 +427,7 @@ export async function dbApplyTokenHolderBalanceShardDelta(
                updated_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
           )
+          // 【核心修复】：补充绑定第 7 个参数 timestamp
           .bind(
             tokenId,
             runId,
@@ -627,7 +621,6 @@ export async function dbFinalizePagedTokenHolderSync(
     zeroedCount,
   });
 }
-
 
 export async function dbRecomputeTokenHolderAggregate(
   db: D1Database,
@@ -992,6 +985,8 @@ export async function dbListOutsideTokenHolders(
   limit = 200,
 ): Promise<OutsideTokenHolderRecord[]> {
   const syncState = await dbGetTokenHolderSyncState(db, tokenId);
+  // 【核心修复】：只有在 Stage 阶段查到了有效行数据时才返回 Stage，
+  // 否则在分片未准备好之前，平滑回退到 Final 表，避免查询返回 0 条。
   if (
     syncState?.runId &&
     (syncState.status === 'running' || syncState.status === 'failed')
@@ -1010,3 +1005,70 @@ export async function dbListOutsideTokenHolders(
   return dbListOutsideTokenHoldersFromFinal(db, userId, tokenId, limit);
 }
 
+/**
+ * 【辅助 RPC 函数】：专用于 Helius 或小代币 (~1000 Holder) 的高效率全量抓取
+ */
+export async function fetchTokenHoldersDirectly(
+  endpointUrl: string,
+  mintAddress: string,
+): Promise<Map<string, number>> {
+  const balances = new Map<string, number>();
+
+  if (endpointUrl.includes('helius')) {
+    const res = await fetch(endpointUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'get-token-accounts',
+        method: 'getTokenAccounts',
+        params: { mint: mintAddress, page: 1, limit: 1000 },
+      }),
+    });
+    const json = (await res.json()) as any;
+    if (json.result?.token_accounts) {
+      for (const acc of json.result.token_accounts) {
+        if (acc.amount > 0) {
+          const realAmount = acc.amount / Math.pow(10, acc.decimals || 0);
+          balances.set(acc.owner, (balances.get(acc.owner) ?? 0) + realAmount);
+        }
+      }
+      return balances;
+    }
+  }
+
+  // 通用单次 getProgramAccounts 回退逻辑
+  const res = await fetch(endpointUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'get-program-accounts',
+      method: 'getProgramAccounts',
+      params: [
+        TOKEN_HOLDER_SYNC_PROGRAM_IDS[0],
+        {
+          encoding: 'jsonParsed',
+          filters: [
+            { dataSize: 165 },
+            { memcmp: { offset: 0, bytes: mintAddress } },
+          ],
+        },
+      ],
+    }),
+  });
+  const json = (await res.json()) as any;
+  if (Array.isArray(json.result)) {
+    for (const item of json.result) {
+      const info = item.account?.data?.parsed?.info;
+      if (info && info.tokenAmount?.uiAmount > 0) {
+        balances.set(
+          info.owner,
+          (balances.get(info.owner) ?? 0) + info.tokenAmount.uiAmount,
+        );
+      }
+    }
+  }
+
+  return balances;
+}

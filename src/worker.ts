@@ -379,11 +379,17 @@ async function fetchSolanaTokenHolderBalanceShard(
   decimals: number,
 ): Promise<Map<string, number>> {
   const ownerPrefixFilter = base58Encode(Uint8Array.of(ownerPrefix));
-  const filters = [
-    { dataSize: 165 },
-    { memcmp: { offset: 0, bytes: mint } },
-    { memcmp: { offset: 32, bytes: ownerPrefixFilter } },
-  ];
+  const filters =
+    programId === SOLANA_TOKEN_2022_PROGRAM_ID
+      ? [
+          { memcmp: { offset: 0, bytes: mint } },
+          { memcmp: { offset: 32, bytes: ownerPrefixFilter } },
+        ]
+      : [
+          { dataSize: 165 },
+          { memcmp: { offset: 0, bytes: mint } },
+          { memcmp: { offset: 32, bytes: ownerPrefixFilter } },
+        ];
 
   const rows = await solanaRpc<
     Array<{
@@ -581,11 +587,23 @@ async function syncSolanaTokenHolderBalancesPaged(
   });
 
   if (currentState.nextShardIndex >= currentState.totalShardCount) {
-    const completedSummary = await dbFinalizePagedTokenHolderSync(
+    let completedSummary = await dbFinalizePagedTokenHolderSync(
       db,
       userId,
       currentState,
     );
+    if (completedSummary.activeHolderCount === 0) {
+      const fullSyncSummary = await syncSolanaTokenHolderBalancesFull(
+        db,
+        userId,
+        tokenId,
+        mint,
+        rpcUrls,
+      );
+      if (fullSyncSummary.activeHolderCount > 0) {
+        completedSummary = fullSyncSummary;
+      }
+    }
     return buildTokenHolderSyncSummary(null, {
       ...completedSummary,
       shardsProcessedThisRun,
