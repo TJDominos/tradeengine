@@ -136,6 +136,7 @@ export default function App() {
   const strategyDraftDirtyRef = React.useRef(false);
   const activeSubmissionRef = React.useRef<string | null>(null);
   const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
+  const lastWalletBalanceRefreshStatusKeyRef = React.useRef<string | null>(null);
 
   const dateFilterReady = dateRange.from !== '' && dateRange.to !== '';
   const hasDateRange = dateFilterActive && dateFilterReady;
@@ -283,6 +284,22 @@ export default function App() {
     }
     void refreshWalletBalances();
   }, [auth?.authenticated, engineState, activeTab, isAdminModalOpen, refreshWalletBalances]);
+
+  useEffect(() => {
+    if (!auth?.authenticated) {
+      return;
+    }
+    const status = engineState?.marketRefreshStatus;
+    if (!status || status.status !== 'completed') {
+      return;
+    }
+    const statusKey = `${status.requestId ?? 'none'}:${status.status}:${status.updatedAt}`;
+    if (lastWalletBalanceRefreshStatusKeyRef.current === statusKey) {
+      return;
+    }
+    lastWalletBalanceRefreshStatusKeyRef.current = statusKey;
+    void refreshWalletBalances();
+  }, [auth?.authenticated, engineState?.marketRefreshStatus, refreshWalletBalances]);
 
   const submitWithFeedback = async (name: string, action: () => Promise<void>) => {
     if (activeSubmissionRef.current) {
@@ -451,7 +468,21 @@ export default function App() {
     };
   }, [engineState?.marketRefreshStatus?.requestId, marketRefreshRunning]);
 
-  // Intentionally no dashboard auto-polling: state and snapshots refresh only on manual actions.
+  useEffect(() => {
+    if (!auth?.authenticated || !marketRefreshRunning) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void loadState().catch((err: unknown) => {
+        console.warn('Failed to poll refresh state:', err);
+      });
+    }, 3000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [auth?.authenticated, loadState, marketRefreshRunning]);
 
   const handleStartTrading = () => {
     setIsTradingActive((current) => {

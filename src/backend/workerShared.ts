@@ -7,7 +7,7 @@ import nacl from 'tweetnacl';
 import { ApiError } from './errors';
 export interface Env {
   TRADINGBOT_DB: D1Database;
-  ASSETS: Fetcher;
+  ASSETS?: Fetcher;
   PRIVATE_KEY_ENCRYPTION_KEY?: string;
   SOLANA_RPC_URL?: string;
   ALCHEMY_WEBHOOK_SIGNING_KEY?: string;

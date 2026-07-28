@@ -5927,7 +5927,15 @@ export default {
       return handleApi(request, url, env, ctx);
     }
 
-    // Pass all other requests through to the static assets binding
-    return env.ASSETS.fetch(request);
+    if (env.ASSETS) {
+      return env.ASSETS.fetch(request);
+    }
+
+    const status = /\.[a-z0-9]+$/i.test(url.pathname) ? 404 : 503;
+    const message =
+      status === 404
+        ? 'Static asset not found'
+        : 'Static assets binding is not configured';
+    return new Response(message, { status });
   },
 } satisfies ExportedHandler<Env>;
