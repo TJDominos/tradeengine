@@ -1,7 +1,7 @@
 import React from 'react';
 
 import type { AccountRecord, WalletBalance } from '../app/types';
-import { formatDate, formatNum, formatUSD, parseAmount } from '../app/utils';
+import { findWalletTokenAmount, formatDate, formatNum, formatUSD, parseAmount } from '../app/utils';
 import BalanceBadges from './BalanceBadges';
 
 type AccountsTableProps = {
@@ -14,6 +14,8 @@ type AccountsTableProps = {
   balances: Record<string, WalletBalance>;
   balanceErrors: Record<string, string>;
   balancePending: Record<string, boolean>;
+  trackedTokenMint: string;
+  trackedTokenSymbol: string;
   emptyText: string;
   actionButton?: React.ReactNode;
   children?: React.ReactNode;
@@ -29,6 +31,8 @@ export default function AccountsTable({
   balances,
   balanceErrors,
   balancePending,
+  trackedTokenMint,
+  trackedTokenSymbol,
   emptyText,
   actionButton,
   children,
@@ -51,6 +55,7 @@ export default function AccountsTable({
               <th className="px-4 py-3 font-medium">Wallet / Address</th>
               <th className="px-4 py-3 text-right font-medium text-blue-400">USDC Bal</th>
               <th className="px-4 py-3 text-right font-medium text-amber-400">SOL Bal</th>
+              <th className="px-4 py-3 text-right font-medium text-emerald-400">{trackedTokenSymbol} Amount</th>
               <th className="px-4 py-3 font-medium">Tracked Tokens</th>
               <th className="px-4 py-3 text-right font-medium">Imported</th>
             </tr>
@@ -67,6 +72,9 @@ export default function AccountsTable({
                   <td className="px-4 py-2 font-mono text-xs text-slate-400">{account.address}</td>
                   <td className="px-4 py-2 text-right text-xs font-medium">{balance ? formatUSD(parseAmount(balance.usdc)) : pending ? '...' : '-'}</td>
                   <td className="px-4 py-2 text-right text-xs font-medium">{balance ? formatNum(parseAmount(balance.sol)) : pending ? '...' : '-'}</td>
+                  <td className="px-4 py-2 text-right text-xs font-medium text-slate-200">
+                    {trackedTokenMint && balance ? formatNum(findWalletTokenAmount(balance, trackedTokenMint)) : pending ? '...' : '-'}
+                  </td>
                   <td className="px-4 py-2 text-xs text-slate-300">
                     {balanceError ? <span className="text-rose-400">Failed</span> : <BalanceBadges balance={balance} />}
                   </td>
@@ -76,7 +84,7 @@ export default function AccountsTable({
             })}
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className="py-8 text-center text-slate-500">{emptyText}</td>
+                <td colSpan={8} className="py-8 text-center text-slate-500">{emptyText}</td>
               </tr>
             ) : null}
           </tbody>

@@ -37,6 +37,7 @@ import type {
   DashboardTransactionLog,
   DateRangeState,
   EngineState,
+  OutsideTokenHolderPage,
   SettingsState,
   StrategyVersionDocument,
   TabId,
@@ -51,9 +52,11 @@ import {
   createDefaultDateRange,
   findWalletTokenAmount,
   formatDate,
+  formatUSD,
   loadStoredString,
   mergeTradableToken,
   normalizeTimestampMs,
+  parseAmount,
   resolveWalletOwnershipMeta,
   saveStoredString,
   serializeSettings,
@@ -86,6 +89,14 @@ export default function App() {
   const [activityLogSearchTerm, setActivityLogSearchTerm] = React.useState('');
   const [transactionLogCurrentPage, setTransactionLogCurrentPage] = React.useState(1);
   const [activityLogCurrentPage, setActivityLogCurrentPage] = React.useState(1);
+  const [outsideHolderSort, setOutsideHolderSort] = React.useState<'newest' | 'largest'>('newest');
+  const [outsideHolderPage, setOutsideHolderPage] = React.useState<OutsideTokenHolderPage>({
+    items: [],
+    page: 1,
+    pageSize: ITEMS_PER_PAGE,
+    totalItems: 0,
+  });
+  const [outsideHolderPageLoading, setOutsideHolderPageLoading] = React.useState(false);
 
   const [credentials, setCredentials] = React.useState({ username: '', password: '' });
   const [bootstrap, setBootstrap] = React.useState({ username: '', password: '' });
@@ -215,6 +226,43 @@ export default function App() {
     return state;
   }, [syncSettingsFromServer, syncStrategyDraftFromServer]);
 
+  const loadOutsideHolderPage = React.useCallback(async () => {
+    if (!auth?.authenticated || !settings.contractAddress.trim()) {
+      setOutsideHolderPage({
+        items: [],
+        page: 1,
+        pageSize: ITEMS_PER_PAGE,
+        totalItems: 0,
+      });
+      return;
+    }
+
+    setOutsideHolderPageLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: String(outsiderPage),
+        pageSize: String(ITEMS_PER_PAGE),
+      });
+      const trimmedSearch = accountSearchTerm.trim();
+      if (trimmedSearch) {
+        params.set('search', trimmedSearch);
+      }
+      params.set('sort', outsideHolderSort);
+      const result = await api<OutsideTokenHolderPage>(`/api/token-holders?${params.toString()}`);
+      setOutsideHolderPage(result);
+    } catch (err: unknown) {
+      setOutsideHolderPage({
+        items: [],
+        page: outsiderPage,
+        pageSize: ITEMS_PER_PAGE,
+        totalItems: 0,
+      });
+      setError(err instanceof Error ? err.message : 'Failed to load outside holders');
+    } finally {
+      setOutsideHolderPageLoading(false);
+    }
+  }, [accountSearchTerm, auth?.authenticated, outsideHolderSort, outsiderPage, settings.contractAddress]);
+
   const refresh = React.useCallback(async () => {
     setLoading(true);
     setError('');
@@ -236,46 +284,91 @@ export default function App() {
     void refresh();
   }, [refresh]);
 
-  const refreshWalletBalances = React.useCallback(async () => {
-    if (!engineState) return;
-    const accounts = [...engineState.internalAccs, ...engineState.outsiderAccs];
-    if (accounts.length === 0) {
-      setWalletBalances({});
-      setWalletBalanceErrors({});
-      setWalletBalancePending({});
+  const refreshWalletBalances = React.useCallback(async (addresses?: string[]) => {
+    if (!auth?.authenticated) return;
+
+    const targetAddresses = Array.from(
+      new Set(
+        (addresses ?? (
+          engineState
+            ? [...engineState.internalAccs, ...engineState.outsiderAccs].map((account) => account.address)
+            : []
+        )).filter(Boolean),
+      ),
+    );
+
+    if (targetAddresses.length === 0) {
+      if (!addresses) {
+        setWalletBalances({});
+        setWalletBalanceErrors({});
+        setWalletBalancePending({});
+      }
       return;
     }
 
-    const pending: Record<string, boolean> = {};
-    for (const account of accounts) pending[account.address] = true;
-    setWalletBalancePending(pending);
+    setWalletBalancePending((current) => {
+      const next = { ...current };
+      for (const address of targetAddresses) {
+        next[address] = true;
+      }
+      return next;
+    });
 
     const results = await Promise.allSettled(
-      accounts.map(async (account) => ({
-        address: account.address,
-        balance: await api<WalletBalance>(`/api/wallets/${encodeURIComponent(account.address)}/balance`),
+      targetAddresses.map(async (address) => ({
+        address,
+        balance: await api<WalletBalance>(`/api/wallets/${encodeURIComponent(address)}/balance`),
       })),
     );
 
-    const nextBalances: Record<string, WalletBalance> = {};
-    const nextErrors: Record<string, string> = {};
-    for (let index = 0; index < results.length; index += 1) {
-      const result = results[index];
-      const account = accounts[index];
-      if (result.status === 'fulfilled') {
-        nextBalances[account.address] = result.value.balance;
-      } else {
-        nextErrors[account.address] =
-          result.reason instanceof Error ? result.reason.message : 'Failed to load balance';
+    setWalletBalances((current) => {
+      const next = { ...current };
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          next[result.value.address] = result.value.balance;
+        }
       }
-    }
+      return next;
+    });
 
-    const idle: Record<string, boolean> = {};
-    for (const account of accounts) idle[account.address] = false;
-    setWalletBalances(nextBalances);
-    setWalletBalanceErrors(nextErrors);
-    setWalletBalancePending(idle);
-  }, [engineState]);
+    setWalletBalanceErrors((current) => {
+      const next = { ...current };
+      for (let index = 0; index < results.length; index += 1) {
+        const result = results[index];
+        const address = targetAddresses[index];
+        if (result.status === 'fulfilled') {
+          delete next[address];
+        } else {
+          next[address] =
+            result.reason instanceof Error ? result.reason.message : 'Failed to load balance';
+        }
+      }
+      return next;
+    });
+
+    setWalletBalancePending((current) => {
+      const next = { ...current };
+      for (const address of targetAddresses) {
+        next[address] = false;
+      }
+      return next;
+    });
+  }, [auth?.authenticated, engineState]);
+
+  const refreshInternalWalletBalances = React.useCallback(async () => {
+    if (!engineState) {
+      return;
+    }
+    await refreshWalletBalances(
+      engineState.internalAccs.map((account) => account.address),
+    );
+  }, [engineState, refreshWalletBalances]);
+
+  const refreshOutsideWalletBalances = React.useCallback(async () => {
+    await refreshWalletBalances(
+      outsideHolderPage.items.map((holder) => holder.address),
+    );
+  }, [outsideHolderPage.items, refreshWalletBalances]);
 
   useEffect(() => {
     if (!auth?.authenticated || !engineState) return;
@@ -284,6 +377,13 @@ export default function App() {
     }
     void refreshWalletBalances();
   }, [auth?.authenticated, engineState, activeTab, isAdminModalOpen, refreshWalletBalances]);
+
+  useEffect(() => {
+    if (!auth?.authenticated || activeTab !== 'accounts' || outsideHolderPage.items.length === 0) {
+      return;
+    }
+    void refreshOutsideWalletBalances();
+  }, [auth?.authenticated, activeTab, outsideHolderPage.items, refreshOutsideWalletBalances]);
 
   useEffect(() => {
     if (!auth?.authenticated) {
@@ -299,7 +399,10 @@ export default function App() {
     }
     lastWalletBalanceRefreshStatusKeyRef.current = statusKey;
     void refreshWalletBalances();
-  }, [auth?.authenticated, engineState?.marketRefreshStatus, refreshWalletBalances]);
+    if (activeTab === 'accounts') {
+      void refreshOutsideWalletBalances();
+    }
+  }, [auth?.authenticated, activeTab, engineState?.marketRefreshStatus, refreshOutsideWalletBalances, refreshWalletBalances]);
 
   const submitWithFeedback = async (name: string, action: () => Promise<void>) => {
     if (activeSubmissionRef.current) {
@@ -446,6 +549,18 @@ export default function App() {
     hasDateRange,
     loadMarketSnapshotHistory,
     settings.contractAddress,
+  ]);
+
+  useEffect(() => {
+    if (activeTab !== 'accounts') {
+      return;
+    }
+    void loadOutsideHolderPage();
+  }, [
+    activeTab,
+    loadOutsideHolderPage,
+    engineState?.tokenHolderSyncState?.updatedAt,
+    engineState?.marketRefreshStatus?.updatedAt,
   ]);
 
   useEffect(() => {
@@ -833,19 +948,9 @@ export default function App() {
       account.address.toLowerCase().includes(accountSearchTerm.toLowerCase()) ||
       account.label.toLowerCase().includes(accountSearchTerm.toLowerCase()),
   );
-  const filteredOutsideHolders = engineState.outsideTokenHolders.filter(
-    (holder) =>
-      holder.address.toLowerCase().includes(accountSearchTerm.toLowerCase()) ||
-      (holder.label ?? '').toLowerCase().includes(accountSearchTerm.toLowerCase()),
-  );
-
   const internalCurrentSlice = filteredInternal.slice(
     (internalPage - 1) * ITEMS_PER_PAGE,
     internalPage * ITEMS_PER_PAGE,
-  );
-  const outsiderCurrentSlice = filteredOutsideHolders.slice(
-    (outsiderPage - 1) * ITEMS_PER_PAGE,
-    outsiderPage * ITEMS_PER_PAGE,
   );
 
   const selectedRangeStartMs = hasDateRange ? toRangeStartMs(dateRange.from) : null;
@@ -989,29 +1094,28 @@ export default function App() {
     Boolean(activeTokenContractAddress) &&
     holderSyncRunning &&
     !engineState.tokenHolderAggregate &&
-    (engineState.outsideTokenHolders?.length ?? 0) === 0;
+    outsideHolderPage.totalItems === 0;
   const outsideHolderPartial =
     !tokenHolderAggregateLoading &&
     (
       engineState.tokenHolderAggregate?.source === 'rpc_owner_prefix_shards_partial' ||
       (
         !engineState.tokenHolderAggregate &&
-        (engineState.outsideTokenHolders?.length ?? 0) > 0
+        outsideHolderPage.totalItems > 0
       )
     );
   const outsideHolderCount =
-    engineState.tokenHolderAggregate?.activeHolderCount ??
-    ((engineState.outsideTokenHolders?.length ?? 0) > 0
-      ? engineState.outsideTokenHolders.length
+    engineState.tokenHolderAggregate?.outsiderHolderCount ??
+    (outsideHolderPage.totalItems > 0
+      ? outsideHolderPage.totalItems
       : null);
   const outsideHolderTotalAmount = engineState.tokenHolderAggregate
-    ? engineState.tokenHolderAggregate.totalAmountHolding
-    : (engineState.outsideTokenHolders?.length ?? 0) > 0
-      ? engineState.outsideTokenHolders.reduce(
-          (sum, holder) => sum + holder.amountHolding,
-          0,
-        )
-      : null;
+    ? Math.max(
+        0,
+        engineState.tokenHolderAggregate.totalAmountHolding -
+          engineState.tokenHolderAggregate.internalAmountHolding,
+      )
+    : null;
 
   const renderDashboardLogs = () => (
     <DashboardLogsSection
@@ -1099,12 +1203,19 @@ export default function App() {
       internalSummary={internalSummary}
       filteredInternal={filteredInternal}
       internalCurrentSlice={internalCurrentSlice}
-      outsideHolderRows={outsiderCurrentSlice}
-      filteredOutsideHoldersCount={filteredOutsideHolders.length}
+      outsideHolderRows={outsideHolderPage.items}
+      outsideHolderRowsTotal={outsideHolderPage.totalItems}
+      outsideHolderSort={outsideHolderSort}
+      onOutsideHolderSortChange={(value) => {
+        setOutsideHolderSort(value);
+        setOutsiderPage(1);
+      }}
       outsideHolderCount={outsideHolderCount}
       outsideHolderTotalAmount={outsideHolderTotalAmount}
-      outsideHolderLoading={tokenHolderAggregateLoading}
+      outsideHolderSummaryLoading={tokenHolderAggregateLoading}
+      outsideHolderListLoading={outsideHolderPageLoading}
       outsideHolderPartial={outsideHolderPartial}
+      activeTokenContractAddress={activeTokenContractAddress}
       activeTokenSymbol={activeTokenSymbol}
       walletBalances={walletBalances}
       walletBalanceErrors={walletBalanceErrors}
@@ -1114,7 +1225,8 @@ export default function App() {
       onInternalPageChange={setInternalPage}
       onOutsiderPageChange={setOutsiderPage}
       onOpenAdmin={() => setIsAdminModalOpen(true)}
-      onRefreshBalances={() => void refreshWalletBalances()}
+      onRefreshInternalBalances={() => void refreshInternalWalletBalances()}
+      onRefreshOutsideBalances={() => void refreshOutsideWalletBalances()}
       itemsPerPage={ITEMS_PER_PAGE}
     />
   );

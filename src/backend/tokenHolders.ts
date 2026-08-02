@@ -3,6 +3,8 @@ import { buildTokenHolderSyncSummary } from './workerCore';
 import { dbEnsureTradeDomainSchema } from './workerSchema';
 import type {
   OutsideTokenHolderRecord,
+  OutsideTokenHolderPageRecord,
+  OutsideTokenHolderSort,
   TokenHolderAggregateRecord,
   TokenHolderSyncStateRecord,
   TokenHolderSyncStatus,
@@ -885,36 +887,49 @@ export async function dbListOutsideTokenHoldersFromFinal(
   db: D1Database,
   userId: number,
   tokenId: number,
-  limit = 200,
+  limit: number | null = 200,
 ): Promise<OutsideTokenHolderRecord[]> {
   await dbEnsureTradeDomainSchema(db);
-  const rows = await db
-    .prepare(
-      `SELECT
-         tha.wallet_address,
-         tha.amount_holding,
-         tha.source,
-         tha.last_seen_at,
-         a.type AS account_type,
-         a.label AS account_label
-       FROM token_holder_addresses tha
-       LEFT JOIN accounts a
-         ON a.user_id = ?1
-        AND a.wallet_address = tha.wallet_address
-       WHERE tha.token_id = ?2
-         AND tha.amount_holding > 0
-       ORDER BY tha.amount_holding DESC, tha.last_seen_at DESC, tha.wallet_address ASC
-       LIMIT ?3`,
-    )
-    .bind(userId, tokenId, limit)
-    .all<{
-      wallet_address: string;
-      amount_holding: number;
-      source: string;
-      last_seen_at: number;
-      account_type: string | null;
-      account_label: string | null;
-    }>();
+  const baseQuery = `SELECT
+     tha.wallet_address,
+     tha.amount_holding,
+     tha.source,
+      tha.first_seen_at,
+     tha.last_seen_at,
+     a.type AS account_type,
+     a.label AS account_label
+   FROM token_holder_addresses tha
+   LEFT JOIN accounts a
+     ON a.user_id = ?1
+    AND a.wallet_address = tha.wallet_address
+   WHERE tha.token_id = ?2
+     AND tha.amount_holding > 0
+   ORDER BY tha.amount_holding DESC, tha.last_seen_at DESC, tha.wallet_address ASC`;
+  const rows = limit == null
+    ? await db
+        .prepare(baseQuery)
+        .bind(userId, tokenId)
+        .all<{
+          wallet_address: string;
+          amount_holding: number;
+          source: string;
+          first_seen_at: number | null;
+          last_seen_at: number;
+          account_type: string | null;
+          account_label: string | null;
+        }>()
+    : await db
+        .prepare(`${baseQuery}\n   LIMIT ?3`)
+        .bind(userId, tokenId, limit)
+        .all<{
+          wallet_address: string;
+          amount_holding: number;
+          source: string;
+          first_seen_at: number | null;
+          last_seen_at: number;
+          account_type: string | null;
+          account_label: string | null;
+        }>();
   return rows.results.map((row) => ({
     address: row.wallet_address,
     label: row.account_label,
@@ -926,6 +941,7 @@ export async function dbListOutsideTokenHoldersFromFinal(
         : row.account_type === 'watch'
           ? 'watch'
           : 'outside',
+    firstSeenAt: row.first_seen_at,
     updatedAt: row.last_seen_at,
   }));
 }
@@ -935,9 +951,246 @@ export async function dbListOutsideTokenHoldersFromStage(
   userId: number,
   tokenId: number,
   runId: string,
-  limit = 200,
+  limit: number | null = 200,
 ): Promise<OutsideTokenHolderRecord[]> {
   await dbEnsureTradeDomainSchema(db);
+  const baseQuery = `WITH holder_rows AS (
+     SELECT
+       wallet_address,
+       SUM(amount_holding) AS amount_holding,
+       MAX(updated_at) AS updated_at
+     FROM token_holder_sync_stage
+     WHERE token_id = ?2 AND run_id = ?3
+     GROUP BY wallet_address
+     HAVING SUM(amount_holding) > 0
+   )
+   SELECT
+     hr.wallet_address,
+     hr.amount_holding,
+     COALESCE(tha.first_seen_at, hr.updated_at) AS first_seen_at,
+     hr.updated_at,
+     a.type AS account_type,
+     a.label AS account_label
+   FROM holder_rows hr
+   LEFT JOIN token_holder_addresses tha
+     ON tha.token_id = ?2
+    AND tha.wallet_address = hr.wallet_address
+   LEFT JOIN accounts a
+     ON a.user_id = ?1
+    AND a.wallet_address = hr.wallet_address
+   ORDER BY hr.amount_holding DESC, hr.updated_at DESC, hr.wallet_address ASC`;
+  const rows = limit == null
+    ? await db
+        .prepare(baseQuery)
+        .bind(userId, tokenId, runId)
+        .all<{
+          wallet_address: string;
+          amount_holding: number;
+          first_seen_at: number | null;
+          updated_at: number;
+          account_type: string | null;
+          account_label: string | null;
+        }>()
+    : await db
+        .prepare(`${baseQuery}\n   LIMIT ?4`)
+        .bind(userId, tokenId, runId, limit)
+        .all<{
+          wallet_address: string;
+          amount_holding: number;
+          first_seen_at: number | null;
+          updated_at: number;
+          account_type: string | null;
+          account_label: string | null;
+        }>();
+  return rows.results.map((row) => ({
+    address: row.wallet_address,
+    label: row.account_label,
+    amountHolding: row.amount_holding,
+    source: 'rpc_owner_prefix_shards',
+    ownership:
+      row.account_type === 'managed'
+        ? 'internal'
+        : row.account_type === 'watch'
+          ? 'watch'
+          : 'outside',
+    firstSeenAt: row.first_seen_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+type OutsideTokenHolderPageOptions = {
+  page: number;
+  pageSize: number;
+  searchTerm?: string | null;
+  sort?: OutsideTokenHolderSort;
+};
+
+function normalizeOutsideTokenHolderPageOptions(
+  options?: OutsideTokenHolderPageOptions,
+): Required<OutsideTokenHolderPageOptions> {
+  return {
+    page: Math.max(1, options?.page ?? 1),
+    pageSize: Math.max(1, options?.pageSize ?? 20),
+    searchTerm: (options?.searchTerm ?? '').trim().toLowerCase(),
+    sort: options?.sort === 'largest' ? 'largest' : 'newest',
+  };
+}
+
+function buildOutsideTokenHolderOrderBy(sort: OutsideTokenHolderSort): string {
+  if (sort === 'largest') {
+    return 'amount_holding DESC, first_seen_at DESC, last_seen_at DESC, wallet_address ASC';
+  }
+  return 'first_seen_at DESC, last_seen_at DESC, amount_holding DESC, wallet_address ASC';
+}
+
+function mapOutsideTokenHolderRow(row: {
+  wallet_address: string;
+  amount_holding: number;
+  source: string;
+  first_seen_at: number | null;
+  last_seen_at: number;
+  account_type: string | null;
+  account_label: string | null;
+}): OutsideTokenHolderRecord {
+  return {
+    address: row.wallet_address,
+    label: row.account_label,
+    amountHolding: row.amount_holding,
+    source: row.source,
+    ownership:
+      row.account_type === 'managed'
+        ? 'internal'
+        : row.account_type === 'watch'
+          ? 'watch'
+          : 'outside',
+    firstSeenAt: row.first_seen_at,
+    updatedAt: row.last_seen_at,
+  };
+}
+
+async function dbListOutsideTokenHoldersPageFromFinal(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  options?: OutsideTokenHolderPageOptions,
+): Promise<OutsideTokenHolderPageRecord> {
+  await dbEnsureTradeDomainSchema(db);
+  const normalized = normalizeOutsideTokenHolderPageOptions(options);
+  const offset = (normalized.page - 1) * normalized.pageSize;
+  const likeSearch = `%${normalized.searchTerm}%`;
+  const orderBy = buildOutsideTokenHolderOrderBy(normalized.sort);
+
+  const countRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS cnt
+       FROM token_holder_addresses tha
+       LEFT JOIN accounts a
+         ON a.user_id = ?1
+        AND a.wallet_address = tha.wallet_address
+       WHERE tha.token_id = ?2
+         AND tha.amount_holding > 0
+           AND (a.type IS NULL OR a.type != 'managed')
+         AND (
+           ?3 = ''
+           OR LOWER(tha.wallet_address) LIKE ?4
+           OR LOWER(COALESCE(a.label, '')) LIKE ?4
+         )`,
+    )
+    .bind(userId, tokenId, normalized.searchTerm, likeSearch)
+    .first<{ cnt: number }>();
+
+  const rows = await db
+    .prepare(
+      `SELECT
+         tha.wallet_address,
+         tha.amount_holding,
+         tha.source,
+         tha.first_seen_at,
+         tha.last_seen_at,
+         a.type AS account_type,
+         a.label AS account_label
+       FROM token_holder_addresses tha
+       LEFT JOIN accounts a
+         ON a.user_id = ?1
+        AND a.wallet_address = tha.wallet_address
+       WHERE tha.token_id = ?2
+         AND tha.amount_holding > 0
+         AND (a.type IS NULL OR a.type != 'managed')
+         AND (
+           ?3 = ''
+           OR LOWER(tha.wallet_address) LIKE ?4
+           OR LOWER(COALESCE(a.label, '')) LIKE ?4
+         )
+       ORDER BY ${orderBy}
+       LIMIT ?5 OFFSET ?6`,
+    )
+    .bind(
+      userId,
+      tokenId,
+      normalized.searchTerm,
+      likeSearch,
+      normalized.pageSize,
+      offset,
+    )
+    .all<{
+      wallet_address: string;
+      amount_holding: number;
+      source: string;
+      first_seen_at: number | null;
+      last_seen_at: number;
+      account_type: string | null;
+      account_label: string | null;
+    }>();
+
+  return {
+    items: rows.results.map(mapOutsideTokenHolderRow),
+    page: normalized.page,
+    pageSize: normalized.pageSize,
+    totalItems: countRow?.cnt ?? 0,
+  };
+}
+
+async function dbListOutsideTokenHoldersPageFromStage(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  runId: string,
+  options?: OutsideTokenHolderPageOptions,
+): Promise<OutsideTokenHolderPageRecord> {
+  await dbEnsureTradeDomainSchema(db);
+  const normalized = normalizeOutsideTokenHolderPageOptions(options);
+  const offset = (normalized.page - 1) * normalized.pageSize;
+  const likeSearch = `%${normalized.searchTerm}%`;
+  const orderBy = buildOutsideTokenHolderOrderBy(normalized.sort);
+
+  const countRow = await db
+    .prepare(
+      `WITH holder_rows AS (
+         SELECT
+           wallet_address,
+           SUM(amount_holding) AS amount_holding,
+           MAX(updated_at) AS updated_at
+         FROM token_holder_sync_stage
+         WHERE token_id = ?2 AND run_id = ?3
+         GROUP BY wallet_address
+         HAVING SUM(amount_holding) > 0
+       )
+       SELECT COUNT(*) AS cnt
+       FROM holder_rows hr
+       LEFT JOIN accounts a
+         ON a.user_id = ?1
+        AND a.wallet_address = hr.wallet_address
+       WHERE
+         (a.type IS NULL OR a.type != 'managed')
+         AND (
+           ?4 = ''
+           OR LOWER(hr.wallet_address) LIKE ?5
+           OR LOWER(COALESCE(a.label, '')) LIKE ?5
+         )`,
+    )
+    .bind(userId, tokenId, runId, normalized.searchTerm, likeSearch)
+    .first<{ cnt: number }>();
+
   const rows = await db
     .prepare(
       `WITH holder_rows AS (
@@ -953,64 +1206,91 @@ export async function dbListOutsideTokenHoldersFromStage(
        SELECT
          hr.wallet_address,
          hr.amount_holding,
-         hr.updated_at,
+         'rpc_owner_prefix_shards' AS source,
+         COALESCE(tha.first_seen_at, hr.updated_at) AS first_seen_at,
+         hr.updated_at AS last_seen_at,
          a.type AS account_type,
          a.label AS account_label
        FROM holder_rows hr
+       LEFT JOIN token_holder_addresses tha
+         ON tha.token_id = ?2
+        AND tha.wallet_address = hr.wallet_address
        LEFT JOIN accounts a
          ON a.user_id = ?1
         AND a.wallet_address = hr.wallet_address
-       ORDER BY hr.amount_holding DESC, hr.updated_at DESC, hr.wallet_address ASC
-       LIMIT ?4`,
+       WHERE
+         (a.type IS NULL OR a.type != 'managed')
+         AND (
+           ?4 = ''
+           OR LOWER(hr.wallet_address) LIKE ?5
+           OR LOWER(COALESCE(a.label, '')) LIKE ?5
+         )
+       ORDER BY ${orderBy}
+       LIMIT ?6 OFFSET ?7`,
     )
-    .bind(userId, tokenId, runId, limit)
+    .bind(
+      userId,
+      tokenId,
+      runId,
+      normalized.searchTerm,
+      likeSearch,
+      normalized.pageSize,
+      offset,
+    )
     .all<{
       wallet_address: string;
       amount_holding: number;
-      updated_at: number;
+      source: string;
+      first_seen_at: number | null;
+      last_seen_at: number;
       account_type: string | null;
       account_label: string | null;
     }>();
-  return rows.results.map((row) => ({
-    address: row.wallet_address,
-    label: row.account_label,
-    amountHolding: row.amount_holding,
-    source: 'rpc_owner_prefix_shards',
-    ownership:
-      row.account_type === 'managed'
-        ? 'internal'
-        : row.account_type === 'watch'
-          ? 'watch'
-          : 'outside',
-    updatedAt: row.updated_at,
-  }));
+
+  return {
+    items: rows.results.map(mapOutsideTokenHolderRow),
+    page: normalized.page,
+    pageSize: normalized.pageSize,
+    totalItems: countRow?.cnt ?? 0,
+  };
+}
+
+export async function dbListOutsideTokenHoldersPage(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  options?: OutsideTokenHolderPageOptions,
+): Promise<OutsideTokenHolderPageRecord> {
+  const syncState = await dbGetTokenHolderSyncState(db, tokenId);
+  if (
+    syncState?.runId &&
+    (syncState.status === 'running' || syncState.status === 'failed')
+  ) {
+    const stagePage = await dbListOutsideTokenHoldersPageFromStage(
+      db,
+      userId,
+      tokenId,
+      syncState.runId,
+      options,
+    );
+    if (stagePage.totalItems > 0) {
+      return stagePage;
+    }
+  }
+  return dbListOutsideTokenHoldersPageFromFinal(db, userId, tokenId, options);
 }
 
 export async function dbListOutsideTokenHolders(
   db: D1Database,
   userId: number,
   tokenId: number,
-  limit = 200,
+  limit: number | null = 200,
 ): Promise<OutsideTokenHolderRecord[]> {
-  const syncState = await dbGetTokenHolderSyncState(db, tokenId);
-  // 【核心修复】：只有在 Stage 阶段查到了有效行数据时才返回 Stage，
-  // 否则在分片未准备好之前，平滑回退到 Final 表，避免查询返回 0 条。
-  if (
-    syncState?.runId &&
-    (syncState.status === 'running' || syncState.status === 'failed')
-  ) {
-    const stageRows = await dbListOutsideTokenHoldersFromStage(
-      db,
-      userId,
-      tokenId,
-      syncState.runId,
-      limit,
-    );
-    if (stageRows.length > 0) {
-      return stageRows;
-    }
-  }
-  return dbListOutsideTokenHoldersFromFinal(db, userId, tokenId, limit);
+  const page = await dbListOutsideTokenHoldersPage(db, userId, tokenId, {
+    page: 1,
+    pageSize: limit == null ? Number.MAX_SAFE_INTEGER : limit,
+  });
+  return page.items;
 }
 
 /**

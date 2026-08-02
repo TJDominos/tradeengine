@@ -151,7 +151,15 @@ export type OutsideTokenHolder = {
   amountHolding: number;
   source: string;
   ownership: 'internal' | 'watch' | 'outside';
+  firstSeenAt: number | null;
   updatedAt: number;
+};
+
+export type OutsideTokenHolderPage = {
+  items: OutsideTokenHolder[];
+  page: number;
+  pageSize: number;
+  totalItems: number;
 };
 
 export type TradableToken = {

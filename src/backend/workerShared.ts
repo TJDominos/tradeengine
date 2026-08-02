@@ -140,8 +140,16 @@ export interface OutsideTokenHolderRecord {
   amountHolding: number;
   source: string;
   ownership: 'internal' | 'watch' | 'outside';
+  firstSeenAt: number | null;
   updatedAt: number;
 }
+export interface OutsideTokenHolderPageRecord {
+  items: OutsideTokenHolderRecord[];
+  page: number;
+  pageSize: number;
+  totalItems: number;
+}
+export type OutsideTokenHolderSort = 'newest' | 'largest';
 export type TokenHolderSyncStatus = 'idle' | 'running' | 'completed' | 'failed';
 export interface TokenHolderSyncStateRecord {
   tokenId: number;

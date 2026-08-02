@@ -82,6 +82,7 @@ import {
   dbGetTokenHolderSyncState,
   dbHasTokenHolderRows,
   dbListOutsideTokenHolders,
+  dbListOutsideTokenHoldersPage,
   dbPutTokenHolderSyncState,
   dbRecomputeTokenHolderAggregate,
   dbStartOrResumeTokenHolderSync,
@@ -109,6 +110,7 @@ import type {
   MarketRefreshStatusRecord,
   ManagedWalletImportRequest,
   OutsideTokenHolderRecord,
+  OutsideTokenHolderSort,
   RpcEndpoint,
   RpcEndpointCreateRequest,
   SessionUser,
@@ -4574,7 +4576,7 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
   let tokenHolderAggregate: TokenHolderAggregateRecord | null = null;
   let tokenHolderSyncState: TokenHolderSyncStateRecord | null = null;
   let marketRefreshStatus: MarketRefreshStatusRecord | null = null;
-  let outsideTokenHolders: OutsideTokenHolderRecord[] = [];
+  const outsideTokenHolders: OutsideTokenHolderRecord[] = [];
   let tokenId: number | null = null;
   if (settings.contractAddress.trim()) {
     try {
@@ -4636,11 +4638,6 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
             },
           );
         }
-        outsideTokenHolders = await dbListOutsideTokenHolders(
-          env.TRADINGBOT_DB,
-          user.id,
-          tokenId,
-        );
       }
     } catch (err: unknown) {
       console.warn(
@@ -4711,6 +4708,58 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
       databaseConnected: true,
     },
   });
+}
+
+// GET /api/token-holders
+async function handleGetTokenHolders(
+  request: Request,
+  url: URL,
+  env: Env,
+): Promise<Response> {
+  const user = await requireUser(request, env);
+  const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+  const normalizedContractAddress = settings.contractAddress.trim();
+  if (!normalizedContractAddress) {
+    return jsonResponse({
+      items: [],
+      page: 1,
+      pageSize: 20,
+      totalItems: 0,
+    });
+  }
+
+  const tokenId = await dbResolveTradableTokenId(
+    env.TRADINGBOT_DB,
+    normalizedContractAddress,
+  );
+  if (!tokenId) {
+    return jsonResponse({
+      items: [],
+      page: 1,
+      pageSize: 20,
+      totalItems: 0,
+    });
+  }
+
+  const page = Number.parseInt(url.searchParams.get('page') ?? '1', 10);
+  const pageSize = Number.parseInt(url.searchParams.get('pageSize') ?? '20', 10);
+  const searchTerm = url.searchParams.get('search') ?? '';
+  const sortParam = url.searchParams.get('sort');
+  const sort: OutsideTokenHolderSort = sortParam === 'largest' ? 'largest' : 'newest';
+
+  const result = await dbListOutsideTokenHoldersPage(
+    env.TRADINGBOT_DB,
+    user.id,
+    tokenId,
+    {
+      page: Number.isFinite(page) ? page : 1,
+      pageSize: Math.min(Math.max(Number.isFinite(pageSize) ? pageSize : 20, 1), 20),
+      searchTerm,
+      sort,
+    },
+  );
+
+  return jsonResponse(result);
 }
 
 // POST /api/settings
@@ -5871,6 +5920,8 @@ async function handleApi(
       return await handleLogout(request, env);
     if (method === 'GET' && pathname === '/api/state')
       return await handleGetState(request, env);
+    if (method === 'GET' && pathname === '/api/token-holders')
+      return await handleGetTokenHolders(request, url, env);
     if (method === 'POST' && pathname === '/api/webhooks/alchemy/notify')
       return await handleAlchemyNotifyWebhook(request, url, env, ctx);
     if (method === 'POST' && pathname === '/api/settings/active-token')
