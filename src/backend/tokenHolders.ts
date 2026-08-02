@@ -1036,11 +1036,19 @@ function normalizeOutsideTokenHolderPageOptions(
   };
 }
 
-function buildOutsideTokenHolderOrderBy(sort: OutsideTokenHolderSort): string {
+function buildOutsideTokenHolderOrderBy(
+  sort: OutsideTokenHolderSort,
+  columns: {
+    amountHolding: string;
+    firstSeenAt: string;
+    lastSeenAt: string;
+    walletAddress: string;
+  },
+): string {
   if (sort === 'largest') {
-    return 'amount_holding DESC, first_seen_at DESC, last_seen_at DESC, wallet_address ASC';
+    return `${columns.amountHolding} DESC, ${columns.firstSeenAt} DESC, ${columns.lastSeenAt} DESC, ${columns.walletAddress} ASC`;
   }
-  return 'first_seen_at DESC, last_seen_at DESC, amount_holding DESC, wallet_address ASC';
+  return `${columns.firstSeenAt} DESC, ${columns.lastSeenAt} DESC, ${columns.amountHolding} DESC, ${columns.walletAddress} ASC`;
 }
 
 function mapOutsideTokenHolderRow(row: {
@@ -1078,7 +1086,12 @@ async function dbListOutsideTokenHoldersPageFromFinal(
   const normalized = normalizeOutsideTokenHolderPageOptions(options);
   const offset = (normalized.page - 1) * normalized.pageSize;
   const likeSearch = `%${normalized.searchTerm}%`;
-  const orderBy = buildOutsideTokenHolderOrderBy(normalized.sort);
+  const orderBy = buildOutsideTokenHolderOrderBy(normalized.sort, {
+    amountHolding: 'tha.amount_holding',
+    firstSeenAt: 'tha.first_seen_at',
+    lastSeenAt: 'tha.last_seen_at',
+    walletAddress: 'tha.wallet_address',
+  });
 
   const countRow = await db
     .prepare(
@@ -1161,7 +1174,12 @@ async function dbListOutsideTokenHoldersPageFromStage(
   const normalized = normalizeOutsideTokenHolderPageOptions(options);
   const offset = (normalized.page - 1) * normalized.pageSize;
   const likeSearch = `%${normalized.searchTerm}%`;
-  const orderBy = buildOutsideTokenHolderOrderBy(normalized.sort);
+  const orderBy = buildOutsideTokenHolderOrderBy(normalized.sort, {
+    amountHolding: 'hr.amount_holding',
+    firstSeenAt: 'first_seen_at',
+    lastSeenAt: 'last_seen_at',
+    walletAddress: 'hr.wallet_address',
+  });
 
   const countRow = await db
     .prepare(
