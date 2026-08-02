@@ -150,7 +150,7 @@ export type OutsideTokenHolder = {
   label: string | null;
   amountHolding: number;
   source: string;
-  ownership: 'internal' | 'watch' | 'outside';
+  ownership: 'internal' | 'outside';
   firstSeenAt: number | null;
   updatedAt: number;
 };
@@ -206,7 +206,6 @@ export type EngineState = {
   auth: { username: string; role: string };
   settings: SettingsState;
   internalAccs: AccountRecord[];
-  outsiderAccs: AccountRecord[];
   activityLogs: AuditLog[];
   tradeLogs: TradeLog[];
   webhookTransactionLogs: WebhookTransactionLog[];
@@ -225,7 +224,6 @@ export type EngineState = {
   profitUsdc: number;
   stats: {
     managedAccounts: number;
-    watchedAccounts: number;
     tradeExecutionEnabled: boolean;
   };
   system: {

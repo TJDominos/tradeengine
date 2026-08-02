@@ -119,13 +119,6 @@ export function formatWebhookEventLabel(eventType: string) {
 export function buildWalletOwnershipLookup(engineState: EngineState): Map<string, WalletOwnershipMeta> {
   const lookup = new Map<string, WalletOwnershipMeta>();
 
-  for (const account of engineState.outsiderAccs) {
-    lookup.set(account.address, {
-      ownership: 'external',
-      accountLabel: account.label,
-    });
-  }
-
   for (const account of engineState.internalAccs) {
     lookup.set(account.address, {
       ownership: 'internal',

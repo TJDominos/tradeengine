@@ -59,7 +59,6 @@ import {
   dbGetUserBySessionToken,
   dbImportManagedKey,
   dbImportManagedKeyBytes,
-  dbImportWatchAccount,
   dbListAccounts,
   dbListAuditLogs,
   dbListManagedAccountAddresses,
@@ -4549,7 +4548,6 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
   ).catch(() => null);
   let [
     internalAccs,
-    outsiderAccs,
     activityLogs,
     tradeLogs,
     webhookTransactionLogs,
@@ -4561,7 +4559,6 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
   ] =
     await Promise.all([
       dbListAccounts(env.TRADINGBOT_DB, user.id, 'managed'),
-      dbListAccounts(env.TRADINGBOT_DB, user.id, 'watch'),
       dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
       dbListTradeLogs(env.TRADINGBOT_DB),
       dbListWebhookTransactionLogs(env.TRADINGBOT_DB, user.id),
@@ -4679,7 +4676,6 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     auth: { username: user.username, role: user.role },
     settings,
     internalAccs,
-    outsiderAccs,
     logs: activityLogs,
     activityLogs,
     tradeLogs,
@@ -4699,7 +4695,6 @@ async function handleGetState(request: Request, env: Env): Promise<Response> {
     profitUsdc,
     stats: {
       managedAccounts: internalAccs.length,
-      watchedAccounts: outsiderAccs.length,
       tradeExecutionEnabled: false,
     },
     system: {
@@ -5555,29 +5550,6 @@ async function handleDeleteRpcEndpoint(
   return jsonResponse({ success: true });
 }
 
-// POST /api/accounts/import
-async function handleImportAccount(
-  request: Request,
-  env: Env,
-): Promise<Response> {
-  const user = await requireAdmin(request, env);
-  const body = await request.json<{ label: string; address: string }>();
-  const account = await dbImportWatchAccount(
-    env.TRADINGBOT_DB,
-    user.id,
-    body.label,
-    body.address,
-  );
-  await dbAddAuditLog(
-    env.TRADINGBOT_DB,
-    user.id,
-    'account.imported',
-    account.address,
-    `Imported watch-only account '${account.label}'.`,
-  );
-  return jsonResponse({ account }, 201);
-}
-
 // POST /api/trade
 async function handleTrade(request: Request, env: Env): Promise<Response> {
   if (!env.PRIVATE_KEY_ENCRYPTION_KEY) {
@@ -5946,8 +5918,6 @@ async function handleApi(
       return await handleImportManagedWallet(request, env);
     if (method === 'POST' && pathname === '/api/admin/private-keys')
       return await handleImportManagedWallet(request, env);
-    if (method === 'POST' && pathname === '/api/accounts/import')
-      return await handleImportAccount(request, env);
     if (method === 'POST' && pathname === '/api/trade')
       return await handleTrade(request, env);
     if (method === 'POST' && pathname === '/api/admin/password')

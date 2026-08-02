@@ -118,7 +118,6 @@ export default function App() {
     contractAddress: '',
   });
   const [rpcEndpointForm, setRpcEndpointForm] = React.useState({ url: '' });
-  const [accountForm, setAccountForm] = React.useState({ label: '', address: '' });
   const [strategyDraft, setStrategyDraft] = React.useState<StrategyVersionDocument | null>(null);
 
   const [tradingAlgorithm, setTradingAlgorithm] = React.useState(workerAlgorithmTemplate);
@@ -291,7 +290,7 @@ export default function App() {
       new Set(
         (addresses ?? (
           engineState
-            ? [...engineState.internalAccs, ...engineState.outsiderAccs].map((account) => account.address)
+            ? engineState.internalAccs.map((account) => account.address)
             : []
         )).filter(Boolean),
       ),
@@ -770,18 +769,6 @@ export default function App() {
             : 'Token saved as active. Market data refresh now runs only on manual refresh or webhook events.',
       );
       await refresh();
-    });
-
-  const handleImportAccount = () =>
-    submitWithFeedback('account', async () => {
-      await api('/api/accounts/import', {
-        method: 'POST',
-        body: JSON.stringify(accountForm),
-      });
-      setAccountForm({ label: '', address: '' });
-      setNotice('Watch-only account imported.');
-      await refresh();
-      await refreshWalletBalances();
     });
 
   const handleAdminPasswordChange = async () => {

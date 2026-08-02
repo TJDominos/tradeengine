@@ -935,12 +935,7 @@ export async function dbListOutsideTokenHoldersFromFinal(
     label: row.account_label,
     amountHolding: row.amount_holding,
     source: row.source,
-    ownership:
-      row.account_type === 'managed'
-        ? 'internal'
-        : row.account_type === 'watch'
-          ? 'watch'
-          : 'outside',
+    ownership: row.account_type === 'managed' ? 'internal' : 'outside',
     firstSeenAt: row.first_seen_at,
     updatedAt: row.last_seen_at,
   }));
@@ -1007,12 +1002,7 @@ export async function dbListOutsideTokenHoldersFromStage(
     label: row.account_label,
     amountHolding: row.amount_holding,
     source: 'rpc_owner_prefix_shards',
-    ownership:
-      row.account_type === 'managed'
-        ? 'internal'
-        : row.account_type === 'watch'
-          ? 'watch'
-          : 'outside',
+    ownership: row.account_type === 'managed' ? 'internal' : 'outside',
     firstSeenAt: row.first_seen_at,
     updatedAt: row.updated_at,
   }));
@@ -1065,12 +1055,7 @@ function mapOutsideTokenHolderRow(row: {
     label: row.account_label,
     amountHolding: row.amount_holding,
     source: row.source,
-    ownership:
-      row.account_type === 'managed'
-        ? 'internal'
-        : row.account_type === 'watch'
-          ? 'watch'
-          : 'outside',
+    ownership: row.account_type === 'managed' ? 'internal' : 'outside',
     firstSeenAt: row.first_seen_at,
     updatedAt: row.last_seen_at,
   };

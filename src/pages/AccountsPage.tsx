@@ -242,10 +242,12 @@ export default function AccountsPage({
                 const balance = walletBalances[holder.address];
                 const pending = walletBalancePending[holder.address];
                 const balanceError = walletBalanceErrors[holder.address];
+                const holderTypeLabel = holder.ownership === 'internal' ? 'Internal' : 'Outside';
+                const holderTypeClass = holder.ownership === 'internal' ? 'text-emerald-300' : 'text-sky-300';
                 return (
                   <tr key={holder.address} className="transition-colors hover:bg-slate-800/50">
-                    <td className={`px-4 py-2 text-xs font-medium ${holder.ownership === 'watch' ? 'text-amber-300' : 'text-sky-300'}`}>
-                      {holder.ownership === 'watch' ? 'Watch' : 'Outside'}
+                    <td className={`px-4 py-2 text-xs font-medium ${holderTypeClass}`}>
+                      {holderTypeLabel}
                     </td>
                     <td className="px-4 py-2 text-xs font-bold text-slate-200">{holder.label ?? '-'}</td>
                     <td className="px-4 py-2 font-mono text-xs text-slate-400">{compactAddress(holder.address)}</td>

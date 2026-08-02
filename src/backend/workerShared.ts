@@ -139,7 +139,7 @@ export interface OutsideTokenHolderRecord {
   label: string | null;
   amountHolding: number;
   source: string;
-  ownership: 'internal' | 'watch' | 'outside';
+  ownership: 'internal' | 'outside';
   firstSeenAt: number | null;
   updatedAt: number;
 }
