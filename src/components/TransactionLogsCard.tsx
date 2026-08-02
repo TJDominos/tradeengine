@@ -13,11 +13,13 @@ import Pagination from './Pagination';
 
 type TransactionLogsCardProps = {
   currentTransactionLogs: DashboardTransactionLog[];
+  totalTransactionLogsCount: number;
   filteredTransactionLogsCount: number;
   transactionLogSearchTerm: string;
   onTransactionLogSearchTermChange: (value: string) => void;
   transactionLogCurrentPage: number;
   onTransactionLogPageChange: (page: number) => void;
+  transactionLogDateFilterActive: boolean;
   itemsPerPage: number;
   activeTokenPriceUsd: number | null;
   onTransactionAddressClick: (address: string) => void;
@@ -26,16 +28,29 @@ type TransactionLogsCardProps = {
 
 export default function TransactionLogsCard({
   currentTransactionLogs,
+  totalTransactionLogsCount,
   filteredTransactionLogsCount,
   transactionLogSearchTerm,
   onTransactionLogSearchTermChange,
   transactionLogCurrentPage,
   onTransactionLogPageChange,
+  transactionLogDateFilterActive,
   itemsPerPage,
   activeTokenPriceUsd,
   onTransactionAddressClick,
   walletOwnershipLookup,
 }: TransactionLogsCardProps) {
+  const hasSearchFilter = transactionLogSearchTerm.trim().length > 0;
+  const emptyStateMessage = totalTransactionLogsCount === 0
+    ? 'No trade or webhook records yet.'
+    : filteredTransactionLogsCount === 0 && hasSearchFilter && transactionLogDateFilterActive
+      ? 'No transaction logs match the current search in the selected date range.'
+      : filteredTransactionLogsCount === 0 && hasSearchFilter
+        ? 'No transaction logs match the current search.'
+        : filteredTransactionLogsCount === 0 && transactionLogDateFilterActive
+          ? 'No transaction logs fall within the selected date range.'
+          : 'No trade or webhook records yet.';
+
   const handleCopyAddress = async (address: string) => {
     try {
       await navigator.clipboard.writeText(address);
@@ -228,7 +243,7 @@ export default function TransactionLogsCard({
             {currentTransactionLogs.length === 0 ? (
               <tr>
                 <td colSpan={10} className="py-8 text-center text-sm text-slate-500">
-                  No trade or webhook records yet.
+                  {emptyStateMessage}
                 </td>
               </tr>
             ) : null}

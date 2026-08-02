@@ -14,11 +14,13 @@ type DashboardLogsSectionProps = {
   dashboardLogTab: DashboardLogTab;
   onDashboardLogTabChange: (tab: DashboardLogTab) => void;
   currentTransactionLogs: DashboardTransactionLog[];
+  totalTransactionLogsCount: number;
   filteredTransactionLogsCount: number;
   transactionLogSearchTerm: string;
   onTransactionLogSearchTermChange: (value: string) => void;
   transactionLogCurrentPage: number;
   onTransactionLogPageChange: (page: number) => void;
+  transactionLogDateFilterActive: boolean;
   activeTokenPriceUsd: number | null;
   onTransactionAddressClick: (address: string) => void;
   walletOwnershipLookup: Map<string, WalletOwnershipMeta>;
@@ -35,11 +37,13 @@ export default function DashboardLogsSection({
   dashboardLogTab,
   onDashboardLogTabChange,
   currentTransactionLogs,
+  totalTransactionLogsCount,
   filteredTransactionLogsCount,
   transactionLogSearchTerm,
   onTransactionLogSearchTermChange,
   transactionLogCurrentPage,
   onTransactionLogPageChange,
+  transactionLogDateFilterActive,
   activeTokenPriceUsd,
   onTransactionAddressClick,
   walletOwnershipLookup,
@@ -70,11 +74,13 @@ export default function DashboardLogsSection({
       {dashboardLogTab === 'transaction' ? (
         <TransactionLogsCard
           currentTransactionLogs={currentTransactionLogs}
+          totalTransactionLogsCount={totalTransactionLogsCount}
           filteredTransactionLogsCount={filteredTransactionLogsCount}
           transactionLogSearchTerm={transactionLogSearchTerm}
           onTransactionLogSearchTermChange={onTransactionLogSearchTermChange}
           transactionLogCurrentPage={transactionLogCurrentPage}
           onTransactionLogPageChange={onTransactionLogPageChange}
+          transactionLogDateFilterActive={transactionLogDateFilterActive}
           itemsPerPage={itemsPerPage}
           activeTokenPriceUsd={activeTokenPriceUsd}
           onTransactionAddressClick={onTransactionAddressClick}

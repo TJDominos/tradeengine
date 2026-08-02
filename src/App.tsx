@@ -1049,9 +1049,12 @@ export default function App() {
       (log.errorMessage ?? '').toLowerCase().includes(term)
     );
   });
+  const transactionLogPage = filteredTransactionLogs.length > 0
+    ? Math.min(transactionLogCurrentPage, Math.ceil(filteredTransactionLogs.length / ITEMS_PER_PAGE))
+    : 1;
   const currentTransactionLogs = filteredTransactionLogs.slice(
-    (transactionLogCurrentPage - 1) * ITEMS_PER_PAGE,
-    transactionLogCurrentPage * ITEMS_PER_PAGE,
+    (transactionLogPage - 1) * ITEMS_PER_PAGE,
+    transactionLogPage * ITEMS_PER_PAGE,
   );
 
   const filteredActivityLogs = engineState.activityLogs.filter(
@@ -1062,9 +1065,12 @@ export default function App() {
         log.details.toLowerCase().includes(activityLogSearchTerm.toLowerCase())
       ),
   );
+  const activityLogPage = filteredActivityLogs.length > 0
+    ? Math.min(activityLogCurrentPage, Math.ceil(filteredActivityLogs.length / ITEMS_PER_PAGE))
+    : 1;
   const currentActivityLogs = filteredActivityLogs.slice(
-    (activityLogCurrentPage - 1) * ITEMS_PER_PAGE,
-    activityLogCurrentPage * ITEMS_PER_PAGE,
+    (activityLogPage - 1) * ITEMS_PER_PAGE,
+    activityLogPage * ITEMS_PER_PAGE,
   );
 
   const activeTokenContractAddress = settings.contractAddress.trim();
@@ -1122,14 +1128,16 @@ export default function App() {
       dashboardLogTab={dashboardLogTab}
       onDashboardLogTabChange={setDashboardLogTab}
       currentTransactionLogs={currentTransactionLogs}
+      totalTransactionLogsCount={combinedTransactionLogs.length}
       filteredTransactionLogsCount={filteredTransactionLogs.length}
       transactionLogSearchTerm={transactionLogSearchTerm}
       onTransactionLogSearchTermChange={(value) => {
         setTransactionLogSearchTerm(value);
         setTransactionLogCurrentPage(1);
       }}
-      transactionLogCurrentPage={transactionLogCurrentPage}
+      transactionLogCurrentPage={transactionLogPage}
       onTransactionLogPageChange={setTransactionLogCurrentPage}
+      transactionLogDateFilterActive={hasDateRange}
       activeTokenPriceUsd={dashboardSnapshot?.priceUsd ?? engineState.marketSnapshot?.priceUsd ?? null}
       onTransactionAddressClick={(address) => {
         setAccountSearchTerm(address);
@@ -1145,7 +1153,7 @@ export default function App() {
         setActivityLogSearchTerm(value);
         setActivityLogCurrentPage(1);
       }}
-      activityLogCurrentPage={activityLogCurrentPage}
+      activityLogCurrentPage={activityLogPage}
       onActivityLogPageChange={setActivityLogCurrentPage}
       itemsPerPage={ITEMS_PER_PAGE}
     />

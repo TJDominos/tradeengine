@@ -107,6 +107,8 @@ export default function AccountsPage({
       : outsideHolderCount != null
         ? 'Ready'
         : 'Unavailable';
+  const tokenAmountSortActive = outsideHolderSort === 'largest';
+  const newestSortActive = outsideHolderSort === 'newest';
 
   return (
     <div className="space-y-6">
@@ -188,17 +190,6 @@ export default function AccountsPage({
             <span className="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-400">{outsideHolderRowsTotal} found</span>
           </h3>
           <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Sort
-              <select
-                value={outsideHolderSort}
-                onChange={(event) => onOutsideHolderSortChange(event.target.value as 'newest' | 'largest')}
-                className="h-9 rounded-md border border-slate-700 bg-slate-800 px-3 text-sm font-medium normal-case text-slate-200 outline-none focus:border-blue-500"
-              >
-                <option value="newest">New</option>
-                <option value="largest">Token amount</option>
-              </select>
-            </label>
             <button
               onClick={onRefreshOutsideBalances}
               className="flex h-9 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm text-white hover:bg-slate-700"
@@ -214,10 +205,34 @@ export default function AccountsPage({
                 <th className="px-4 py-3 font-medium">Type</th>
                 <th className="px-4 py-3 font-medium">Label</th>
                 <th className="px-4 py-3 font-medium">Wallet / Address</th>
-                <th className="px-4 py-3 text-right font-medium text-amber-300">Token Amount</th>
+                <th className="px-4 py-3 text-right font-medium">
+                  <button
+                    type="button"
+                    onClick={() => onOutsideHolderSortChange('largest')}
+                    aria-pressed={tokenAmountSortActive}
+                    className={`inline-flex w-full items-center justify-end gap-1 transition ${
+                      tokenAmountSortActive ? 'text-amber-300' : 'text-slate-400 hover:text-amber-300'
+                    }`}
+                  >
+                    <span>Token Amount</span>
+                    <span aria-hidden="true">↓</span>
+                  </button>
+                </th>
                 <th className="px-4 py-3 text-right font-medium text-blue-400">USDC Bal</th>
                 <th className="px-4 py-3 text-right font-medium text-amber-400">SOL Bal</th>
-                <th className="px-4 py-3 text-right font-medium">New</th>
+                <th className="px-4 py-3 text-right font-medium">
+                  <button
+                    type="button"
+                    onClick={() => onOutsideHolderSortChange('newest')}
+                    aria-pressed={newestSortActive}
+                    className={`inline-flex w-full items-center justify-end gap-1 transition ${
+                      newestSortActive ? 'text-blue-400' : 'text-slate-400 hover:text-blue-300'
+                    }`}
+                  >
+                    <span>New</span>
+                    <span aria-hidden="true">↓</span>
+                  </button>
+                </th>
                 <th className="px-4 py-3 font-medium">Source</th>
                 <th className="px-4 py-3 text-right font-medium">Updated</th>
               </tr>
