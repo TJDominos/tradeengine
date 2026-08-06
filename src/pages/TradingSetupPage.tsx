@@ -1,5 +1,5 @@
 import React from 'react';
-import { Code, Plus, Settings, Trash2 } from 'lucide-react';
+import { Plus, Settings, Trash2 } from 'lucide-react';
 
 import type { EngineState, StrategyVersionDocument } from '../app/types';
 import StrategySchemaForm from '../components/StrategySchemaForm';
@@ -18,10 +18,6 @@ type TradingSetupPageProps = {
   handleDeleteRpcEndpoint: (endpointId: number) => void;
   updateStrategyDraft: (updater: (current: StrategyVersionDocument) => StrategyVersionDocument) => void;
   handleSaveConfig: () => void;
-  tradingAlgorithm: string;
-  setTradingAlgorithm: React.Dispatch<React.SetStateAction<string>>;
-  onPersistAlgorithm: () => void;
-  onOpenSimulation: () => void;
   activeStrategyVersionNo: number | null;
   activeStrategyStatus: string | null;
 };
@@ -40,15 +36,11 @@ export default function TradingSetupPage({
   handleDeleteRpcEndpoint,
   updateStrategyDraft,
   handleSaveConfig,
-  tradingAlgorithm,
-  setTradingAlgorithm,
-  onPersistAlgorithm,
-  onOpenSimulation,
   activeStrategyVersionNo,
   activeStrategyStatus,
 }: TradingSetupPageProps) {
   return (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+    <div className="grid grid-cols-1 gap-6">
       <div className="h-fit space-y-5 rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-sm">
         <h3 className="flex items-center gap-2 border-b border-slate-800 pb-4 text-lg font-semibold">
           <Settings size={18} /> Strategy Editor
@@ -254,32 +246,6 @@ export default function TradingSetupPage({
             className="h-11 w-full cursor-pointer rounded-md border border-blue-500 bg-blue-600 font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60"
           >
             {submitting === 'settings' ? 'Saving...' : 'Save and Activate Strategy Version'}
-          </button>
-        </div>
-      </div>
-
-      <div className="flex min-h-[500px] flex-col rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-sm">
-        <h3 className="flex items-center gap-2 border-b border-slate-800 pb-4 text-lg font-semibold">
-          <Code size={18} /> Trading Algorithm (Cloudflare + Helius)
-        </h3>
-        <textarea
-          className="mt-4 flex-1 resize-none rounded-md border border-slate-700 bg-slate-950 p-4 font-mono text-[13px] leading-relaxed text-emerald-400 outline-none focus:border-blue-500"
-          value={tradingAlgorithm}
-          onChange={(event) => setTradingAlgorithm(event.target.value)}
-          placeholder="// Write your trading algorithm logic here"
-        ></textarea>
-        <div className="mt-4 flex gap-3 border-t border-slate-800 pt-4">
-          <button
-            onClick={onPersistAlgorithm}
-            className="h-10 flex-1 cursor-pointer rounded-md bg-emerald-600 font-medium text-white shadow-sm hover:bg-emerald-700"
-          >
-            Update
-          </button>
-          <button
-            onClick={onOpenSimulation}
-            className="h-10 flex-1 cursor-pointer rounded-md border border-slate-700 bg-slate-800 font-medium text-white shadow-sm hover:bg-slate-700"
-          >
-            Simulation Summary
           </button>
         </div>
       </div>

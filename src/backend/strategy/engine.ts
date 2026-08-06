@@ -1,4 +1,12 @@
 import {
+  BaseTradingStrategy,
+  type StrategyLifecycleState,
+  type TradingStrategyContext,
+} from './algorithms/baseStrategy';
+import { AccumulationStrategy } from './algorithms/accumulation';
+import { DistributionStrategy } from './algorithms/distribution';
+import { ShakeoutStrategy } from './algorithms/shakeout';
+import {
   STRATEGY_SNAPSHOT_MAX_AGE_MS,
   DEFAULT_EXECUTION_CONFIG,
   supportsTwentyFourHourAggregatesOnly,
@@ -27,12 +35,7 @@ const MIN_PLAN_WEIGHT = 0.000001;
 
 export type MacroObjective = StrategyMacroObjective;
 
-export type EngineState =
-  | 'BUILDING_TREND'
-  | 'DUMPING'
-  | 'WAITING_FOR_LOSS_CUT'
-  | 'DISTRIBUTING'
-  | 'ACCUMULATING';
+export type EngineState = StrategyLifecycleState;
 
 export interface StrategyConfig {
   macroObjective: MacroObjective;
@@ -242,6 +245,33 @@ function buildExecutionConfig(config: StrategyConfig): StrategyExecutionConfig {
   };
 }
 
+function buildInitialStateForObjective(objective: MacroObjective): EngineState {
+  switch (objective) {
+    case 'shakeout':
+      return 'BUILDING_TREND';
+    case 'distribution':
+      return 'DISTRIBUTING';
+    case 'accumulation':
+    default:
+      return 'ACCUMULATING';
+  }
+}
+
+function createActiveStrategy(
+  macroObjective: MacroObjective,
+  context: TradingStrategyContext,
+): BaseTradingStrategy {
+  switch (macroObjective) {
+    case 'shakeout':
+      return new ShakeoutStrategy(context);
+    case 'distribution':
+      return new DistributionStrategy(context);
+    case 'accumulation':
+    default:
+      return new AccumulationStrategy(context);
+  }
+}
+
 export class StrategyEngine {
   public readonly macroObjective: MacroObjective;
 
@@ -257,6 +287,10 @@ export class StrategyEngine {
 
   private readonly random: () => number;
 
+  private readonly strategyContext: TradingStrategyContext;
+
+  private readonly activeStrategy: BaseTradingStrategy;
+
   constructor(config: StrategyConfig) {
     this.config = {
       ...config,
@@ -271,22 +305,37 @@ export class StrategyEngine {
       now: this.now,
       dispatchContext: this.config.dispatchContext,
     });
-
-    switch (this.macroObjective) {
-      case 'shakeout':
-        this.currentState = 'BUILDING_TREND';
-        void this.generateTrend();
-        break;
-      case 'distribution':
-        this.currentState = 'DISTRIBUTING';
-        void this.generateWashTrades();
-        break;
-      case 'accumulation':
-      default:
-        this.currentState = 'ACCUMULATING';
-        void this.generateSlowBuys();
-        break;
-    }
+    this.currentState = buildInitialStateForObjective(this.macroObjective);
+    this.strategyContext = {
+      macroObjective: this.macroObjective,
+      contractAddress: this.config.contractAddress,
+      tactics: this.executionConfig.tactics,
+      queue: this.queue,
+      now: this.now,
+      random: this.random,
+      getState: () => this.currentState,
+      setState: (state) => {
+        this.currentState = state;
+      },
+      hasNormalWorkQueued: () => this.hasNormalWorkQueued(),
+      pauseQueue: () => {
+        this.queue.pause();
+      },
+      resumeQueue: () => {
+        this.queue.resume();
+      },
+      getBaseTotalVolumeUsd: () => this.getBaseTotalVolumeUsd(),
+      getBaseOrderCount: () => this.getBaseOrderCount(),
+      getBaseDurationMs: () => this.getBaseDurationMs(),
+      getDistributionChunkCount: () =>
+        Math.max(1, Math.floor(this.config.distributionChunkCount ?? 3)),
+      getDistributionChunkDelayJitterMs: () =>
+        Math.max(0, Math.round(this.config.distributionChunkDelayJitterMs ?? 2_000)),
+      enqueuePulsePlan: (input) => this.enqueuePulsePlan(input),
+      enqueueSinglePreemptiveTask: (input) => this.enqueueSinglePreemptiveTask(input),
+    };
+    this.activeStrategy = createActiveStrategy(this.macroObjective, this.strategyContext);
+    void this.activeStrategy.onInit();
   }
 
   public get contractAddress(): string {
@@ -423,194 +472,32 @@ export class StrategyEngine {
     });
   }
 
-  private reseedBasePulseIfIdle(): void {
-    if (this.hasNormalWorkQueued()) {
-      return;
-    }
-    switch (this.currentState) {
-      case 'BUILDING_TREND':
-        void this.generateTrend();
-        break;
-      case 'DISTRIBUTING':
-        void this.generateWashTrades();
-        break;
-      case 'ACCUMULATING':
-        void this.generateSlowBuys();
-        break;
-      default:
-        break;
-    }
+  public async onExternalWhaleBuy(amountUsd: number): Promise<void> {
+    await this.activeStrategy.onExternalWhaleBuy(amountUsd);
   }
 
-  private async generateTrend(): Promise<void> {
-    if (this.hasNormalWorkQueued()) {
-      return;
-    }
-    console.log('[Engine] Generating trend with randomized TWAP buys...');
-    await this.enqueuePulsePlan({
-      side: 'buy',
-      totalVolumeUsd: this.getBaseTotalVolumeUsd(),
-      orderCount: this.getBaseOrderCount(),
-      durationMs: this.getBaseDurationMs(),
-      enqueue: 'normal',
-      metadata: {
-        basePulse: 'trend',
-      },
-    });
+  public async onExternalWhaleSell(amountUsd: number): Promise<void> {
+    await this.activeStrategy.onExternalWhaleSell(amountUsd);
   }
 
-  private async generateWashTrades(): Promise<void> {
-    if (this.hasNormalWorkQueued()) {
-      return;
-    }
-    const pairCount = Math.max(1, Math.floor(this.getBaseOrderCount() / 2));
-    const perSideVolumeUsd = this.getBaseTotalVolumeUsd() / 2;
-    console.log('[Engine] Generating minimal wash-trade maintenance flow...');
-    await this.enqueuePulsePlan({
-      side: 'buy',
-      totalVolumeUsd: perSideVolumeUsd,
-      orderCount: pairCount,
-      durationMs: this.getBaseDurationMs(),
-      enqueue: 'normal',
-      metadata: {
-        basePulse: 'wash_buy',
-      },
-    });
-    await this.enqueuePulsePlan({
-      side: 'sell',
-      totalVolumeUsd: perSideVolumeUsd,
-      orderCount: pairCount,
-      durationMs: this.getBaseDurationMs(),
-      enqueue: 'normal',
-      scheduledOffsetMs: 750,
-      metadata: {
-        basePulse: 'wash_sell',
-      },
-    });
-  }
-
-  private async generateSlowBuys(): Promise<void> {
-    if (this.hasNormalWorkQueued()) {
-      return;
-    }
-    console.log('[Engine] Generating slow accumulation buys...');
-    await this.enqueuePulsePlan({
-      side: 'buy',
-      totalVolumeUsd: this.getBaseTotalVolumeUsd(),
-      orderCount: Math.max(1, Math.ceil(this.getBaseOrderCount() / 2)),
-      durationMs: Math.round(this.getBaseDurationMs() * 1.5),
-      enqueue: 'normal',
-      metadata: {
-        basePulse: 'slow_buy',
-      },
-    });
+  public async onLossCut(amountUsd: number): Promise<void> {
+    await this.activeStrategy.onLossCut(amountUsd);
   }
 
   public async executeDump(externalBuyAmount: number): Promise<void> {
-    if (
-      this.currentState === 'DUMPING' ||
-      this.currentState === 'WAITING_FOR_LOSS_CUT'
-    ) {
-      return;
-    }
-
-    const dumpAmountUsd = sanitizePositiveNumber(
-      externalBuyAmount * this.executionConfig.tactics.dumpRatio,
-    );
-    if (dumpAmountUsd <= 0) {
-      return;
-    }
-
-    this.currentState = 'DUMPING';
-    this.queue.pause();
-    console.log(`[Engine Tactical] Executing Dump! Selling $${dumpAmountUsd}`);
-    await this.enqueueSinglePreemptiveTask({
-      action: 'SELL',
-      amountUsd: dumpAmountUsd,
-      metadata: {
-        tacticalAction: 'dump',
-        externalBuyAmount,
-      },
-    });
-    this.currentState = 'WAITING_FOR_LOSS_CUT';
+    await this.onExternalWhaleBuy(externalBuyAmount);
   }
 
   public async executeScoop(lossCutAmount: number): Promise<void> {
-    if (this.currentState !== 'WAITING_FOR_LOSS_CUT') {
-      return;
-    }
-
-    const scoopAmountUsd = sanitizePositiveNumber(lossCutAmount);
-    if (scoopAmountUsd <= 0) {
-      return;
-    }
-
-    console.log(`[Engine Tactical] Scooping chips! Buying back $${scoopAmountUsd}`);
-    await this.enqueueSinglePreemptiveTask({
-      action: 'BUY',
-      amountUsd: scoopAmountUsd,
-      metadata: {
-        tacticalAction: 'scoop',
-        lossCutAmount,
-      },
-    });
-    this.currentState = 'BUILDING_TREND';
-    this.queue.resume();
-    this.reseedBasePulseIfIdle();
+    await this.onLossCut(lossCutAmount);
   }
 
   public async executeFollowSell(externalBuyAmount: number): Promise<void> {
-    const totalSellUsd = sanitizePositiveNumber(
-      externalBuyAmount * this.executionConfig.tactics.followSellRatio,
-    );
-    if (totalSellUsd <= 0) {
-      return;
-    }
-
-    const chunkCount = Math.max(1, Math.floor(this.config.distributionChunkCount ?? 3));
-    const maxDelayMs = Math.max(
-      0,
-      Math.round(this.config.distributionChunkDelayJitterMs ?? 2_000),
-    );
-    this.currentState = 'DISTRIBUTING';
-    console.log(
-      `[Engine Tactical] Distributing smoothly. Selling $${totalSellUsd} in ${chunkCount} chunks.`,
-    );
-
-    for (let index = 0; index < chunkCount; index += 1) {
-      await this.enqueueSinglePreemptiveTask({
-        action: 'SELL',
-        amountUsd: totalSellUsd / chunkCount,
-        delayMs: Math.round(this.random() * maxDelayMs),
-        metadata: {
-          tacticalAction: 'follow_sell',
-          externalBuyAmount,
-          chunkIndex: index + 1,
-          chunkCount,
-        },
-      });
-    }
+    await this.onExternalWhaleBuy(externalBuyAmount);
   }
 
   public async executeAbsorb(externalSellAmount: number): Promise<void> {
-    const absorbAmountUsd = sanitizePositiveNumber(
-      externalSellAmount * this.executionConfig.tactics.absorbRatio,
-    );
-    if (absorbAmountUsd <= 0) {
-      return;
-    }
-
-    this.currentState = 'ACCUMULATING';
-    console.log(`[Engine Tactical] Absorbing dump. Buying $${absorbAmountUsd}`);
-    await this.enqueueSinglePreemptiveTask({
-      action: 'BUY',
-      amountUsd: absorbAmountUsd,
-      metadata: {
-        tacticalAction: 'absorb',
-        externalSellAmount,
-      },
-    });
-    this.reseedBasePulseIfIdle();
+    await this.onExternalWhaleSell(externalSellAmount);
   }
 }
 

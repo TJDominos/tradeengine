@@ -1,5 +1,4 @@
 import { nowMs } from '../time';
-import type { MacroObjective } from './engine';
 import type { StrategyTriggerEvent } from './types';
 
 export interface ExternalTradeEvent {
@@ -12,12 +11,10 @@ export interface ExternalTradeEvent {
 }
 
 export interface StrategyEventRouterTarget {
-  readonly macroObjective: MacroObjective;
   readonly contractAddress: string;
-  executeDump(externalBuyAmount: number): Promise<void> | void;
-  executeScoop(lossCutAmount: number): Promise<void> | void;
-  executeFollowSell(externalBuyAmount: number): Promise<void> | void;
-  executeAbsorb(externalSellAmount: number): Promise<void> | void;
+  onExternalWhaleBuy(amountUsd: number): Promise<void> | void;
+  onExternalWhaleSell(amountUsd: number): Promise<void> | void;
+  onLossCut(amountUsd: number): Promise<void> | void;
 }
 
 export class TriggerHandler {
@@ -39,32 +36,17 @@ export class TriggerHandler {
     );
 
     const amount = Number.isFinite(event.amount) ? event.amount : 0;
-    const objective: MacroObjective = this.engine.macroObjective;
 
-    switch (objective) {
-      case 'shakeout':
-        if (event.type === 'whale_buy' && amount >= this.triggerThresholdUsd) {
-          await this.engine.executeDump(amount);
-        } else if (event.is_loss_cut) {
-          await this.engine.executeScoop(amount);
-        }
-        break;
+    if (event.type === 'whale_buy' && amount >= this.triggerThresholdUsd) {
+      await this.engine.onExternalWhaleBuy(amount);
+    }
 
-      case 'distribution':
-        if (event.type === 'whale_buy' && amount >= this.triggerThresholdUsd) {
-          await this.engine.executeFollowSell(amount);
-        }
-        break;
+    if (event.type === 'whale_sell' && amount >= this.triggerThresholdUsd) {
+      await this.engine.onExternalWhaleSell(amount);
+    }
 
-      case 'accumulation':
-        if (event.type === 'whale_sell' && amount >= this.triggerThresholdUsd) {
-          await this.engine.executeAbsorb(amount);
-        }
-        break;
-
-      default:
-        console.warn(`[Trigger] Unknown macro objective: ${objective}, skipping event routing.`);
-        break;
+    if (event.is_loss_cut) {
+      await this.engine.onLossCut(amount);
     }
   }
 }

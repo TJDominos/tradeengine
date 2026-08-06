@@ -9,6 +9,7 @@
     "preview": "npm run build && wrangler dev",
     "clean": "rm -rf dist rust-backend/target",
     "lint": "tsc --noEmit",
+    "check:max-lines": "node scripts/check-max-lines.mjs",
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {

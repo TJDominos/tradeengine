@@ -4,7 +4,6 @@ import {
   Archive,
   CheckSquare,
   Clock,
-  Code,
   FileText,
   Key,
   Lock,
@@ -24,11 +23,9 @@ import AdminModal from './components/AdminModal';
 import AuthPanel from './components/AuthPanel';
 import DashboardLogsSection from './components/DashboardLogsSection';
 import PageTabs from './components/PageTabs';
-import SimulationModal from './components/SimulationModal';
 import {
   CONTRACT_ADDRESS,
   ITEMS_PER_PAGE,
-  workerAlgorithmTemplate,
 } from './app/constants';
 import { createStrategyDraftFromSettings } from './app/strategyFormSchema';
 import type {
@@ -53,12 +50,10 @@ import {
   findWalletTokenAmount,
   formatDate,
   formatUSD,
-  loadStoredString,
   mergeTradableToken,
   normalizeTimestampMs,
   parseAmount,
   resolveWalletOwnershipMeta,
-  saveStoredString,
   serializeSettings,
   summarizeAccounts,
   toRangeEndMs,
@@ -119,8 +114,6 @@ export default function App() {
   });
   const [rpcEndpointForm, setRpcEndpointForm] = React.useState({ url: '' });
   const [strategyDraft, setStrategyDraft] = React.useState<StrategyVersionDocument | null>(null);
-
-  const [tradingAlgorithm, setTradingAlgorithm] = React.useState(workerAlgorithmTemplate);
   const [submitting, setSubmitting] = React.useState<string | null>(null);
 
   const [walletBalances, setWalletBalances] = React.useState<Record<string, WalletBalance>>({});
@@ -139,7 +132,6 @@ export default function App() {
   });
   const [adminMsg, setAdminMsg] = React.useState({ type: '', text: '' });
 
-  const [isSimulationModalOpen, setIsSimulationModalOpen] = React.useState(false);
   const [loadingMarketSnapshots, setLoadingMarketSnapshots] = React.useState(false);
   
   const settingsDirtyRef = React.useRef(false);
@@ -177,10 +169,6 @@ export default function App() {
       setError(`Refresh failed: ${status.errorMessage}`);
     }
   }, [engineState?.marketRefreshStatus]);
-
-  useEffect(() => {
-    setTradingAlgorithm(loadStoredString('tradeengine.tradingAlgorithm', workerAlgorithmTemplate));
-  }, []);
 
   const syncSettingsFromServer = React.useCallback(
     (nextSettings: SettingsState) => {
@@ -1241,13 +1229,6 @@ export default function App() {
       handleDeleteRpcEndpoint={handleDeleteRpcEndpoint}
       updateStrategyDraft={updateStrategyDraft}
       handleSaveConfig={handleSaveConfig}
-      tradingAlgorithm={tradingAlgorithm}
-      setTradingAlgorithm={setTradingAlgorithm}
-      onPersistAlgorithm={() => {
-        saveStoredString('tradeengine.tradingAlgorithm', tradingAlgorithm);
-        setNotice('Algorithm draft saved locally in the browser.');
-      }}
-      onOpenSimulation={() => setIsSimulationModalOpen(true)}
       activeStrategyVersionNo={engineState.activeStrategyVersion?.versionNo ?? null}
       activeStrategyStatus={engineState.activeStrategyVersion?.status ?? null}
     />
@@ -1308,14 +1289,6 @@ export default function App() {
         onPasswordChange={() => void handleAdminPasswordChange()}
         onImport={() => void handleAdminImport()}
         onDelete={(address) => void handleAdminDelete(address)}
-      />
-
-      <SimulationModal
-        open={isSimulationModalOpen}
-        onClose={() => setIsSimulationModalOpen(false)}
-        settings={settings}
-        managedAccountsCount={engineState.stats.managedAccounts}
-        tradableTokensCount={engineState.tradableTokens.length}
       />
     </div>
   );

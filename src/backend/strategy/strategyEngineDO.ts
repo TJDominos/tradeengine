@@ -231,6 +231,31 @@ export class StrategyEngineDurableObject implements StrategyEventRouterTarget {
     await this.persistState();
   }
 
+  public async onExternalWhaleBuy(amountUsd: number): Promise<void> {
+    switch (this.macroObjective) {
+      case 'shakeout':
+        await this.executeDump(amountUsd);
+        break;
+      case 'distribution':
+        await this.executeFollowSell(amountUsd);
+        break;
+      default:
+        break;
+    }
+  }
+
+  public async onExternalWhaleSell(amountUsd: number): Promise<void> {
+    if (this.macroObjective === 'accumulation') {
+      await this.executeAbsorb(amountUsd);
+    }
+  }
+
+  public async onLossCut(amountUsd: number): Promise<void> {
+    if (this.macroObjective === 'shakeout') {
+      await this.executeScoop(amountUsd);
+    }
+  }
+
   public async executeScoop(lossCutAmount: number): Promise<void> {
     const currentState = this.requireState();
     if (currentState.currentState !== 'WAITING_FOR_LOSS_CUT') {
