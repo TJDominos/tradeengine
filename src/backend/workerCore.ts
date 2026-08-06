@@ -5,13 +5,18 @@ import nacl from 'tweetnacl';
 
 import { ApiError } from './errors';
 import type {
+  Env,
   StoredSignalTransactionDetails,
+  SettingsState,
   TokenHolderSyncStateRecord,
   TokenHolderSyncSummary,
   TokenMarketSnapshot,
   TrackedTokenDescriptor,
+  TradableToken,
   WalletBalanceResponse,
+  WalletBalanceToken,
 } from './workerShared';
+import type { StrategyExecutionTaskPayload } from './strategy/types';
 import {
   BASE58_ALPHABET,
   COOKIE_NAME,
@@ -34,6 +39,58 @@ const tokenMarketCache = new Map<
   string,
   { expiresAt: number; value: TokenMarketSnapshot }
 >();
+
+export interface StrategyTaskExecutionContext {
+  env: Env;
+  userId: number;
+  username?: string | null;
+}
+
+export interface StrategyTaskExecutionResult {
+  txSignature: string;
+  accountId: number | null;
+  walletAddress: string;
+  action: 'BUY' | 'SELL';
+  inputMint: string;
+  outputMint: string;
+  requestedAmount: number;
+  executedAmount: number;
+  slippageBps: number;
+  status: 'PENDING';
+}
+
+type RegisteredTradeTaskExecutor = (
+  task: StrategyExecutionTaskPayload,
+  context: StrategyTaskExecutionContext,
+) => Promise<StrategyTaskExecutionResult>;
+
+let registeredTradeTaskExecutor: RegisteredTradeTaskExecutor | null = null;
+
+export function registerTradeTaskExecutor(
+  executor: RegisteredTradeTaskExecutor,
+): void {
+  registeredTradeTaskExecutor = executor;
+}
+
+export async function executeTradeTask(
+  task: StrategyExecutionTaskPayload,
+  context: StrategyTaskExecutionContext,
+): Promise<StrategyTaskExecutionResult> {
+  if (!registeredTradeTaskExecutor) {
+    throw new ApiError(
+      503,
+      'Trade task executor is not registered for the current worker runtime',
+    );
+  }
+  return registeredTradeTaskExecutor(task, context);
+}
+
+export async function submitTask(
+  task: StrategyExecutionTaskPayload,
+  context: StrategyTaskExecutionContext,
+): Promise<StrategyTaskExecutionResult> {
+  return executeTradeTask(task, context);
+}
 
 export function jsonResponse(
   data: unknown,
@@ -618,6 +675,215 @@ export function writeTokenMarketCache(
     expiresAt: Date.now() + TOKEN_MARKET_CACHE_TTL_MS,
     value,
   });
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function solanaRpc<T>(
+  rpcUrls: string | string[],
+  method: string,
+  params: unknown,
+): Promise<T> {
+  const pool = dedupeStrings(
+    (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls]).map((url) => url.trim()),
+  );
+  const maxAttemptsPerEndpoint = 3;
+  let lastErrorMessage = 'Unknown Solana RPC failure';
+
+  for (const rpcUrl of pool) {
+    for (let attempt = 0; attempt < maxAttemptsPerEndpoint; attempt += 1) {
+      try {
+        const response = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: method, method, params }),
+        });
+        if (!response.ok) {
+          throw new ApiError(502, `Solana RPC request failed with ${response.status}`);
+        }
+        const body = await response.json<{
+          result?: T;
+          error?: { code?: number; message?: string };
+        }>();
+        if (body.error) {
+          throw new ApiError(
+            502,
+            `Solana RPC error: ${body.error.message ?? 'unknown error'}`,
+          );
+        }
+        if (body.result == null) {
+          throw new ApiError(502, 'Solana RPC returned an empty result');
+        }
+        return body.result;
+      } catch (err: unknown) {
+        lastErrorMessage = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `Solana RPC attempt ${attempt + 1}/${maxAttemptsPerEndpoint} failed for ${rpcUrl}: ${lastErrorMessage}`,
+        );
+
+        const isLastAttempt = attempt + 1 >= maxAttemptsPerEndpoint;
+        if (!isLastAttempt && isSolanaRpcRateLimitError(err)) {
+          await waitMs(3000 * (attempt + 1));
+          continue;
+        }
+        break;
+      }
+    }
+  }
+
+  throw new ApiError(
+    502,
+    `All configured Solana RPC endpoints failed for ${method}. Last error: ${lastErrorMessage}`,
+  );
+}
+
+export async function fetchSolanaMintDecimals(
+  rpcUrls: string | string[],
+  mint: string,
+): Promise<number | null> {
+  const result = await solanaRpc<{ value: { decimals: number } }>(
+    rpcUrls,
+    'getTokenSupply',
+    [mint],
+  );
+  return result.value?.decimals ?? null;
+}
+
+export async function fetchSolanaTokenBalance(
+  rpcUrls: string | string[],
+  owner: string,
+  token: TrackedTokenDescriptor,
+): Promise<WalletBalanceToken> {
+  const result = await solanaRpc<{
+    value: Array<{
+      account: {
+        data: {
+          parsed?: {
+            info?: {
+              tokenAmount?: {
+                amount?: string;
+                decimals?: number;
+              };
+            };
+          };
+        };
+      };
+    }>;
+  }>(rpcUrls, 'getTokenAccountsByOwner', [owner, { mint: token.mint }, { encoding: 'jsonParsed' }]);
+
+  let total = 0n;
+  let decimals = token.decimals;
+  for (const account of result.value) {
+    const tokenAmount = account.account.data.parsed?.info?.tokenAmount;
+    if (!tokenAmount?.amount) continue;
+    total += BigInt(tokenAmount.amount);
+    if (typeof tokenAmount.decimals === 'number') {
+      decimals = tokenAmount.decimals;
+    }
+  }
+
+  return {
+    mint: token.mint,
+    symbol: token.symbol,
+    network: token.network,
+    amount: formatTokenAmount(total, decimals ?? 0),
+    decimals,
+  };
+}
+
+export function buildTrackedTokens(
+  settings: SettingsState,
+  tradableTokens: TradableToken[],
+): TrackedTokenDescriptor[] {
+  const tracked = new Map<string, TrackedTokenDescriptor>();
+
+  for (const token of tradableTokens) {
+    if (!token.isActive || token.network !== 'solana') continue;
+    if (token.contractAddress === SOLANA_USDC_MINT) continue;
+    tracked.set(token.contractAddress, {
+      mint: token.contractAddress,
+      symbol:
+        token.symbol ??
+        `${token.contractAddress.slice(0, 4)}...${token.contractAddress.slice(-4)}`,
+      network: token.network,
+      decimals: token.decimals,
+    });
+  }
+
+  if (
+    settings.contractAddress.trim() &&
+    settings.contractAddress !== SOLANA_USDC_MINT
+  ) {
+    const mint = normalizePubkey(settings.contractAddress);
+    if (!tracked.has(mint)) {
+      tracked.set(mint, {
+        mint,
+        symbol: 'Configured Token',
+        network: 'solana',
+        decimals: null,
+      });
+    }
+  }
+
+  return [...tracked.values()];
+}
+
+export async function loadWalletBalance(
+  address: string,
+  settings: SettingsState,
+  tradableTokens: TradableToken[],
+  rpcUrls: string | string[],
+): Promise<WalletBalanceResponse> {
+  const trackedTokens = buildTrackedTokens(settings, tradableTokens);
+  const cacheKey = walletBalanceCacheKey(address, trackedTokens);
+  const cached = readWalletBalanceCache(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const lamportsResult = await solanaRpc<{ value: number }>(
+    rpcUrls,
+    'getBalance',
+    [address],
+  );
+  const sol = formatTokenAmount(BigInt(lamportsResult.value), 9);
+  const usdc = await fetchSolanaTokenBalance(rpcUrls, address, {
+    mint: SOLANA_USDC_MINT,
+    symbol: 'USDC',
+    network: 'solana',
+    decimals: 6,
+  });
+
+  const tokenResults = await Promise.allSettled(
+    trackedTokens.map(async (token) => {
+      const decimals =
+        token.decimals ?? (await fetchSolanaMintDecimals(rpcUrls, token.mint));
+      return fetchSolanaTokenBalance(rpcUrls, address, {
+        ...token,
+        decimals,
+      });
+    }),
+  );
+
+  const tokens = tokenResults
+    .filter(
+      (result): result is PromiseFulfilledResult<WalletBalanceToken> =>
+        result.status === 'fulfilled',
+    )
+    .map((result) => result.value);
+
+  const response: WalletBalanceResponse = {
+    address,
+    sol,
+    usdc: usdc.amount,
+    tokens,
+    updatedAt: Math.floor(Date.now() / 1000),
+  };
+
+  writeWalletBalanceCache(cacheKey, response);
+  return response;
 }
 
 export function toFiniteNumber(value: unknown): number | null {

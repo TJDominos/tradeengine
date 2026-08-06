@@ -1,4 +1,5 @@
 import { ApiError } from './errors';
+import { dbListTradableTokens, dbResolveSolanaRpcUrls } from './tokenStore';
 import { nowTs, normalizeTimestampMs } from './time';
 import {
   decryptPrivateKey,
@@ -6,12 +7,14 @@ import {
   extractStoredSignalContractAddresses,
   generateToken,
   hashPassword,
+  loadWalletBalance,
   mergeStoredSignalTransactionDetails,
   normalizePrivateKey,
   normalizePubkey,
   parseStoredSignalTransactionDetails,
   sha256Hex,
   solanaPubkeyFromKeypairBytes,
+  toFiniteNumber,
   validateContractAddress,
   validateLabel,
   validatePassword,
@@ -28,8 +31,60 @@ import type {
   StoredSignalTransactionDetails,
   TradeLogRecord,
   WebhookTransactionLogRecord,
+  WalletBalanceResponse,
 } from './workerShared';
 import { SOLANA_USDC_MINT } from './workerShared';
+
+const ACCOUNT_TRADE_COOLDOWN_MS = 45_000;
+const ACCOUNT_MIN_SOL_RESERVE = 0.01;
+
+export interface AvailableAccountRecord extends AccountRecord {
+  isActive: boolean;
+  lastTradedAt: number | null;
+  walletBalance: WalletBalanceResponse;
+}
+
+function compareLeastRecentlyUsed(
+  left: { lastTradedAt: number | null; createdAt: number; id: number },
+  right: { lastTradedAt: number | null; createdAt: number; id: number },
+): number {
+  if (left.lastTradedAt == null && right.lastTradedAt != null) {
+    return -1;
+  }
+  if (left.lastTradedAt != null && right.lastTradedAt == null) {
+    return 1;
+  }
+  if (left.lastTradedAt != null && right.lastTradedAt != null && left.lastTradedAt !== right.lastTradedAt) {
+    return left.lastTradedAt - right.lastTradedAt;
+  }
+  if (left.createdAt !== right.createdAt) {
+    return left.createdAt - right.createdAt;
+  }
+  return left.id - right.id;
+}
+
+function hasSufficientBalance(
+  action: 'buy' | 'sell',
+  estimatedAmount: number,
+  contractAddress: string,
+  walletBalance: WalletBalanceResponse,
+): boolean {
+  const solBalance = toFiniteNumber(walletBalance.sol) ?? 0;
+  if (solBalance < ACCOUNT_MIN_SOL_RESERVE) {
+    return false;
+  }
+
+  if (action === 'buy') {
+    const usdcBalance = toFiniteNumber(walletBalance.usdc) ?? 0;
+    return usdcBalance >= estimatedAmount;
+  }
+
+  const targetBalance = walletBalance.tokens.find(
+    (token) => token.mint === contractAddress,
+  );
+  const tokenBalance = toFiniteNumber(targetBalance?.amount) ?? 0;
+  return tokenBalance >= estimatedAmount;
+}
 
 export async function dbSetupRequired(db: D1Database): Promise<boolean> {
   await dbEnsureSchema(db);
@@ -341,6 +396,158 @@ export async function dbListManagedAccountAddresses(
     .bind(userId)
     .all<{ wallet_address: string }>();
   return rows.results.map((row) => row.wallet_address);
+}
+
+export async function dbGetManagedAccountById(
+  db: D1Database,
+  userId: number,
+  accountId: number,
+): Promise<AccountRecord> {
+  await dbEnsureSchema(db);
+  const row = await db
+    .prepare(
+      `SELECT id, label, wallet_address, type, created_at
+       FROM accounts
+       WHERE user_id = ?1 AND id = ?2 AND type = 'managed' AND COALESCE(is_active, 1) = 1
+       LIMIT 1`,
+    )
+    .bind(userId, accountId)
+    .first<{
+      id: number;
+      label: string;
+      wallet_address: string;
+      type: string;
+      created_at: number;
+    }>();
+  if (!row) {
+    throw new ApiError(404, `Managed account ${accountId} was not found for the current user`);
+  }
+  return {
+    id: row.id,
+    label: row.label,
+    address: row.wallet_address,
+    type: row.type,
+    createdAt: row.created_at,
+  };
+}
+
+export async function dbLoadManagedKeypairBytesByAccountId(
+  db: D1Database,
+  userId: number,
+  accountId: number,
+  encryptionKeyStr: string,
+): Promise<Uint8Array> {
+  const account = await dbGetManagedAccountById(db, userId, accountId);
+  return dbLoadManagedKeypairBytes(db, userId, account.address, encryptionKeyStr);
+}
+
+export async function getAvailableAccount(
+  db: D1Database,
+  userId: number,
+  action: 'buy' | 'sell',
+  estimatedAmount: number,
+  options?: {
+    envRpcUrl?: string;
+    cooldownMs?: number;
+  },
+): Promise<AvailableAccountRecord | null> {
+  await dbEnsureTradeDomainSchema(db);
+  const normalizedEstimatedAmount =
+    Number.isFinite(estimatedAmount) && estimatedAmount > 0 ? estimatedAmount : 0;
+  if (normalizedEstimatedAmount <= 0) {
+    return null;
+  }
+
+  const settings = await dbLoadSettings(db, userId);
+  const contractAddress = settings.contractAddress.trim()
+    ? normalizePubkey(settings.contractAddress)
+    : '';
+  if (action === 'sell' && (!contractAddress || contractAddress === SOLANA_USDC_MINT)) {
+    return null;
+  }
+
+  const candidateRows = await db
+    .prepare(
+      `SELECT
+         a.id,
+         a.label,
+         a.wallet_address,
+         a.type,
+         a.created_at,
+         COALESCE(a.is_active, 1) AS is_active,
+         (
+           SELECT MAX(COALESCE(tl.updated_at, tl.created_at))
+           FROM trade_logs tl
+           WHERE tl.wallet_address = a.wallet_address
+         ) AS last_traded_at
+       FROM accounts a
+       WHERE a.user_id = ?1
+         AND a.type = 'managed'
+         AND COALESCE(a.is_active, 1) = 1`,
+    )
+    .bind(userId)
+    .all<{
+      id: number;
+      label: string;
+      wallet_address: string;
+      type: string;
+      created_at: number;
+      is_active: number;
+      last_traded_at: number | null;
+    }>();
+
+  const candidates = [...candidateRows.results].sort((left, right) =>
+    compareLeastRecentlyUsed(
+      {
+        id: left.id,
+        createdAt: left.created_at,
+        lastTradedAt: normalizeTimestampMs(left.last_traded_at),
+      },
+      {
+        id: right.id,
+        createdAt: right.created_at,
+        lastTradedAt: normalizeTimestampMs(right.last_traded_at),
+      },
+    ),
+  );
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const tradableTokens = await dbListTradableTokens(db);
+  const rpcUrls = await dbResolveSolanaRpcUrls(db, userId, options?.envRpcUrl);
+  const cooldownMs = options?.cooldownMs ?? ACCOUNT_TRADE_COOLDOWN_MS;
+  const now = Date.now();
+
+  for (const candidate of candidates) {
+    const lastTradedAtMs = normalizeTimestampMs(candidate.last_traded_at);
+    if (lastTradedAtMs != null && cooldownMs > 0 && now - lastTradedAtMs < cooldownMs) {
+      continue;
+    }
+
+    const walletBalance = await loadWalletBalance(
+      candidate.wallet_address,
+      settings,
+      tradableTokens,
+      rpcUrls,
+    );
+    if (!hasSufficientBalance(action, normalizedEstimatedAmount, contractAddress, walletBalance)) {
+      continue;
+    }
+
+    return {
+      id: candidate.id,
+      label: candidate.label,
+      address: candidate.wallet_address,
+      type: candidate.type,
+      createdAt: candidate.created_at,
+      isActive: candidate.is_active !== 0,
+      lastTradedAt: lastTradedAtMs,
+      walletBalance,
+    };
+  }
+
+  return null;
 }
 
 export async function dbImportWatchAccount(

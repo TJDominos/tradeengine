@@ -15,6 +15,16 @@ export const STRATEGY_SECTION_SCHEMAS: StrategySectionSchema[] = [
     description: 'Top-level strategy identity and currently targeted contract.',
   },
   {
+    id: 'objective',
+    title: 'Macro Objective',
+    description: 'Primary campaign mode that drives the hierarchical state machine.',
+  },
+  {
+    id: 'tactics',
+    title: 'Tactics',
+    description: 'Objective-specific reaction ratios used for tactical, high-priority responses.',
+  },
+  {
     id: 'parameters',
     title: 'Parameters',
     description: 'Global settings that define the strategy operating window and core limits.',
@@ -104,6 +114,57 @@ export const STRATEGY_FIELD_SCHEMAS: StrategyFieldSchema[] = [
     formatValue: (value) => String((Number(value) || 0) / 100),
   },
   {
+    id: 'macroObjective',
+    path: 'execution.macroObjective',
+    section: 'objective',
+    label: 'Macro Objective',
+    description: 'Select the dominant campaign behavior the bot should optimize for.',
+    fieldType: 'select',
+    capability: 'supported',
+    editable: true,
+    options: [
+      { label: 'Shakeout', value: 'shakeout' },
+      { label: 'Distribution', value: 'distribution' },
+      { label: 'Accumulation', value: 'accumulation' },
+    ],
+  },
+  {
+    id: 'dumpRatio',
+    path: 'execution.tactics.dumpRatio',
+    section: 'tactics',
+    label: 'Dump Ratio',
+    description: 'Shakeout multiplier for selling harder than the observed external buy.',
+    fieldType: 'number',
+    capability: 'supported',
+    editable: true,
+    unitLabel: 'x',
+    parseInput: (value) => Math.max(0, Number(value) || 0),
+  },
+  {
+    id: 'followSellRatio',
+    path: 'execution.tactics.followSellRatio',
+    section: 'tactics',
+    label: 'Follow Sell Ratio',
+    description: 'Distribution multiplier for selling into external buy pressure without fully overwhelming it.',
+    fieldType: 'number',
+    capability: 'supported',
+    editable: true,
+    unitLabel: 'x',
+    parseInput: (value) => Math.max(0, Number(value) || 0),
+  },
+  {
+    id: 'absorbRatio',
+    path: 'execution.tactics.absorbRatio',
+    section: 'tactics',
+    label: 'Absorb Ratio',
+    description: 'Accumulation multiplier for instantly absorbing external sell pressure.',
+    fieldType: 'number',
+    capability: 'supported',
+    editable: true,
+    unitLabel: 'x',
+    parseInput: (value) => Math.max(0, Number(value) || 0),
+  },
+  {
     id: 'triggerSources',
     path: 'triggers.sources',
     section: 'triggers',
@@ -142,6 +203,17 @@ export const STRATEGY_FIELD_SCHEMAS: StrategyFieldSchema[] = [
     fieldType: 'number',
     capability: 'supported',
     editable: true,
+  },
+  {
+    id: 'triggerThresholdUsd',
+    path: 'triggers.triggerThresholdUsd',
+    section: 'triggers',
+    label: 'External Trigger Threshold (USD)',
+    description: 'Ignore external trades below this USD threshold.',
+    fieldType: 'number',
+    capability: 'partial',
+    editable: true,
+    unitLabel: 'USD',
   },
   {
     id: 'volumeUsdMin',
@@ -267,6 +339,26 @@ export const STRATEGY_FIELD_SCHEMAS: StrategyFieldSchema[] = [
     editable: false,
     options: [{ label: 'confirmed', value: 'confirmed' }],
   },
+  {
+    id: 'timeJitterRatio',
+    path: 'execution.timeJitterRatio',
+    section: 'execution',
+    label: 'Time Jitter Ratio',
+    description: 'Randomizes delay between TWAP slices using a bounded uniform ratio.',
+    fieldType: 'number',
+    capability: 'supported',
+    editable: true,
+  },
+  {
+    id: 'volumeJitterRatio',
+    path: 'execution.volumeJitterRatio',
+    section: 'execution',
+    label: 'Volume Jitter Ratio',
+    description: 'Randomizes per-slice TWAP notional while preserving total planned volume.',
+    fieldType: 'number',
+    capability: 'supported',
+    editable: true,
+  },
 ];
 
 export function createStrategyDraftFromSettings(
@@ -288,6 +380,9 @@ export function createStrategyDraftFromSettings(
       eventTypes: ['*'],
       cooldownMs: 30_000,
       idempotencyWindowMs: 300_000,
+      onExternalBuy: 'watch_and_wait',
+      onExternalSell: 'pause_strategy',
+      triggerThresholdUsd: 0,
     },
     targets: {
       volumeUsdMin: settings.volumeTarget,
@@ -306,6 +401,14 @@ export function createStrategyDraftFromSettings(
       enabled: false,
       route: 'jupiter',
       commitment: 'confirmed',
+      timeJitterRatio: 0.15,
+      volumeJitterRatio: 0.15,
+      macroObjective: 'accumulation',
+      tactics: {
+        dumpRatio: 1.2,
+        followSellRatio: 0.8,
+        absorbRatio: 1.0,
+      },
     },
     metadata: {
       author: null,
@@ -333,16 +436,30 @@ export function updateStrategyFieldValue(
   path: StrategyFieldPath,
   value: unknown,
 ): StrategyVersionDocument {
-  const [sectionKey, fieldKey] = path.split('.') as [keyof StrategyVersionDocument, string];
-  const currentSection = document[sectionKey] as unknown as Record<string, unknown>;
-  const nextSection = {
-    ...currentSection,
-    [fieldKey]: value,
+  const keys = path.split('.');
+
+  const setNestedValue = (
+    current: unknown,
+    nestedKeys: string[],
+    nextValue: unknown,
+  ): unknown => {
+    if (nestedKeys.length === 0) {
+      return nextValue;
+    }
+    const [key, ...rest] = nestedKeys;
+    const currentRecord =
+      current != null && typeof current === 'object' && !Array.isArray(current)
+        ? (current as Record<string, unknown>)
+        : {};
+    return {
+      ...currentRecord,
+      [key]: rest.length === 0
+        ? nextValue
+        : setNestedValue(currentRecord[key], rest, nextValue),
+    };
   };
-  return {
-    ...document,
-    [sectionKey]: nextSection,
-  };
+
+  return setNestedValue(document, keys, value) as StrategyVersionDocument;
 }
 
 export function getStrategyFieldsForSection(sectionId: StrategySectionSchema['id']) {

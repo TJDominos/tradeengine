@@ -25,6 +25,9 @@ export const DEFAULT_TRIGGER_CONFIG: StrategyTriggerConfig = {
   eventTypes: ['*'],
   cooldownMs: 30_000,
   idempotencyWindowMs: 300_000,
+  onExternalBuy: 'watch_and_wait',
+  onExternalSell: 'pause_strategy',
+  triggerThresholdUsd: 0,
 };
 
 export const DEFAULT_RISK_CONTROLS: StrategyRiskControls = {
@@ -39,6 +42,14 @@ export const DEFAULT_EXECUTION_CONFIG: StrategyExecutionConfig = {
   enabled: false,
   route: 'jupiter',
   commitment: 'confirmed',
+  timeJitterRatio: 0.15,
+  volumeJitterRatio: 0.15,
+  macroObjective: 'accumulation',
+  tactics: {
+    dumpRatio: 1.2,
+    followSellRatio: 0.8,
+    absorbRatio: 1.0,
+  },
 };
 
 export function isSupportedTimeRangeTarget(value: string): boolean {

@@ -13,6 +13,22 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "STRATEGY_ENGINE_DO",
+        "class_name": "StrategyEngineDurableObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1-strategy-engine-do",
+      "new_sqlite_classes": [
+        "StrategyEngineDurableObject"
+      ]
+    }
+  ],
   "d1_databases": [
     {
       "binding": "TRADINGBOT_DB",

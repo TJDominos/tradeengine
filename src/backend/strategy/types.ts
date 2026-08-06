@@ -8,6 +8,26 @@ export type StrategyVersionStatus =
 
 export type StrategyEvaluationStatus = 'accepted' | 'blocked' | 'error';
 
+export type StrategyExternalBuyAction =
+  | 'reduce_target'
+  | 'counter_trade'
+  | 'watch_and_wait';
+
+export type StrategyExternalSellAction = 'buy_the_dip' | 'pause_strategy';
+
+export type StrategyExecutionSide = 'buy' | 'sell';
+
+export type StrategyMacroObjective =
+  | 'shakeout'
+  | 'distribution'
+  | 'accumulation';
+
+export interface StrategyExecutionTactics {
+  dumpRatio: number;
+  followSellRatio: number;
+  absorbRatio: number;
+}
+
 export type StrategyTriggerSource =
   | 'alchemy_notify'
   | 'manual_refresh'
@@ -25,6 +45,13 @@ export interface StrategySettingsInput {
   maxTransactions: number;
   maxSlippage: number;
   strategyNotes: string;
+  timeJitterRatio?: number;
+  volumeJitterRatio?: number;
+  onExternalBuy?: StrategyExternalBuyAction;
+  onExternalSell?: StrategyExternalSellAction;
+  triggerThresholdUsd?: number;
+  macroObjective?: StrategyMacroObjective;
+  tactics?: Partial<StrategyExecutionTactics>;
 }
 
 export interface StrategyParameters {
@@ -40,6 +67,9 @@ export interface StrategyTriggerConfig {
   eventTypes: string[];
   cooldownMs: number;
   idempotencyWindowMs: number;
+  onExternalBuy: StrategyExternalBuyAction;
+  onExternalSell: StrategyExternalSellAction;
+  triggerThresholdUsd: number;
 }
 
 export interface StrategyTargets {
@@ -61,6 +91,81 @@ export interface StrategyExecutionConfig {
   enabled: boolean;
   route: 'jupiter';
   commitment: 'confirmed';
+  timeJitterRatio: number;
+  volumeJitterRatio: number;
+  macroObjective: StrategyMacroObjective;
+  tactics: StrategyExecutionTactics;
+}
+
+export interface StrategyExecutionPlanningInput {
+  side: StrategyExecutionSide;
+  totalVolume: number;
+  orderCount: number;
+  durationMs: number;
+  startTime: number;
+  random?: () => number;
+  contractAddress?: string;
+}
+
+export interface StrategyAllocatedAccount {
+  accountId: number;
+  walletAddress: string;
+}
+
+export interface StrategyExecutionTaskPayload {
+  action: 'BUY' | 'SELL';
+  accountId: number | null;
+  walletAddress: string | null;
+  contractAddress: string | null;
+  requestedAmount: number;
+  scheduledAt: number;
+}
+
+export interface StrategyExecutionAccountAllocationInput {
+  action: StrategyExecutionSide;
+  estimatedAmount: number;
+  scheduledAt: number;
+  orderIndex: number;
+}
+
+export interface StrategyExecutionPlanSlice {
+  orderIndex: number;
+  scheduledAt: number;
+  intervalMsFromPrevious: number;
+  targetVolume: number;
+  cumulativeTargetVolume: number;
+  accountId: number | null;
+  walletAddress: string | null;
+  taskPayload: StrategyExecutionTaskPayload;
+}
+
+export interface StrategyExecutionPlan {
+  side: StrategyExecutionSide;
+  totalVolume: number;
+  orderCount: number;
+  durationMs: number;
+  startTime: number;
+  generatedAt: number;
+  baseVolume: number;
+  baseIntervalMs: number;
+  timeJitterRatio: number;
+  volumeJitterRatio: number;
+  slices: StrategyExecutionPlanSlice[];
+}
+
+export interface StrategyExecutionState {
+  plan: StrategyExecutionPlan;
+  executedVolume: number;
+  remainingVolume: number;
+  completedOrderCount: number;
+  lastExecutionAt: number | null;
+  nextExecutionTime: number | null;
+  active: boolean;
+}
+
+export interface StrategyExecutionFill {
+  executedVolume: number;
+  executedAt: number;
 }
 
 export interface StrategyMetadata {
@@ -138,6 +243,8 @@ export interface StrategyEvaluationResult {
 export interface StrategyRuntimeResult {
   strategy: StrategyVersionDocument;
   evaluation: StrategyEvaluationResult;
+  executionPlan: StrategyExecutionPlan | null;
+  executionState: StrategyExecutionState | null;
   summary: Record<string, unknown>;
 }
 

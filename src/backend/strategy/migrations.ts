@@ -8,6 +8,7 @@ import {
 } from './config';
 import type {
   StrategyExecutionConfig,
+  StrategyExecutionTactics,
   StrategyMetadata,
   StrategyParameters,
   StrategyRiskControls,
@@ -26,6 +27,15 @@ function readNumber(value: unknown, fallback = 0): number {
 
 function readBoolean(value: unknown, fallback = false): boolean {
   return typeof value === 'boolean' ? value : fallback;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function normalizeJitterRatio(value: unknown, fallback: number): number {
+  const parsed = readNumber(value, fallback);
+  return clampNumber(parsed, 0, 0.5);
 }
 
 function readRecord(value: unknown): Record<string, unknown> {
@@ -58,6 +68,20 @@ function normalizeTriggers(value: unknown): StrategyTriggerConfig {
     idempotencyWindowMs: readNumber(
       raw.idempotencyWindowMs,
       DEFAULT_TRIGGER_CONFIG.idempotencyWindowMs,
+    ),
+    onExternalBuy:
+      raw.onExternalBuy === 'reduce_target' ||
+      raw.onExternalBuy === 'counter_trade' ||
+      raw.onExternalBuy === 'watch_and_wait'
+        ? raw.onExternalBuy
+        : DEFAULT_TRIGGER_CONFIG.onExternalBuy,
+    onExternalSell:
+      raw.onExternalSell === 'buy_the_dip' || raw.onExternalSell === 'pause_strategy'
+        ? raw.onExternalSell
+        : DEFAULT_TRIGGER_CONFIG.onExternalSell,
+    triggerThresholdUsd: Math.max(
+      0,
+      readNumber(raw.triggerThresholdUsd, DEFAULT_TRIGGER_CONFIG.triggerThresholdUsd),
     ),
   };
 }
@@ -97,6 +121,24 @@ function normalizeRiskControls(value: unknown): StrategyRiskControls {
 
 function normalizeExecution(value: unknown): StrategyExecutionConfig {
   const raw = readRecord(value);
+  const rawTactics = readRecord(raw.tactics);
+  const tactics: StrategyExecutionTactics = {
+    dumpRatio: Math.max(
+      0,
+      readNumber(rawTactics.dumpRatio, DEFAULT_EXECUTION_CONFIG.tactics.dumpRatio),
+    ),
+    followSellRatio: Math.max(
+      0,
+      readNumber(
+        rawTactics.followSellRatio,
+        DEFAULT_EXECUTION_CONFIG.tactics.followSellRatio,
+      ),
+    ),
+    absorbRatio: Math.max(
+      0,
+      readNumber(rawTactics.absorbRatio, DEFAULT_EXECUTION_CONFIG.tactics.absorbRatio),
+    ),
+  };
   return {
     enabled: readBoolean(raw.enabled, DEFAULT_EXECUTION_CONFIG.enabled),
     route: raw.route === 'jupiter' ? raw.route : DEFAULT_EXECUTION_CONFIG.route,
@@ -104,6 +146,21 @@ function normalizeExecution(value: unknown): StrategyExecutionConfig {
       raw.commitment === 'confirmed'
         ? raw.commitment
         : DEFAULT_EXECUTION_CONFIG.commitment,
+    timeJitterRatio: normalizeJitterRatio(
+      raw.timeJitterRatio,
+      DEFAULT_EXECUTION_CONFIG.timeJitterRatio,
+    ),
+    volumeJitterRatio: normalizeJitterRatio(
+      raw.volumeJitterRatio,
+      DEFAULT_EXECUTION_CONFIG.volumeJitterRatio,
+    ),
+    macroObjective:
+      raw.macroObjective === 'shakeout' ||
+      raw.macroObjective === 'distribution' ||
+      raw.macroObjective === 'accumulation'
+        ? raw.macroObjective
+        : DEFAULT_EXECUTION_CONFIG.macroObjective,
+    tactics,
   };
 }
 

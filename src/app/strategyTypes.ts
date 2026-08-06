@@ -17,6 +17,24 @@ export type StrategyEvaluationStatus = 'accepted' | 'blocked' | 'error';
 
 export type StrategyFieldCapability = 'supported' | 'partial' | 'planned';
 
+export type StrategyMacroObjective =
+  | 'shakeout'
+  | 'distribution'
+  | 'accumulation';
+
+export interface StrategyExecutionTactics {
+  dumpRatio: number;
+  followSellRatio: number;
+  absorbRatio: number;
+}
+
+export type StrategyExternalBuyAction =
+  | 'reduce_target'
+  | 'counter_trade'
+  | 'watch_and_wait';
+
+export type StrategyExternalSellAction = 'buy_the_dip' | 'pause_strategy';
+
 export interface StrategyParameters {
   contractAddress: string;
   timeRangeTarget: string;
@@ -30,6 +48,9 @@ export interface StrategyTriggerConfig {
   eventTypes: string[];
   cooldownMs: number;
   idempotencyWindowMs: number;
+  onExternalBuy: StrategyExternalBuyAction;
+  onExternalSell: StrategyExternalSellAction;
+  triggerThresholdUsd: number;
 }
 
 export interface StrategyTargets {
@@ -51,6 +72,10 @@ export interface StrategyExecutionConfig {
   enabled: boolean;
   route: 'jupiter';
   commitment: 'confirmed';
+  timeJitterRatio: number;
+  volumeJitterRatio: number;
+  macroObjective: StrategyMacroObjective;
+  tactics: StrategyExecutionTactics;
 }
 
 export interface StrategyMetadata {
@@ -107,6 +132,8 @@ export interface StrategyEvaluationRecord {
 
 export type StrategySectionId =
   | 'basic'
+  | 'objective'
+  | 'tactics'
   | 'parameters'
   | 'triggers'
   | 'targets'
@@ -131,6 +158,9 @@ export type StrategyFieldPath =
   | 'triggers.eventTypes'
   | 'triggers.cooldownMs'
   | 'triggers.idempotencyWindowMs'
+  | 'triggers.onExternalBuy'
+  | 'triggers.onExternalSell'
+  | 'triggers.triggerThresholdUsd'
   | 'targets.volumeUsdMin'
   | 'targets.netBuyinUsdMin'
   | 'targets.volatilityPctMin'
@@ -142,7 +172,13 @@ export type StrategyFieldPath =
   | 'riskControls.requireCompleteMetrics'
   | 'execution.enabled'
   | 'execution.route'
-  | 'execution.commitment';
+  | 'execution.commitment'
+  | 'execution.timeJitterRatio'
+  | 'execution.volumeJitterRatio'
+  | 'execution.macroObjective'
+  | 'execution.tactics.dumpRatio'
+  | 'execution.tactics.followSellRatio'
+  | 'execution.tactics.absorbRatio';
 
 export interface StrategyFieldSchema {
   id: string;
