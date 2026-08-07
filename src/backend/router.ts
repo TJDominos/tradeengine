@@ -7,6 +7,7 @@ import { handleSettingsRoutes } from './api/settingsHandler';
 import { handleStateRoutes } from './api/stateHandler';
 import { handleStrategyRoutes } from './api/strategyHandler';
 import { handleWebhookRoutes } from './api/webhookHandler';
+import { ensureDbSchemaInitialized } from './userStore';
 import { errorResponse, jsonResponse } from './workerCore';
 import type { Env } from './workerShared';
 
@@ -44,6 +45,11 @@ export async function appRouter(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  // ─── Singleton: Initialize database schema once per Isolate lifecycle ───
+  // This ensures the schema is set up exactly once, before any request routing.
+  // This decouples schema initialization from the authentication hot path.
+  await ensureDbSchemaInitialized(env.TRADINGBOT_DB);
+
   const url = new URL(request.url);
 
   if (url.pathname.startsWith('/api/')) {

@@ -6,7 +6,7 @@ import {
   dbCreateUser,
   dbDeleteSession,
   dbGetUserBySessionToken,
-  dbSetupRequired,
+  dbIsSetupRequired,
 } from '../userStore';
 import type { Env } from '../workerShared';
 import {
@@ -44,7 +44,7 @@ export async function handleAuthRoutes(
 }
 
 async function handleAuthStatus(request: Request, env: Env): Promise<Response> {
-  const setupRequired = await dbSetupRequired(env.TRADINGBOT_DB);
+  const setupRequired = await dbIsSetupRequired(env.TRADINGBOT_DB);
   if (setupRequired) {
     return jsonResponse({ setupRequired: true, authenticated: false, user: null });
   }
@@ -61,7 +61,7 @@ async function handleAuthStatus(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleBootstrap(request: Request, env: Env): Promise<Response> {
-  const setupRequired = await dbSetupRequired(env.TRADINGBOT_DB);
+  const setupRequired = await dbIsSetupRequired(env.TRADINGBOT_DB);
   if (!setupRequired) {
     throw new ApiError(
       403,
@@ -94,7 +94,7 @@ async function handleBootstrap(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleLogin(request: Request, env: Env): Promise<Response> {
-  const setupRequired = await dbSetupRequired(env.TRADINGBOT_DB);
+  const setupRequired = await dbIsSetupRequired(env.TRADINGBOT_DB);
   if (setupRequired) {
     throw new ApiError(
       403,
