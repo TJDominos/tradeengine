@@ -29,7 +29,6 @@ import {
   parseJsonText,
   sha256Hex,
 } from '../workerCore';
-import { dbEnsureTradeDomainSchema } from '../workerSchema';
 import type {
   Env,
   SettingsUpdateRequest,
@@ -155,7 +154,6 @@ async function dbGetStrategyRows(
   query: string,
   bindings: Array<string | number | null> = [],
 ): Promise<StrategyRecord[]> {
-  await dbEnsureTradeDomainSchema(env.TRADINGBOT_DB);
   const prepared = env.TRADINGBOT_DB.prepare(query).bind(...bindings);
   const result = await prepared.all<{
     version_id: string;
@@ -229,7 +227,6 @@ export async function addStrategy(
   versionId: string,
   config: StrategyRecordConfig,
 ): Promise<StrategyRecord> {
-  await dbEnsureTradeDomainSchema(env.TRADINGBOT_DB);
   await env.TRADINGBOT_DB
     .prepare(
       `INSERT INTO strategies (
@@ -590,7 +587,6 @@ async function dbGetOrCreatePrimaryStrategyDefinition(
   db: D1Database,
   userId: number,
 ): Promise<StrategyDefinitionRecord> {
-  await dbEnsureTradeDomainSchema(db);
   const existing = await db
     .prepare(
       `SELECT
@@ -673,7 +669,6 @@ async function dbGetStrategyVersionById(
   db: D1Database,
   versionId: number,
 ): Promise<StrategyVersionRecord | null> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       `SELECT
@@ -756,7 +751,6 @@ export async function dbSaveActiveStrategyVersionDocument(
     changeNote?: string;
   },
 ): Promise<{ version: StrategyVersionRecord; created: boolean }> {
-  await dbEnsureTradeDomainSchema(db);
   const definition = await dbGetOrCreatePrimaryStrategyDefinition(db, userId);
   const document = normalizeStrategyDocument(documentInput);
   const checksum = await sha256Hex(serializeStrategyVersionContent(document));
@@ -892,7 +886,6 @@ export async function dbListStrategyVersions(
   userId: number,
   limit = 25,
 ): Promise<StrategyVersionRecord[]> {
-  await dbEnsureTradeDomainSchema(db);
   const definition = await dbGetOrCreatePrimaryStrategyDefinition(db, userId);
   const fetchLimit = Math.max(limit * 10, 250);
   const rows = await db
@@ -951,7 +944,6 @@ export async function dbDeletePreviousStrategyVersions(
   deletedEvaluations: number;
   keptVersion: StrategyVersionRecord | null;
 }> {
-  await dbEnsureTradeDomainSchema(db);
   const definition = await dbGetOrCreatePrimaryStrategyDefinition(db, userId);
   const rows = await db
     .prepare(
@@ -1147,7 +1139,6 @@ export async function dbListStrategyEvaluations(
   summary: Record<string, unknown>;
   createdAt: number;
 }>> {
-  await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
       `SELECT
@@ -1218,7 +1209,6 @@ async function dbCreateStrategyEvaluation(
   trigger: StrategyTriggerEvent,
   runtime: StrategyRuntimeResult,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   const createdAt = nowTs();
   await db
     .prepare(

@@ -1,7 +1,6 @@
 import { ApiError } from '../errors';
 import { nowTs } from '../time';
 import { normalizePubkey } from '../workerCore';
-import { dbEnsureTradeDomainSchema } from '../workerSchema';
 import type { MarketRefreshStatusRecord } from '../workerShared';
 
 const MARKET_REFRESH_RUNNING_STALE_AFTER_SEC = 15 * 60;
@@ -11,7 +10,6 @@ export async function dbGetMarketRefreshState(
   userId: number,
   contractAddress: string,
 ): Promise<MarketRefreshStatusRecord | null> {
-  await dbEnsureTradeDomainSchema(db);
   const normalizedContractAddress = normalizePubkey(contractAddress);
   const row = await db
     .prepare(
@@ -59,7 +57,6 @@ export async function dbTryStartMarketRefresh(
   userId: number,
   contractAddress: string,
 ): Promise<{ acquired: boolean; state: MarketRefreshStatusRecord }> {
-  await dbEnsureTradeDomainSchema(db);
   const normalizedContractAddress = normalizePubkey(contractAddress);
   const requestId = crypto.randomUUID();
   const now = nowTs();
@@ -137,7 +134,6 @@ export async function dbCompleteMarketRefresh(
   requestId: string,
   summaryText: string,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   const now = nowTs();
   await db
     .prepare(
@@ -160,7 +156,6 @@ export async function dbFailMarketRefresh(
   requestId: string,
   errorMessage: string,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   const now = nowTs();
   await db
     .prepare(
@@ -183,7 +178,6 @@ export async function dbCancelMarketRefresh(
   requestId: string,
   reason: string,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   const now = nowTs();
   await db
     .prepare(

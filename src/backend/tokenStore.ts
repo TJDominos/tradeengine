@@ -8,7 +8,6 @@ import {
   normalizeRpcUrl,
   solanaRpc,
 } from './workerCore';
-import { dbEnsureTradeDomainSchema } from './workerSchema';
 import type {
   RpcEndpoint,
   RpcEndpointCreateRequest,
@@ -36,7 +35,6 @@ export async function dbListRpcEndpoints(
   userId: number,
   network = 'solana',
 ): Promise<RpcEndpoint[]> {
-  await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
       'SELECT id, network, url, is_active, created_at FROM rpc_endpoints WHERE user_id = ?1 AND network = ?2 ORDER BY created_at DESC, id DESC',
@@ -79,7 +77,6 @@ export async function dbAddRpcEndpoint(
   userId: number,
   input: RpcEndpointCreateRequest,
 ): Promise<RpcEndpoint> {
-  await dbEnsureTradeDomainSchema(db);
   const network = input.network.trim().toLowerCase();
   if (network !== 'solana') {
     throw new ApiError(400, 'Only the solana network is supported right now');
@@ -127,7 +124,6 @@ export async function dbDeleteRpcEndpoint(
   userId: number,
   endpointId: number,
 ): Promise<RpcEndpoint> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       'SELECT id, network, url, is_active, created_at FROM rpc_endpoints WHERE id = ?1 AND user_id = ?2',
@@ -154,7 +150,6 @@ export async function dbDeleteRpcEndpoint(
 }
 
 export async function dbListTradableTokens(db: D1Database): Promise<TradableToken[]> {
-  await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
       'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens WHERE is_active = 1 ORDER BY id ASC',
@@ -184,7 +179,6 @@ export async function dbCreateTradableToken(
   input: TradableTokenCreateRequest,
   decimals: number | null,
 ): Promise<TradableToken> {
-  await dbEnsureTradeDomainSchema(db);
   const network = input.network.trim().toLowerCase();
   if (network !== 'solana') {
     throw new ApiError(400, 'Only the solana network is supported right now');
@@ -258,7 +252,6 @@ export async function dbDeleteTradableToken(
   db: D1Database,
   tokenId: number,
 ): Promise<TradableToken> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens WHERE id = ?1 LIMIT 1',
@@ -336,7 +329,6 @@ export async function dbUpdateTradableTokenMetadata(
   tokenId: number,
   snapshot: TokenMarketSnapshot,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   await db
     .prepare(
       `UPDATE tradable_tokens
@@ -352,7 +344,6 @@ export async function dbResolveTradableTokenId(
   db: D1Database,
   contractAddress: string,
 ): Promise<number | null> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       'SELECT id FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2 LIMIT 1',
@@ -366,7 +357,6 @@ export async function dbGetLatestTokenMarketSnapshot(
   db: D1Database,
   tokenId: number,
 ): Promise<TokenMarketSnapshot | null> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       `SELECT
@@ -435,7 +425,6 @@ export async function dbInsertTokenMarketSnapshot(
   tokenId: number,
   snapshot: TokenMarketSnapshot,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   await db
     .prepare(
       `INSERT INTO token_market_snapshots (
@@ -484,7 +473,6 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
   endTime: number,
   limit: number = 100,
 ): Promise<TokenMarketSnapshot[]> {
-  await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
       `SELECT

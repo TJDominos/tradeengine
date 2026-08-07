@@ -1,5 +1,4 @@
 import type { Env } from '../workerShared';
-import { dbEnsureSchema } from '../workerSchema';
 import {
   base58Encode,
 } from '../workerCore';
@@ -28,7 +27,6 @@ export async function getActiveAccounts(
     );
   }
 
-  await dbEnsureSchema(env.TRADINGBOT_DB);
   const rows = await env.TRADINGBOT_DB
     .prepare(
       `SELECT

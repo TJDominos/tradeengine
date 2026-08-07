@@ -22,10 +22,7 @@ import type {
   TokenMarketSnapshot,
   TradeLogCreateRequest,
 } from '../workerShared';
-import {
-  dbEnsureTradeDomainSchema,
-  parseJsonText,
-} from '../workerSchema';
+import { parseJsonText } from '../workerSchema';
 import {
   dedupeStrings,
   extractStoredSignalContractAddresses,
@@ -47,7 +44,6 @@ export async function dbApplyTokenHolderTransactionDelta(
   txSignature: string,
   details: StoredSignalTransactionDetails,
 ): Promise<boolean> {
-  await dbEnsureTradeDomainSchema(db);
   if (!details.fromWalletAddress || !details.toWalletAddress || details.tokenAmount == null || details.tokenAmount <= 0) {
     return false;
   }
@@ -133,7 +129,6 @@ async function dbUpdateSignalsByTxSignatureForUser(
   walletAddress: string | null,
   details: StoredSignalTransactionDetails,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   await db
     .prepare(
       `UPDATE signals
@@ -167,7 +162,6 @@ async function dbListSignalGroupsForTokenWindow(
   }>;
   mergedDetails: StoredSignalTransactionDetails;
 }>> {
-  await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
       `SELECT
@@ -317,7 +311,6 @@ async function dbSignalExistsForUserTxSignature(
   userId: number,
   txSignature: string,
 ): Promise<boolean> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       `SELECT id
@@ -532,7 +525,6 @@ export async function dbCreateTradeLog(
   db: D1Database,
   input: TradeLogCreateRequest,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   const timestamp = nowTs();
   await db
     .prepare(
@@ -572,7 +564,6 @@ export async function dbCreateSignal(
   db: D1Database,
   input: SignalCreateRequest,
 ): Promise<{ signal: SignalRecord; inserted: boolean }> {
-  await dbEnsureTradeDomainSchema(db);
   const existing = await db
     .prepare(
       `SELECT
@@ -684,7 +675,6 @@ export async function dbClaimSignalProcessing(
   source: string,
   externalId: string,
 ): Promise<boolean> {
-  await dbEnsureTradeDomainSchema(db);
   const result = await db
     .prepare(
       `UPDATE signals
@@ -738,7 +728,6 @@ export async function dbUpdateSignalTransactionDetails(
   walletAddress: string | null,
   details: StoredSignalTransactionDetails,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   await db
     .prepare(
       `UPDATE signals
@@ -924,7 +913,6 @@ export async function dbMarkSignalProcessed(
   source: string,
   externalId: string,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   await db
     .prepare(
       `UPDATE signals
@@ -942,7 +930,6 @@ export async function dbMarkSignalFailed(
   externalId: string,
   errorMessage: string,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   await db
     .prepare(
       `UPDATE signals

@@ -21,6 +21,7 @@ import type {
   StrategyVersionDocument,
 } from './types';
 import type { ExternalTradeEvent } from './triggers';
+import { initializeAllSchemas } from '../services/dbSetup';
 import { executeSwap } from '../services/jupiterSwapService';
 import { SOLANA_USDC_MINT } from '../workerShared';
 import { getActiveAccounts } from '../services/accountPoolService';
@@ -195,6 +196,7 @@ export class StrategyEngineDurableObject {
   }
 
   public async fetch(request: Request): Promise<Response> {
+    await initializeAllSchemas(this.env);
     const url = new URL(request.url);
     await this.ensureHydrated();
 
@@ -245,6 +247,7 @@ export class StrategyEngineDurableObject {
   }
 
   public async alarm(): Promise<void> {
+    await initializeAllSchemas(this.env);
     await this.ensureHydrated();
     const state = this.persistedState;
     const config = state.config;

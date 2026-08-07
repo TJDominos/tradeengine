@@ -1,6 +1,5 @@
 import { nowTs } from '../time';
 import { dbResolveTradableTokenId } from '../tokenStore';
-import { dbEnsureTradeDomainSchema } from '../workerSchema';
 import type { HistoricalSetupRecord, SettingsState } from '../workerShared';
 
 export async function dbCreateHistoricalSetupSnapshot(
@@ -8,7 +7,6 @@ export async function dbCreateHistoricalSetupSnapshot(
   userId: number,
   settings: SettingsState,
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   const tokenId = settings.contractAddress.trim()
     ? await dbResolveTradableTokenId(db, settings.contractAddress)
     : null;
@@ -50,7 +48,6 @@ export async function dbGetLatestHistoricalSetupId(
   db: D1Database,
   userId: number,
 ): Promise<number | null> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       'SELECT id FROM historic_setups WHERE user_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 1',
@@ -66,7 +63,6 @@ export async function dbComputeManagedProfitUsdc(
   contractAddress: string,
   currentPriceUsd: number | null,
 ): Promise<number> {
-  await dbEnsureTradeDomainSchema(db);
   const tokenId = await dbResolveTradableTokenId(db, contractAddress);
   if (!tokenId) {
     return 0;
@@ -100,7 +96,6 @@ export async function dbListHistoricalSetups(
   db: D1Database,
   userId: number,
 ): Promise<HistoricalSetupRecord[]> {
-  await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
       `SELECT

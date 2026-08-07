@@ -26,7 +26,7 @@ import {
   tryNormalizeSolanaPubkey,
   uniqueSolanaPubkeys,
 } from '../workerCore';
-import { dbEnsureSchema, parseJsonText } from '../workerSchema';
+import { parseJsonText } from '../workerSchema';
 import {
   dbApplyTokenHolderTransactionDelta,
   dbClaimSignalProcessing,
@@ -166,7 +166,6 @@ async function dbListUserIdsByActiveContractAddress(
   db: D1Database,
   contractAddress: string,
 ): Promise<number[]> {
-  await dbEnsureSchema(db);
   const rows = await db
     .prepare(
       `SELECT DISTINCT user_id

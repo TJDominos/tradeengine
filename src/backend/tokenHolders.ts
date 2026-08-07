@@ -1,6 +1,5 @@
 import { nowTs } from './time';
 import { buildTokenHolderSyncSummary } from './workerCore';
-import { dbEnsureTradeDomainSchema } from './workerSchema';
 import type {
   OutsideTokenHolderRecord,
   OutsideTokenHolderPageRecord,
@@ -34,7 +33,6 @@ export async function dbUpsertTokenHolderAddresses(
   addresses: string[],
   source = 'rpc_scan',
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   if (addresses.length === 0) {
     return;
   }
@@ -71,7 +69,6 @@ export async function dbSyncTokenHolderBalances(
   upsertedCount: number;
   zeroedCount: number;
 }> {
-  await dbEnsureTradeDomainSchema(db);
   const timestamp = nowTs();
   const existingRows = await db
     .prepare(
@@ -129,7 +126,6 @@ export async function dbGetTokenHolderSyncState(
   db: D1Database,
   tokenId: number,
 ): Promise<TokenHolderSyncStateRecord | null> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       `SELECT
@@ -193,7 +189,6 @@ export async function dbPutTokenHolderSyncState(
   db: D1Database,
   state: TokenHolderSyncStateRecord,
 ): Promise<TokenHolderSyncStateRecord> {
-  await dbEnsureTradeDomainSchema(db);
   await db
     .prepare(
       `INSERT INTO token_holder_sync_states (
@@ -299,7 +294,6 @@ export async function dbCountTokenHolderSyncStageHolders(
   tokenId: number,
   runId: string,
 ): Promise<number> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS holder_count
@@ -324,8 +318,6 @@ export async function dbStageTokenHolderBalanceShard(
   balances: Map<string, number>,
   source = 'rpc_owner_prefix_shards',
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
-
   await db
     .prepare(
       `DELETE FROM token_holder_sync_stage
@@ -375,7 +367,6 @@ export async function dbApplyTokenHolderBalanceShardDelta(
   balances: Map<string, number>,
   source = 'rpc_owner_prefix_shards_progress',
 ): Promise<void> {
-  await dbEnsureTradeDomainSchema(db);
   const existingRows = await db
     .prepare(
       `SELECT wallet_address, amount_holding
@@ -499,7 +490,6 @@ export async function dbFinalizePagedTokenHolderSync(
   state: TokenHolderSyncStateRecord,
   source = 'rpc_owner_prefix_shards',
 ): Promise<TokenHolderSyncSummary> {
-  await dbEnsureTradeDomainSchema(db);
   if (!state.runId) {
     return buildTokenHolderSyncSummary(state, {
       status: 'failed',
@@ -634,7 +624,6 @@ export async function dbRecomputeTokenHolderAggregate(
     deltaSyncAt?: number | null;
   },
 ): Promise<TokenHolderAggregateRecord> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       `SELECT
@@ -751,7 +740,6 @@ export async function dbGetTokenHolderAggregate(
   db: D1Database,
   tokenId: number,
 ): Promise<TokenHolderAggregateRecord | null> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       `SELECT
@@ -809,7 +797,6 @@ export async function dbHasTokenHolderRows(
   db: D1Database,
   tokenId: number,
 ): Promise<boolean> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       `SELECT 1 AS has_rows
@@ -829,7 +816,6 @@ export async function dbComputeTokenHolderAggregateFromStage(
   runId: string,
   updatedAt: number,
 ): Promise<TokenHolderAggregateRecord | null> {
-  await dbEnsureTradeDomainSchema(db);
   const row = await db
     .prepare(
       `WITH holder_rows AS (
@@ -889,7 +875,6 @@ export async function dbListOutsideTokenHoldersFromFinal(
   tokenId: number,
   limit: number | null = 200,
 ): Promise<OutsideTokenHolderRecord[]> {
-  await dbEnsureTradeDomainSchema(db);
   const baseQuery = `SELECT
      tha.wallet_address,
      tha.amount_holding,
@@ -948,7 +933,6 @@ export async function dbListOutsideTokenHoldersFromStage(
   runId: string,
   limit: number | null = 200,
 ): Promise<OutsideTokenHolderRecord[]> {
-  await dbEnsureTradeDomainSchema(db);
   const baseQuery = `WITH holder_rows AS (
      SELECT
        wallet_address,
@@ -1067,7 +1051,6 @@ async function dbListOutsideTokenHoldersPageFromFinal(
   tokenId: number,
   options?: OutsideTokenHolderPageOptions,
 ): Promise<OutsideTokenHolderPageRecord> {
-  await dbEnsureTradeDomainSchema(db);
   const normalized = normalizeOutsideTokenHolderPageOptions(options);
   const offset = (normalized.page - 1) * normalized.pageSize;
   const likeSearch = `%${normalized.searchTerm}%`;
@@ -1155,7 +1138,6 @@ async function dbListOutsideTokenHoldersPageFromStage(
   runId: string,
   options?: OutsideTokenHolderPageOptions,
 ): Promise<OutsideTokenHolderPageRecord> {
-  await dbEnsureTradeDomainSchema(db);
   const normalized = normalizeOutsideTokenHolderPageOptions(options);
   const offset = (normalized.page - 1) * normalized.pageSize;
   const likeSearch = `%${normalized.searchTerm}%`;

@@ -21,12 +21,6 @@ import {
   validateUsername,
   verifyPassword,
 } from './workerCore';
-import { dbEnsureSchema, dbEnsureTradeDomainSchema } from './workerSchema';
-
-// ─── Singleton Schema Initialization ──────────────────────────────────────
-// This flag ensures the database schema is initialized exactly once per Isolate
-// lifecycle. Schema initialization is decoupled from the authentication hot path.
-let isSchemaInitialized = false;
 import type {
   AccountRecord,
   AuditLog,
@@ -92,36 +86,11 @@ function hasSufficientBalance(
 }
 
 /**
- * Initialize the database schema exactly once per Isolate lifecycle.
- * This is called at the worker entry point, before routing any requests.
- * Uses a singleton flag to avoid redundant initialization.
- */
-export async function ensureDbSchemaInitialized(db: D1Database): Promise<void> {
-  if (isSchemaInitialized) {
-    return;
-  }
-  await dbEnsureSchema(db);
-  isSchemaInitialized = true;
-}
-
-/**
  * Lightweight check: does the database have any users?
  * This is used by auth endpoints to determine if setup is required.
  * Does NOT trigger schema initialization (schema init happens at worker startup).
  */
 export async function dbIsSetupRequired(db: D1Database): Promise<boolean> {
-  const result = await db
-    .prepare('SELECT COUNT(*) AS cnt FROM users')
-    .first<{ cnt: number }>();
-  return (result?.cnt ?? 0) === 0;
-}
-
-/**
- * @deprecated Use ensureDbSchemaInitialized() at worker startup and dbIsSetupRequired() in handlers.
- * This function coupled schema init to the auth path (performance issue).
- */
-export async function dbSetupRequired(db: D1Database): Promise<boolean> {
-  await dbEnsureSchema(db);
   const result = await db
     .prepare('SELECT COUNT(*) AS cnt FROM users')
     .first<{ cnt: number }>();
@@ -437,7 +406,6 @@ export async function dbGetManagedAccountById(
   userId: number,
   accountId: number,
 ): Promise<AccountRecord> {
-  await dbEnsureSchema(db);
   const row = await db
     .prepare(
       `SELECT id, label, wallet_address, type, created_at
@@ -485,7 +453,6 @@ export async function getAvailableAccount(
     cooldownMs?: number;
   },
 ): Promise<AvailableAccountRecord | null> {
-  await dbEnsureTradeDomainSchema(db);
   const normalizedEstimatedAmount =
     Number.isFinite(estimatedAmount) && estimatedAmount > 0 ? estimatedAmount : 0;
   if (normalizedEstimatedAmount <= 0) {
@@ -764,7 +731,6 @@ export async function dbListAuditLogs(
 }
 
 export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]> {
-  await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
       `SELECT
@@ -825,7 +791,6 @@ export async function dbListWebhookTransactionLogs(
   db: D1Database,
   userId: number,
 ): Promise<WebhookTransactionLogRecord[]> {
-  await dbEnsureTradeDomainSchema(db);
   const [rows, tokens] = await Promise.all([
     db
       .prepare(
@@ -954,7 +919,6 @@ export async function dbListRecentSignalsForDebug(
   details: StoredSignalTransactionDetails | null;
   payloadPreview: string;
 }>> {
-  await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
       `SELECT
