@@ -17,6 +17,7 @@ import {
   decodeBase64Bytes,
   dedupeStrings,
   fetchSolanaMintDecimals,
+  getTokenHolderSyncShardCursor,
   isHeliusRpcUrl,
   isSolanaRpcRateLimitError,
   normalizeHeliusRpcUrl,
@@ -46,6 +47,10 @@ const HOLDER_SYNC_ACCOUNT_DETAILS_REQUESTS_PER_SECOND = 4;
 const HOLDER_SYNC_ACCOUNT_DETAILS_INTERVAL_MS = Math.ceil(
   1000 / HOLDER_SYNC_ACCOUNT_DETAILS_REQUESTS_PER_SECOND,
 );
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 interface HeliusDasTokenAccountsResult {
   total?: number;

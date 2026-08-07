@@ -9,6 +9,10 @@
     "preview": "npm run build && wrangler dev",
     "clean": "rm -rf dist rust-backend/target",
     "lint": "tsc --noEmit",
+    "check:strategy-queue-recovery": "node scripts/check-strategy-queue-recovery.mjs",
+    "check:strategy-do-lifecycle": "node scripts/check-strategy-do-lifecycle.mjs",
+    "check:strategy-do-completion-advance": "node scripts/check-strategy-do-completion-advance.mjs",
+    "check:strategy-do-idempotency": "node scripts/check-strategy-do-idempotency.mjs",
     "check:max-lines": "node scripts/check-max-lines.mjs",
     "deploy": "npm run build && wrangler deploy"
   },
@@ -23,6 +27,7 @@
     "micro-ed25519-hdkey": "^0.1.2",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "react-hook-form": "^7.84.0",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {

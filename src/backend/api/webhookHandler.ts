@@ -1,7 +1,14 @@
+import { ApiError } from '../errors';
 import { summarizeStrategyRuntime } from '../strategy/runtime';
+import type { ExternalTradeEvent } from '../strategy/triggers';
+import { type StrategyEngineDurableObjectEventRequest } from '../strategy/strategyEngineDO';
 import { buildWebhookStrategyTrigger } from '../strategy/triggers';
 import { nowTs } from '../time';
-import { dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
+import {
+  dbGetLatestTokenMarketSnapshot,
+  dbResolveSolanaRpcUrls,
+  dbResolveTradableTokenId,
+} from '../tokenStore';
 import { dbAddAuditLog, dbLoadSettings } from '../userStore';
 import type {
   AlchemyWebhookPayload,
@@ -19,6 +26,7 @@ import {
   tryNormalizeSolanaPubkey,
   uniqueSolanaPubkeys,
 } from '../workerCore';
+import { dbEnsureSchema, parseJsonText } from '../workerSchema';
 import {
   dbApplyTokenHolderTransactionDelta,
   dbClaimSignalProcessing,
@@ -29,8 +37,11 @@ import {
   dbUpdateSignalTransactionDetails,
   fetchSolanaWebhookTransactionDetailsFromRpc,
 } from '../services/signalStore';
+import { StrategyAutomationService } from '../services/strategyAutomationService';
 import { runAndPersistStrategyEvaluation } from '../services/strategyStore';
 import { syncTokenMarketSnapshotForUser } from '../services/tokenMarketService';
+
+const strategyAutomationService = new StrategyAutomationService();
 
 export async function handleWebhookRoutes(
   request: Request,
@@ -38,10 +49,117 @@ export async function handleWebhookRoutes(
   ctx: ExecutionContext,
 ): Promise<Response | null> {
   const url = new URL(request.url);
+  if (
+    request.method === 'POST' &&
+    (url.pathname === '/api/webhook' || url.pathname === '/api/webhooks/strategy/external-trade')
+  ) {
+    return handleRustNodeWebhook(request, env);
+  }
   if (request.method === 'POST' && url.pathname === '/api/webhooks/alchemy/notify') {
     return handleAlchemyNotifyWebhook(request, url, env, ctx);
   }
   return null;
+}
+
+function parseRustNodeWebhookPayload(body: unknown): ExternalTradeEvent {
+  if (!isRecord(body)) {
+    throw new ApiError(400, 'Webhook body must be a JSON object');
+  }
+
+  const eventType = readNonEmptyString(body.type);
+  if (eventType !== 'whale_buy' && eventType !== 'whale_sell') {
+    throw new ApiError(400, 'Webhook type must be whale_buy or whale_sell');
+  }
+
+  const amount = typeof body.amount === 'number' ? body.amount : Number.NaN;
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new ApiError(400, 'Webhook amount must be a finite non-negative number');
+  }
+
+  const walletAddressRaw =
+    readNonEmptyString(body.wallet_address) ??
+    readNonEmptyString(body.walletAddress);
+  if (!walletAddressRaw) {
+    throw new ApiError(400, 'Webhook wallet_address is required');
+  }
+
+  const contractAddress =
+    tryNormalizeSolanaPubkey(body.contract_address) ??
+    tryNormalizeSolanaPubkey(body.contractAddress);
+  if (!contractAddress) {
+    throw new ApiError(400, 'Webhook contractAddress is required');
+  }
+
+  const txHash =
+    readNonEmptyString(body.txHash) ??
+    readNonEmptyString(body.tx_hash) ??
+    readNonEmptyString(body.signature) ??
+    readNonEmptyString(body.txSignature);
+  if (!txHash) {
+    throw new ApiError(400, 'Webhook txHash is required for deduplication');
+  }
+
+  const isLossCutValue =
+    typeof body.is_loss_cut === 'boolean'
+      ? body.is_loss_cut
+      : typeof body.isLossCut === 'boolean'
+        ? body.isLossCut
+        : false;
+
+  return {
+    type: eventType,
+    amount,
+    contractAddress,
+    txHash,
+    wallet_address: normalizePubkey(walletAddressRaw),
+    is_loss_cut: isLossCutValue,
+  };
+}
+
+async function handleRustNodeWebhook(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const payload = parseRustNodeWebhookPayload(await parseJsonText<unknown>(await request.text()));
+  const activeTarget = await strategyAutomationService.getActiveStrategyStub(env);
+  if (!activeTarget) {
+    return jsonResponse({ ok: true, ignored: true, reason: 'no_active_strategy' }, 200);
+  }
+
+  if (activeTarget.record.config.strategyVersionId == null) {
+    throw new ApiError(500, 'Active strategy is missing strategyVersionId');
+  }
+
+  const doRequest: StrategyEngineDurableObjectEventRequest = {
+    userId: activeTarget.record.config.userId,
+    versionId: activeTarget.record.config.strategyVersionId,
+    strategyDocument: activeTarget.record.config.document,
+    event: payload,
+  };
+  const response = await activeTarget.stub.fetch('https://strategy-engine/webhook', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(doRequest),
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new ApiError(response.status, message || 'Failed to forward webhook to strategy engine');
+  }
+
+  const forwarded = await response.json<{
+    duplicate?: boolean;
+    status?: string;
+    metrics?: Record<string, unknown>;
+  }>();
+
+  return jsonResponse({
+    ok: true,
+    forwarded: true,
+    duplicate: forwarded.duplicate ?? false,
+    status: forwarded.status ?? 'running',
+  }, 200);
 }
 
 async function dbListUserIdsByActiveContractAddress(

@@ -34,6 +34,7 @@ import {
   normalizePubkey,
   parseStoredSignalTransactionDetails,
   solanaRpc,
+  tryNormalizeSolanaPubkey,
   uniqueSolanaPubkeys,
 } from '../workerCore';
 import { SOLANA_USDC_MINT, SOLANA_WRAPPED_SOL_MINT } from '../workerShared';

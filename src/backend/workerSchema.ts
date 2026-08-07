@@ -201,6 +201,15 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY(strategy_version_id) REFERENCES strategy_versions(id) ON DELETE CASCADE
   )`,
+  `CREATE TABLE IF NOT EXISTS strategies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    config TEXT NOT NULL,
+    report TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
   `CREATE TABLE IF NOT EXISTS token_holder_addresses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id INTEGER NOT NULL,
@@ -303,6 +312,8 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_strategy_versions_strategy_created ON strategy_versions(strategy_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_version_created ON strategy_evaluations(strategy_version_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_user_created ON strategy_evaluations(user_id, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_strategies_status_created ON strategies(status, created_at ASC)',
+  'CREATE INDEX IF NOT EXISTS idx_strategies_updated ON strategies(updated_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_wallet ON token_holder_addresses(token_id, wallet_address)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_amount ON token_holder_addresses(token_id, amount_holding DESC)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_transaction_deltas_token_sig ON token_holder_transaction_deltas(token_id, tx_signature)',

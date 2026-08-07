@@ -8,9 +8,14 @@ import {
   buildStrategyDocumentFromSettings,
   runStrategyRuntime,
 } from '../strategy/runtime';
+import { StrategyStatus } from '../strategy/types';
 import type {
+  ExecutionReport,
+  StrategyExecutionConfig,
   StrategyDefinitionRecord,
   StrategyMarketSnapshot,
+  StrategyRecord,
+  StrategyRecordConfig,
   StrategyRuntimeResult,
   StrategySettingsInput,
   StrategyTriggerEvent,
@@ -26,9 +31,390 @@ import {
 } from '../workerCore';
 import { dbEnsureTradeDomainSchema } from '../workerSchema';
 import type {
+  Env,
   SettingsUpdateRequest,
   TokenMarketSnapshot,
 } from '../workerShared';
+
+const DEFAULT_SERIAL_STRATEGY_BASE_VOLUME_USD = 300;
+const DEFAULT_SERIAL_STRATEGY_DISTRIBUTION_CHUNK_COUNT = 3;
+const DEFAULT_SERIAL_STRATEGY_DISTRIBUTION_DELAY_JITTER_MS = 2_000;
+
+function deepClone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function createStrategyRecordVersionId(): string {
+  if (typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `strategy-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function parseTimeRangeTargetToDurationMs(timeRangeTarget: string): number {
+  switch (timeRangeTarget) {
+    case '1h':
+      return 60 * 60 * 1000;
+    case '6h':
+      return 6 * 60 * 60 * 1000;
+    case '12h':
+      return 12 * 60 * 60 * 1000;
+    case '3d':
+      return 3 * 24 * 60 * 60 * 1000;
+    case '1w':
+      return 7 * 24 * 60 * 60 * 1000;
+    case '24h':
+    default:
+      return 24 * 60 * 60 * 1000;
+  }
+}
+
+function buildQueuedExecutionConfig(
+  execution: StrategyExecutionConfig,
+): StrategyExecutionConfig {
+  return {
+    ...execution,
+    tactics: {
+      ...execution.tactics,
+    },
+  };
+}
+
+function isStrategyFinished(status: StrategyStatus): boolean {
+  return (
+    status === 'completed' ||
+    status === 'aborted' ||
+    status === 'failed'
+  );
+}
+
+function normalizeStoredTimestamp(value: unknown): number {
+  if (typeof value === 'number') {
+    return value >= 1_000_000_000_000 ? value : value * 1000;
+  }
+  if (typeof value === 'string') {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      return normalizeStoredTimestamp(numeric);
+    }
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : nowTs();
+  }
+  return nowTs();
+}
+
+function mapStrategyStatus(value: string): StrategyStatus {
+  switch (value) {
+    case StrategyStatus.Pending:
+      return StrategyStatus.Pending;
+    case StrategyStatus.Running:
+      return StrategyStatus.Running;
+    case StrategyStatus.Completed:
+      return StrategyStatus.Completed;
+    case StrategyStatus.Aborted:
+      return StrategyStatus.Aborted;
+    case StrategyStatus.Paused:
+      return StrategyStatus.Paused;
+    case StrategyStatus.Failed:
+    default:
+      return StrategyStatus.Failed;
+  }
+}
+
+function mapStrategyRow(row: {
+  version_id: string;
+  status: string;
+  config: string;
+  report: string | null;
+  created_at: string | number;
+  updated_at: string | number;
+}): StrategyRecord {
+  const config = parseJsonText<StrategyRecordConfig>(row.config);
+  const report = row.report ? parseJsonText<ExecutionReport>(row.report) : undefined;
+  const createdAt = normalizeStoredTimestamp(row.created_at);
+  const updatedAt = normalizeStoredTimestamp(row.updated_at);
+  const status = mapStrategyStatus(row.status);
+  return {
+    versionId: row.version_id,
+    status,
+    config,
+    report,
+    createdAt,
+    updatedAt,
+    startedAt:
+      report?.startTime ??
+      (status === StrategyStatus.Running || isStrategyFinished(status)
+        ? updatedAt
+        : null),
+    finishedAt: report?.endTime ?? (isStrategyFinished(status) ? updatedAt : null),
+  };
+}
+
+async function dbGetStrategyRows(
+  env: Env,
+  query: string,
+  bindings: Array<string | number | null> = [],
+): Promise<StrategyRecord[]> {
+  await dbEnsureTradeDomainSchema(env.TRADINGBOT_DB);
+  const prepared = env.TRADINGBOT_DB.prepare(query).bind(...bindings);
+  const result = await prepared.all<{
+    version_id: string;
+    status: string;
+    config: string;
+    report: string | null;
+    created_at: string | number;
+    updated_at: string | number;
+  }>();
+  return result.results.map(mapStrategyRow);
+}
+
+function deriveQueuePaused(records: StrategyRecord[]): boolean {
+  const hasRunning = records.some((record) => record.status === StrategyStatus.Running);
+  if (hasRunning) {
+    return false;
+  }
+  const pending = records.filter((record) => record.status === StrategyStatus.Pending);
+  if (pending.length === 0) {
+    return false;
+  }
+  const latestFinal = records
+    .filter((record) => isStrategyFinished(record.status))
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+  return latestFinal?.status === StrategyStatus.Aborted;
+}
+
+function isManualStrategyVersionDocument(
+  document: StrategyVersionDocument,
+): boolean {
+  return document.metadata.origin === 'manual';
+}
+
+export function buildStrategyRecordConfigFromVersion(
+  version: StrategyVersionRecord,
+  userId: number,
+): StrategyRecordConfig {
+  const document = normalizeStrategyDocument(version.document);
+  return {
+    userId,
+    strategyVersionId: version.id,
+    strategyVersionNo: version.versionNo,
+    strategyType: version.strategyType,
+    document,
+    contractAddress: document.parameters.contractAddress,
+    macroObjective: document.execution.macroObjective,
+    tactics: {
+      ...document.execution.tactics,
+    },
+    execution: buildQueuedExecutionConfig(document.execution),
+    baseOrderCount: Math.max(
+      1,
+      Math.min(12, Math.max(3, document.riskControls.maxConcurrentOrders * 3)),
+    ),
+    baseTotalVolumeUsd:
+      document.riskControls.maxPositionUsd ??
+      (document.targets.volumeUsdMin > 0
+        ? document.targets.volumeUsdMin
+        : DEFAULT_SERIAL_STRATEGY_BASE_VOLUME_USD),
+    baseDurationMs: parseTimeRangeTargetToDurationMs(
+      document.parameters.timeRangeTarget,
+    ),
+    distributionChunkCount: DEFAULT_SERIAL_STRATEGY_DISTRIBUTION_CHUNK_COUNT,
+    distributionChunkDelayJitterMs:
+      DEFAULT_SERIAL_STRATEGY_DISTRIBUTION_DELAY_JITTER_MS,
+  };
+}
+
+export async function addStrategy(
+  env: Env,
+  versionId: string,
+  config: StrategyRecordConfig,
+): Promise<StrategyRecord> {
+  await dbEnsureTradeDomainSchema(env.TRADINGBOT_DB);
+  await env.TRADINGBOT_DB
+    .prepare(
+      `INSERT INTO strategies (
+         version_id,
+         status,
+         config,
+         report,
+         created_at,
+         updated_at
+       ) VALUES (?1, ?2, ?3, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    )
+    .bind(versionId, StrategyStatus.Pending, JSON.stringify(config))
+    .run();
+
+  const created = await getStrategyRecordByVersionId(env, versionId);
+  if (!created) {
+    throw new ApiError(500, `Failed to load created strategy ${versionId}`);
+  }
+  return created;
+}
+
+export async function getNextPendingStrategy(
+  env: Env,
+): Promise<StrategyRecord | null> {
+  const records = await dbGetStrategyRows(
+    env,
+    `SELECT version_id, status, config, report, created_at, updated_at
+     FROM strategies
+     WHERE status = ?1
+     ORDER BY datetime(created_at) ASC, id ASC
+     LIMIT 1`,
+    [StrategyStatus.Pending],
+  );
+  return records[0] ?? null;
+}
+
+export async function getActiveStrategy(
+  env: Env,
+): Promise<StrategyRecord | null> {
+  const running = await dbGetStrategyRows(
+    env,
+    `SELECT version_id, status, config, report, created_at, updated_at
+     FROM strategies
+     WHERE status = ?1
+     ORDER BY datetime(updated_at) DESC, id DESC`,
+    [StrategyStatus.Running],
+  );
+  if (running.length > 1) {
+    throw new ApiError(
+      500,
+      'Strict serial queue invariant violated: more than one strategy is running',
+    );
+  }
+  return running[0] ?? null;
+}
+
+export async function updateStrategyStatus(
+  env: Env,
+  versionId: string,
+  newStatus: StrategyStatus,
+  report?: ExecutionReport,
+): Promise<StrategyRecord | null> {
+  const record = await getStrategyRecordByVersionId(env, versionId);
+  if (!record) {
+    return null;
+  }
+
+  if (newStatus === StrategyStatus.Running) {
+    const active = await getActiveStrategy(env);
+    if (active && active.versionId === versionId) {
+      return active;
+    }
+    if (active) {
+      throw new ApiError(
+        409,
+        `Cannot start strategy ${versionId} while ${active.versionId} is still running`,
+      );
+    }
+  }
+
+  await env.TRADINGBOT_DB
+    .prepare(
+      `UPDATE strategies
+       SET status = ?2,
+           report = CASE
+             WHEN ?3 IS NULL THEN report
+             ELSE ?3
+           END,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE version_id = ?1`,
+    )
+    .bind(
+      versionId,
+      newStatus,
+      report ? JSON.stringify(report) : null,
+    )
+    .run();
+
+  return getStrategyRecordByVersionId(env, versionId);
+}
+
+export async function listStrategyRecords(env: Env): Promise<StrategyRecord[]> {
+  return dbGetStrategyRows(
+    env,
+    `SELECT version_id, status, config, report, created_at, updated_at
+     FROM strategies
+     ORDER BY datetime(created_at) ASC, id ASC`,
+  );
+}
+
+export async function getAllStrategies(
+  env: Env,
+): Promise<{
+  active: StrategyRecord[];
+  pending: StrategyRecord[];
+  history: StrategyRecord[];
+  paused: boolean;
+}> {
+  const records = await listStrategyRecords(env);
+  const active = records.filter((record) => record.status === StrategyStatus.Running);
+  const pending = records.filter((record) => record.status === StrategyStatus.Pending);
+  const history = records.filter(
+    (record) =>
+      record.status === StrategyStatus.Completed ||
+      record.status === StrategyStatus.Aborted ||
+      record.status === StrategyStatus.Failed,
+  );
+  return {
+    active,
+    pending,
+    history,
+    paused: deriveQueuePaused(records),
+  };
+}
+
+export async function getStrategyRecordByVersionId(
+  env: Env,
+  versionId: string,
+): Promise<StrategyRecord | null> {
+  const records = await dbGetStrategyRows(
+    env,
+    `SELECT version_id, status, config, report, created_at, updated_at
+     FROM strategies
+     WHERE version_id = ?1
+     LIMIT 1`,
+    [versionId],
+  );
+  return records[0] ?? null;
+}
+
+export async function findStrategyRecordByStrategyVersionId(
+  env: Env,
+  strategyVersionId: number,
+): Promise<StrategyRecord | null> {
+  const records = await dbGetStrategyRows(
+    env,
+    `SELECT version_id, status, config, report, created_at, updated_at
+     FROM strategies
+     WHERE json_extract(config, '$.strategyVersionId') = ?1
+     LIMIT 1`,
+    [strategyVersionId],
+  );
+  return records[0] ?? null;
+}
+
+export async function removePendingStrategy(
+  env: Env,
+  versionId: string,
+): Promise<StrategyRecord | null> {
+  const record = await getStrategyRecordByVersionId(env, versionId);
+  if (!record) {
+    return null;
+  }
+  if (record.status !== StrategyStatus.Pending) {
+    throw new ApiError(
+      409,
+      `Only pending strategies can be removed from the queue (${versionId})`,
+    );
+  }
+  await env.TRADINGBOT_DB
+    .prepare('DELETE FROM strategies WHERE version_id = ?1')
+    .bind(versionId)
+    .run();
+  return record;
+}
 
 function serializeStrategyVersionContent(
   document: StrategyVersionDocument,

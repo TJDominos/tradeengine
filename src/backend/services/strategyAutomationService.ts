@@ -4,25 +4,16 @@ import {
   fetchJupiterSwapQuote,
 } from '../jupiter';
 import {
-  DEFAULT_STRATEGY_TYPE,
-  PRIMARY_STRATEGY_NAME,
-} from '../strategy/config';
-import { StrategyEngine } from '../strategy/engine';
-import {
-  buildStrategyDocumentFromSettings,
-  runStrategyRuntime,
-} from '../strategy/runtime';
-import {
-  type ExternalTradeEvent,
-  TriggerHandler,
-} from '../strategy/triggers';
+  strategyEngineDurableObjectNameFor,
+  type StrategyEngineDurableObjectConfigureRequest,
+  type StrategyEngineDurableObjectMetrics,
+  type StrategyEngineDurableObjectStatus,
+} from '../strategy/strategyEngineDO';
+import { StrategyStatus } from '../strategy/types';
 import type {
-  StrategyDefinitionRecord,
+  ExecutionReport,
+  StrategyRecord,
   StrategyExecutionTaskPayload,
-  StrategyRuntimeResult,
-  StrategySettingsInput,
-  StrategyTriggerEvent,
-  StrategyVersionDocument,
   StrategyVersionRecord,
 } from '../strategy/types';
 import { nowTs } from '../time';
@@ -39,9 +30,7 @@ import { dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore'
 import type { Env } from '../workerShared';
 import {
   executeTradeTask,
-  isRecord,
   normalizePubkey,
-  readNonEmptyString,
   registerTradeTaskExecutor,
   type StrategyTaskExecutionContext,
   type StrategyTaskExecutionResult,
@@ -50,30 +39,352 @@ import { parseJsonBody } from '../workerSchema';
 import { SOLANA_USDC_MINT } from '../workerShared';
 import { dbGetLatestHistoricalSetupId } from './historyMetricsService';
 import { sendSolanaTransaction, signSolanaTransaction } from './solanaTradeService';
-import { dbGetActiveStrategyVersion } from './strategyStore';
+import {
+  addStrategy,
+  buildStrategyRecordConfigFromVersion,
+  findStrategyRecordByStrategyVersionId,
+  getAllStrategies,
+  getActiveStrategy,
+  getNextPendingStrategy,
+  updateStrategyStatus,
+} from './strategyStore';
 
-function buildStrategyRuntimeRegistryKey(
-  userId: number,
-  contractAddress: string,
-): string {
-  return `${userId}:${contractAddress}`;
+interface StrategyEngineMetrics {
+  actualTotalVolume: number;
+  actualNetInflow: number;
+  tacticsTriggeredCount: number;
+  pnl: number;
+  startTime?: number | null;
 }
 
-function parseTimeRangeTargetToDurationMs(timeRangeTarget: string): number {
-  switch (timeRangeTarget) {
-    case '1h':
-      return 60 * 60 * 1000;
-    case '6h':
-      return 6 * 60 * 60 * 1000;
-    case '12h':
-      return 12 * 60 * 60 * 1000;
-    case '3d':
-      return 3 * 24 * 60 * 60 * 1000;
-    case '1w':
-      return 7 * 24 * 60 * 60 * 1000;
-    case '24h':
-    default:
-      return 24 * 60 * 60 * 1000;
+interface StrategyEngineDurableObjectMetricsResponse {
+  status: StrategyEngineDurableObjectStatus;
+  metrics: StrategyEngineDurableObjectMetrics;
+  currentEngineState: string | null;
+  nextExecutionTime: number | null;
+}
+
+export interface StrategyQueueSnapshot {
+  active: StrategyRecord | null;
+  pending: StrategyRecord[];
+  history: StrategyRecord[];
+  paused: boolean;
+  currentEngineState: string | null;
+  currentMetrics: StrategyEngineMetrics | null;
+}
+
+export class StrategyAutomationService {
+  public async isBusy(env: Env): Promise<boolean> {
+    return (await getActiveStrategy(env)) != null;
+  }
+
+  public async enqueueStrategyVersion(
+    env: Env,
+    userId: number,
+    version: StrategyVersionRecord,
+  ): Promise<StrategyRecord> {
+    const existing = await findStrategyRecordByStrategyVersionId(env, version.id);
+    if (existing) {
+      return existing;
+    }
+    return addStrategy(
+      env,
+      `strategy-${version.id}`,
+      buildStrategyRecordConfigFromVersion(version, userId),
+    );
+  }
+
+  public async getActiveStrategyStub(
+    env: Env,
+  ): Promise<{ record: StrategyRecord; stub: DurableObjectStub } | null> {
+    await this.reconcileActiveStrategy(env);
+    const activeRecord = await getActiveStrategy(env);
+    if (!activeRecord) {
+      return null;
+    }
+    return {
+      record: activeRecord,
+      stub: this.resolveStrategyEngineStub(env, activeRecord),
+    };
+  }
+
+  public async getQueueSnapshot(env: Env): Promise<StrategyQueueSnapshot> {
+    await this.reconcileActiveStrategy(env);
+    const grouped = await getAllStrategies(env);
+    const currentMetrics = await this.getCurrentMetrics(env);
+    return {
+      active: grouped.active[0] ?? null,
+      pending: grouped.pending,
+      history: grouped.history,
+      paused: grouped.paused,
+      currentEngineState: currentMetrics?.currentEngineState ?? null,
+      currentMetrics: currentMetrics?.metrics ?? null,
+    };
+  }
+
+  public async startNextStrategy(
+    env: Env,
+    options?: { force?: boolean },
+  ): Promise<StrategyRecord | null> {
+    const currentlyRunning = await this.reconcileActiveStrategy(env);
+    if (currentlyRunning) {
+      return currentlyRunning;
+    }
+
+    const grouped = await getAllStrategies(env);
+    if (grouped.paused && !options?.force) {
+      return null;
+    }
+
+    const pendingRecord = await getNextPendingStrategy(env);
+    if (!pendingRecord) {
+      return null;
+    }
+
+    const runningRecord = await updateStrategyStatus(
+      env,
+      pendingRecord.versionId,
+      StrategyStatus.Running,
+    );
+    if (!runningRecord) {
+      throw new ApiError(
+        500,
+        `Failed to promote strategy ${pendingRecord.versionId} to running`,
+      );
+    }
+
+    const engineStub = this.resolveStrategyEngineStub(env, runningRecord);
+
+    try {
+      await this.fetchStrategyEngineJson(engineStub, '/start', {
+        method: 'POST',
+        body: JSON.stringify(this.buildConfigureRequest(runningRecord)),
+      });
+      return runningRecord;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      const report = this.buildExecutionReport(runningRecord, null, {
+        endTime: Date.now(),
+        abortReason: `Failed to start strategy engine: ${message}`,
+      });
+      await updateStrategyStatus(
+        env,
+        runningRecord.versionId,
+        StrategyStatus.Failed,
+        report,
+      );
+      throw error instanceof ApiError
+        ? error
+        : new ApiError(500, `Failed to start strategy ${runningRecord.versionId}: ${message}`);
+    }
+  }
+
+  public async completeCurrentStrategy(
+    env: Env,
+    metricsResponse?: StrategyEngineDurableObjectMetricsResponse,
+  ): Promise<StrategyRecord | null> {
+    const activeRecord = await getActiveStrategy(env);
+    if (!activeRecord) {
+      return null;
+    }
+
+    const versionId = activeRecord.versionId;
+    const currentMetricsResponse =
+      metricsResponse ?? (await this.fetchCurrentMetricsResponse(env, activeRecord));
+    const report = this.buildExecutionReport(activeRecord, currentMetricsResponse?.metrics ?? null, {
+      endTime: currentMetricsResponse?.metrics.endTime ?? Date.now(),
+    });
+    const completedRecord = await updateStrategyStatus(
+      env,
+      versionId,
+      StrategyStatus.Completed,
+      report,
+    );
+
+    await this.startNextStrategy(env);
+    return completedRecord;
+  }
+
+  public async abortCurrentStrategy(
+    env: Env,
+    reason: string,
+  ): Promise<StrategyRecord | null> {
+    const activeRecord = await getActiveStrategy(env);
+    if (!activeRecord) {
+      return null;
+    }
+
+    const engineStub = this.resolveStrategyEngineStub(env, activeRecord);
+    const abortResponse = await this.fetchStrategyEngineJson<{
+      ok: boolean;
+      status: StrategyEngineDurableObjectStatus;
+      report: ExecutionReport;
+    }>(engineStub, '/abort', {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    });
+    const failedRecord = await updateStrategyStatus(
+      env,
+      activeRecord.versionId,
+      StrategyStatus.Aborted,
+      abortResponse.report,
+    );
+    return failedRecord;
+  }
+
+  public async getCurrentMetrics(
+    env: Env,
+  ): Promise<{
+    status: StrategyEngineDurableObjectStatus;
+    metrics: StrategyEngineMetrics;
+    currentEngineState: string | null;
+    nextExecutionTime: number | null;
+  } | null> {
+    const activeRecord = await getActiveStrategy(env);
+    if (!activeRecord) {
+      return null;
+    }
+
+    const response = await this.fetchCurrentMetricsResponse(env, activeRecord);
+    if (!response) {
+      return null;
+    }
+
+    if (response.status === 'completed') {
+      await this.completeCurrentStrategy(env, response);
+      return null;
+    }
+
+    if (response.status === 'aborted') {
+      await updateStrategyStatus(
+        env,
+        activeRecord.versionId,
+        StrategyStatus.Aborted,
+        this.buildExecutionReport(activeRecord, response.metrics, {
+          endTime: response.metrics.endTime ?? Date.now(),
+          abortReason: 'Strategy aborted by durable object',
+        }),
+      );
+      return null;
+    }
+
+    return {
+      status: response.status,
+      currentEngineState: response.currentEngineState,
+      nextExecutionTime: response.nextExecutionTime,
+      metrics: this.mapMetricsResponse(response.metrics),
+    };
+  }
+
+  private async reconcileActiveStrategy(env: Env): Promise<StrategyRecord | null> {
+    const activeRecord = await getActiveStrategy(env);
+    if (!activeRecord) {
+      return null;
+    }
+    await this.getCurrentMetrics(env);
+    return getActiveStrategy(env);
+  }
+
+  private buildExecutionReport(
+    activeRecord: StrategyRecord | null,
+    metrics: StrategyEngineDurableObjectMetrics | null,
+    options: {
+      endTime: number;
+      abortReason?: string;
+    },
+  ): ExecutionReport {
+    return {
+      actualTotalVolume: metrics?.actualTotalVolumeUsd ?? 0,
+      actualNetInflow: metrics?.actualNetInflowUsd ?? 0,
+      tacticsTriggeredCount: metrics?.tacticsTriggeredCount ?? 0,
+      pnl: metrics?.actualNetInflowUsd ?? 0,
+      startTime:
+        metrics?.startTime ??
+        activeRecord?.startedAt ??
+        activeRecord?.updatedAt ??
+        options.endTime,
+      endTime: options.endTime,
+      ...(options.abortReason
+        ? {
+            abortReason: options.abortReason,
+          }
+        : {}),
+    };
+  }
+
+  private buildConfigureRequest(
+    record: StrategyRecord,
+  ): StrategyEngineDurableObjectConfigureRequest {
+    if (record.config.strategyVersionId == null) {
+      throw new ApiError(
+        500,
+        `Queued strategy ${record.versionId} is missing strategyVersionId`,
+      );
+    }
+    return {
+      userId: record.config.userId,
+      versionId: record.config.strategyVersionId,
+      strategyDocument: record.config.document,
+    };
+  }
+
+  private resolveStrategyEngineStub(
+    env: Env,
+    record: StrategyRecord,
+  ): DurableObjectStub {
+    const stubId = env.STRATEGY_ENGINE_DO.idFromName(
+      strategyEngineDurableObjectNameFor(
+        record.config.userId,
+        record.config.contractAddress,
+      ),
+    );
+    return env.STRATEGY_ENGINE_DO.get(stubId);
+  }
+
+  private async fetchCurrentMetricsResponse(
+    env: Env,
+    record: StrategyRecord,
+  ): Promise<StrategyEngineDurableObjectMetricsResponse | null> {
+    const stub = this.resolveStrategyEngineStub(env, record);
+    return this.fetchStrategyEngineJson<StrategyEngineDurableObjectMetricsResponse>(
+      stub,
+      '/metrics',
+      { method: 'GET' },
+    );
+  }
+
+  private mapMetricsResponse(
+    metrics: StrategyEngineDurableObjectMetrics,
+  ): StrategyEngineMetrics {
+    return {
+      actualTotalVolume: metrics.actualTotalVolumeUsd,
+      actualNetInflow: metrics.actualNetInflowUsd,
+      tacticsTriggeredCount: metrics.tacticsTriggeredCount,
+      pnl: metrics.actualNetInflowUsd,
+      startTime: metrics.startTime,
+    };
+  }
+
+  private async fetchStrategyEngineJson<T>(
+    stub: DurableObjectStub,
+    path: string,
+    init: RequestInit,
+  ): Promise<T> {
+    const response = await stub.fetch(`https://strategy-engine${path}`, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init.headers ?? {}),
+      },
+      ...init,
+    });
+    if (!response.ok) {
+      const message = await response.text();
+      throw new ApiError(
+        response.status,
+        message || `Strategy engine durable object request failed for ${path}`,
+      );
+    }
+    return response.json<T>();
   }
 }
 
@@ -302,279 +613,5 @@ export function buildStrategyTaskExecutionContext(
     userId,
     username: username ?? null,
   };
-}
-
-async function getOrCreateStrategyRuntimeForUser(
-  env: Env,
-  userId: number,
-  contractAddress: string,
-): Promise<StrategyRuntimeRegistryEntry | null> {
-  const activeVersion = await dbGetActiveStrategyVersion(env.TRADINGBOT_DB, userId);
-  if (!activeVersion) {
-    return null;
-  }
-
-  const strategyContractAddress = activeVersion.document.parameters.contractAddress.trim()
-    ? normalizePubkey(activeVersion.document.parameters.contractAddress)
-    : '';
-  if (!strategyContractAddress || strategyContractAddress !== contractAddress) {
-    return null;
-  }
-  if (!activeVersion.document.execution.enabled || activeVersion.document.riskControls.dryRun) {
-    return null;
-  }
-
-  const registryKey = buildStrategyRuntimeRegistryKey(userId, strategyContractAddress);
-  const existing = strategyRuntimeRegistry.get(registryKey);
-  if (existing && existing.versionId === activeVersion.id) {
-    return existing;
-  }
-
-  if (existing) {
-    existing.engine.queue.clear();
-  }
-  for (const [key, entry] of strategyRuntimeRegistry.entries()) {
-    if (entry.userId === userId && key !== registryKey) {
-      entry.engine.queue.clear();
-      strategyRuntimeRegistry.delete(key);
-    }
-  }
-
-  const engine = new StrategyEngine({
-    macroObjective: activeVersion.document.execution.macroObjective,
-    contractAddress: strategyContractAddress,
-    tactics: activeVersion.document.execution.tactics,
-    baseOrderCount: Math.max(
-      1,
-      Math.min(12, Math.max(3, activeVersion.document.riskControls.maxConcurrentOrders * 3)),
-    ),
-    baseTotalVolumeUsd:
-      activeVersion.document.riskControls.maxPositionUsd ??
-      DEFAULT_STRATEGY_TASK_BASE_VOLUME_USD,
-    baseDurationMs: parseTimeRangeTargetToDurationMs(
-      activeVersion.document.parameters.timeRangeTarget,
-    ),
-    distributionChunkCount: 3,
-    distributionChunkDelayJitterMs: 2_000,
-    execution: {
-      enabled: activeVersion.document.execution.enabled,
-      route: activeVersion.document.execution.route,
-      commitment: activeVersion.document.execution.commitment,
-      timeJitterRatio: activeVersion.document.execution.timeJitterRatio,
-      volumeJitterRatio: activeVersion.document.execution.volumeJitterRatio,
-    },
-    dispatchContext: buildStrategyTaskExecutionContext(env, userId),
-    allocateAccount: async (input) => {
-      const account = await getAvailableAccount(
-        env.TRADINGBOT_DB,
-        userId,
-        input.action,
-        input.estimatedAmount,
-        {
-          envRpcUrl: env.SOLANA_RPC_URL,
-        },
-      );
-      return account
-        ? {
-            accountId: account.id,
-            walletAddress: account.address,
-          }
-        : null;
-    },
-    onTaskError: async (task, error) => {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error(
-        `[strategy-queue] user ${userId} task ${task.id} failed: ${errorMessage}`,
-        error,
-      );
-      try {
-        await dbAddAuditLog(
-          env.TRADINGBOT_DB,
-          userId,
-          'strategy.task.failed',
-          task.contractAddress ?? strategyContractAddress,
-          `${task.action} ${task.requestedAmount} failed: ${errorMessage}`,
-        );
-      } catch (auditError: unknown) {
-        console.error('Failed to persist strategy task failure audit log:', auditError);
-      }
-    },
-  });
-  const triggerHandler = new TriggerHandler(
-    engine,
-    activeVersion.document.triggers.triggerThresholdUsd,
-  );
-
-  const entry: StrategyRuntimeRegistryEntry = {
-    userId,
-    versionId: activeVersion.id,
-    contractAddress: strategyContractAddress,
-    engine,
-    triggerHandler,
-  };
-  strategyRuntimeRegistry.set(registryKey, entry);
-  return entry;
-}
-
-function parseExternalTradeWebhookPayload(
-  payload: unknown,
-  url: URL,
-): {
-  contractAddress: string;
-  event: ExternalTradeEvent;
-} {
-  if (!isRecord(payload)) {
-    throw new ApiError(400, 'Webhook body must be a JSON object');
-  }
-
-  const eventType = readNonEmptyString(payload.type);
-  if (eventType !== 'whale_buy' && eventType !== 'whale_sell') {
-    throw new ApiError(400, 'Webhook type must be whale_buy or whale_sell');
-  }
-
-  const amount = typeof payload.amount === 'number' ? payload.amount : Number.NaN;
-  if (!Number.isFinite(amount) || amount < 0) {
-    throw new ApiError(400, 'Webhook amount must be a finite non-negative number');
-  }
-
-  const walletAddressRaw =
-    readNonEmptyString(payload.wallet_address) ??
-    readNonEmptyString(payload.walletAddress);
-  if (!walletAddressRaw) {
-    throw new ApiError(400, 'Webhook wallet_address is required');
-  }
-
-  const isLossCutValue =
-    typeof payload.is_loss_cut === 'boolean'
-      ? payload.is_loss_cut
-      : typeof payload.isLossCut === 'boolean'
-        ? payload.isLossCut
-        : null;
-  if (isLossCutValue == null) {
-    throw new ApiError(400, 'Webhook is_loss_cut must be a boolean');
-  }
-
-  const contractAddress =
-    tryNormalizeSolanaPubkey(payload.contract_address) ??
-    tryNormalizeSolanaPubkey(payload.contractAddress) ??
-    tryNormalizeSolanaPubkey(url.searchParams.get('contractAddress'));
-  if (!contractAddress) {
-    throw new ApiError(
-      400,
-      'Webhook contractAddress is required either in the payload or query string',
-    );
-  }
-
-  const txHash =
-    readNonEmptyString(payload.txHash) ??
-    readNonEmptyString(payload.tx_hash) ??
-    readNonEmptyString(payload.signature) ??
-    readNonEmptyString(payload.txSignature);
-  if (!txHash) {
-    throw new ApiError(400, 'Webhook txHash is required for deduplication');
-  }
-
-  return {
-    contractAddress,
-    event: {
-      type: eventType,
-      amount,
-      contractAddress,
-      txHash,
-      wallet_address: normalizePubkey(walletAddressRaw),
-      is_loss_cut: isLossCutValue,
-    },
-  };
-}
-
-export async function handleStrategyExternalTradeWebhook(
-  request: Request,
-  url: URL,
-  env: Env,
-  ctx: ExecutionContext,
-): Promise<Response> {
-  const payload = await parseJsonBody<unknown>(request);
-  const { contractAddress, event } = parseExternalTradeWebhookPayload(payload, url);
-  const userIds = await dbListUserIdsByActiveContractAddress(
-    env.TRADINGBOT_DB,
-    contractAddress,
-  );
-
-  ctx.waitUntil(
-    (async () => {
-      let dispatchedCount = 0;
-      for (const userId of userIds) {
-        try {
-          const activeVersion = await dbGetActiveStrategyVersion(
-            env.TRADINGBOT_DB,
-            userId,
-          );
-          if (!activeVersion) {
-            continue;
-          }
-
-          const strategyContractAddress = activeVersion.document.parameters.contractAddress.trim()
-            ? normalizePubkey(activeVersion.document.parameters.contractAddress)
-            : '';
-          if (
-            !strategyContractAddress ||
-            strategyContractAddress !== contractAddress ||
-            !activeVersion.document.execution.enabled ||
-            activeVersion.document.riskControls.dryRun
-          ) {
-            continue;
-          }
-
-          const stubId = env.STRATEGY_ENGINE_DO.idFromName(
-            strategyEngineDurableObjectNameFor(userId, contractAddress),
-          );
-          const stub = env.STRATEGY_ENGINE_DO.get(stubId);
-          const doRequest: StrategyEngineDurableObjectEventRequest = {
-            userId,
-            versionId: activeVersion.id,
-            strategyDocument: activeVersion.document,
-            event,
-          };
-          dispatchedCount += 1;
-          await stub.fetch('https://strategy-engine/event', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(doRequest),
-          });
-        } catch (error: unknown) {
-          console.error(
-            `[strategy-webhook] Failed to dispatch event for user ${userId} on ${contractAddress}:`,
-            error,
-          );
-        }
-      }
-      console.log(
-        `[strategy-webhook] Accepted ${event.type} ${event.amount} for ${contractAddress}; routed to ${dispatchedCount}/${userIds.length} active strategy runtime(s).`,
-      );
-    })(),
-  );
-
-  return jsonResponse(
-    {
-      ok: true,
-      accepted: true,
-      contractAddress,
-      candidateUsers: userIds.length,
-    },
-    200,
-  );
-}
-const MARKET_REFRESH_RUNNING_STALE_AFTER_SEC = 15 * 60;
-
-interface HeliusDasTokenAccountsResult {
-  total?: number;
-  limit?: number;
-  cursor?: unknown;
-  token_accounts?: Array<{
-    owner?: unknown;
-    amount?: unknown;
-  }>;
 }
 

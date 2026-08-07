@@ -1,3 +1,4 @@
+import { ApiError } from '../errors';
 import { normalizeStrategyDocument } from '../strategy/migrations';
 import {
   strategyEngineDurableObjectNameFor,
@@ -6,18 +7,48 @@ import {
 import { parseJsonBody } from '../workerSchema';
 import { dbCreateTradableToken, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
 import { dbAddAuditLog, dbLoadSettings, dbSaveSettings } from '../userStore';
-import { fetchSolanaMintDecimals, jsonResponse, normalizePubkey } from '../workerCore';
+import { fetchSolanaMintDecimals, jsonResponse, normalizePubkey, parseJsonText } from '../workerCore';
 import type { Env, TokenMarketSnapshot } from '../workerShared';
 import { requireAdmin } from '../services/accessControl';
 import { dbCreateHistoricalSetupSnapshot } from '../services/historyMetricsService';
-import { handleStrategyExternalTradeWebhook } from '../services/strategyAutomationService';
+import { StrategyAutomationService } from '../services/strategyAutomationService';
 import {
   dbDeletePreviousStrategyVersions,
   dbGetActiveStrategyVersion,
+  removePendingStrategy,
   dbSaveActiveStrategyVersionDocument,
   mapStrategyDocumentToSettingsUpdate,
 } from '../services/strategyStore';
 import { loadStoredMarketSnapshotByContractAddress } from '../services/tokenMarketService';
+
+const strategyAutomationService = new StrategyAutomationService();
+
+function parseAbortRequestBody(body: unknown): { reason: string } {
+  if (body == null) {
+    return { reason: 'Manual user abort' };
+  }
+  if (typeof body !== 'object') {
+    throw new ApiError(400, 'Abort request body must be a JSON object');
+  }
+  const { reason } = body as { reason?: unknown };
+  if (reason == null) {
+    return { reason: 'Manual user abort' };
+  }
+  if (typeof reason !== 'string') {
+    throw new ApiError(400, 'Abort reason must be a string');
+  }
+  return {
+    reason: reason.trim() || 'Manual user abort',
+  };
+}
+
+async function parseOptionalJsonObject(request: Request): Promise<unknown | null> {
+  const rawBody = await request.text();
+  if (!rawBody.trim()) {
+    return null;
+  }
+  return parseJsonText<unknown>(rawBody);
+}
 
 export async function handleStrategyRoutes(
   request: Request,
@@ -27,10 +58,6 @@ export async function handleStrategyRoutes(
   const url = new URL(request.url);
   const { method } = request;
   const { pathname } = url;
-
-  if (method === 'POST' && pathname === '/api/webhooks/strategy/external-trade') {
-    return handleStrategyExternalTradeWebhook(request, url, env, ctx);
-  }
 
   if (method === 'POST' && pathname === '/api/strategy/active') {
     const user = await requireAdmin(request, env);
@@ -168,10 +195,106 @@ export async function handleStrategyRoutes(
         : `Strategy version v${strategySave.version.versionNo} remains active.`,
     );
 
+    const queuedStrategy = await strategyAutomationService.enqueueStrategyVersion(
+      env,
+      user.id,
+      strategySave.version,
+    );
+    await strategyAutomationService.startNextStrategy(env);
+
     return jsonResponse({
       activeStrategyVersion: strategySave.version,
       settings: updatedSettings,
       marketSnapshot,
+      queuedStrategy,
+    });
+  }
+
+  if (method === 'GET' && pathname === '/api/strategy/current') {
+    await requireAdmin(request, env);
+    const queueSnapshot = await strategyAutomationService.getQueueSnapshot(env);
+    return jsonResponse(queueSnapshot);
+  }
+
+  if (method === 'POST' && pathname === '/api/strategy/abort') {
+    const user = await requireAdmin(request, env);
+    const body = await parseOptionalJsonObject(request);
+    const { reason } = parseAbortRequestBody(body);
+    const abortedStrategy = await strategyAutomationService.abortCurrentStrategy(env, reason);
+
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      user.id,
+      'strategy.abort_requested',
+      abortedStrategy?.versionId ?? 'strategy-queue',
+      abortedStrategy
+        ? `Aborted queued strategy ${abortedStrategy.versionId}. Reason: ${reason}`
+        : `Abort requested but no active strategy was running. Reason: ${reason}`,
+    );
+
+    return jsonResponse({
+      aborted: abortedStrategy != null,
+      reason,
+      strategy: abortedStrategy,
+      report: abortedStrategy?.report ?? null,
+    });
+  }
+
+  if (method === 'POST' && pathname === '/api/strategy/resume') {
+    const user = await requireAdmin(request, env);
+    const wasBusy = (await strategyAutomationService.getActiveStrategyStub(env)) != null;
+    const startedStrategy = await strategyAutomationService.startNextStrategy(env, {
+      force: true,
+    });
+    const started = !wasBusy && startedStrategy != null;
+
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      user.id,
+      'strategy.resume_requested',
+      startedStrategy?.versionId ?? 'strategy-queue',
+      started
+        ? `Manually resumed queue and started strategy ${startedStrategy?.versionId}.`
+        : wasBusy
+          ? 'Resume requested while a strategy is already running.'
+          : 'Resume requested but the strategy queue is empty.',
+    );
+
+    return jsonResponse({
+      started,
+      queueEmpty: !wasBusy && startedStrategy == null,
+      alreadyRunning: wasBusy,
+      strategy: startedStrategy,
+    });
+  }
+
+  if (
+    method === 'POST' &&
+    pathname.startsWith('/api/strategy/pending/') &&
+    pathname.endsWith('/cancel')
+  ) {
+    const user = await requireAdmin(request, env);
+    const versionId = decodeURIComponent(
+      pathname.slice('/api/strategy/pending/'.length, -'/cancel'.length),
+    ).trim();
+    if (!versionId) {
+      throw new ApiError(400, 'Pending strategy versionId is required');
+    }
+
+    const removedStrategy = await removePendingStrategy(env, versionId);
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      user.id,
+      'strategy.pending_removed',
+      removedStrategy?.versionId ?? versionId,
+      removedStrategy
+        ? `Removed pending strategy ${removedStrategy.versionId} from the serial queue.`
+        : `Pending strategy ${versionId} was not found in the serial queue.`,
+    );
+
+    return jsonResponse({
+      removed: removedStrategy != null,
+      strategy: removedStrategy,
     });
   }
 

@@ -187,6 +187,53 @@ export interface StrategyVersionDocument {
   metadata: StrategyMetadata;
 }
 
+export enum StrategyStatus {
+  Pending = 'pending',
+  Running = 'running',
+  Completed = 'completed',
+  Aborted = 'aborted',
+  Failed = 'failed',
+  Paused = 'paused',
+}
+
+export interface ExecutionReport {
+  actualTotalVolume: number;
+  actualNetInflow: number;
+  tacticsTriggeredCount: number;
+  pnl: number;
+  startTime: number;
+  endTime: number;
+  abortReason?: string;
+}
+
+export interface StrategyRecordConfig {
+  userId: number;
+  strategyVersionId: number | null;
+  strategyVersionNo: number | null;
+  strategyType: StrategyType;
+  document: StrategyVersionDocument;
+  contractAddress: string;
+  macroObjective: StrategyMacroObjective;
+  tactics: StrategyExecutionTactics;
+  execution: StrategyExecutionConfig;
+  baseOrderCount: number;
+  baseTotalVolumeUsd: number;
+  baseDurationMs: number;
+  distributionChunkCount: number;
+  distributionChunkDelayJitterMs: number;
+}
+
+export interface StrategyRecord {
+  versionId: string;
+  status: StrategyStatus;
+  config: StrategyRecordConfig;
+  report?: ExecutionReport;
+  createdAt: number;
+  updatedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+}
+
 export interface StrategyTriggerEvent {
   source: StrategyTriggerSource;
   eventType: string;

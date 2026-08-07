@@ -1,28 +1,62 @@
 import { ApiError } from '../errors';
 import type { Env } from '../workerShared';
-import { executeTradeTask, normalizePubkey } from '../workerCore';
+import { normalizePubkey } from '../workerCore';
 import {
   buildRandomizedTwapPlan,
   type EngineState,
   type MacroObjective,
 } from './engine';
-import { DEFAULT_EXECUTION_CONFIG } from './config';
 import { normalizeStrategyDocument } from './migrations';
-import {
-  TriggerHandler,
-  type ExternalTradeEvent,
-  type StrategyEventRouterTarget,
-} from './triggers';
 import type {
+  ExecutionReport,
   StrategyExecutionConfig,
-  StrategyExecutionTaskPayload,
   StrategyVersionDocument,
 } from './types';
-import type { StrategyQueuedTask } from './taskQueue';
+import type { ExternalTradeEvent } from './triggers';
 
 const STORAGE_KEY = 'strategy-engine-state';
 const MAX_DEDUPED_TX_HASHES = 256;
 const DEFAULT_STRATEGY_TASK_BASE_VOLUME_USD = 300;
+const DEFAULT_DISTRIBUTION_CHUNK_COUNT = 3;
+const DEFAULT_DISTRIBUTION_DELAY_JITTER_MS = 2_000;
+
+export type StrategyEngineDurableObjectStatus =
+  | 'idle'
+  | 'running'
+  | 'completed'
+  | 'aborted';
+
+export interface StrategyEngineDurableObjectMetrics {
+  actualTotalVolumeUsd: number;
+  actualNetInflowUsd: number;
+  tacticsTriggeredCount: number;
+  startTime: number;
+  endTime: number | null;
+}
+
+export interface StrategyEngineDurableObjectConfig {
+  userId: number;
+  versionId: number;
+  contractAddress: string;
+  macroObjective: MacroObjective;
+  targetTotalVolumeUsd: number;
+  baseOrderCount: number;
+  baseDurationMs: number;
+  distributionChunkCount: number;
+  distributionChunkDelayJitterMs: number;
+  triggerThresholdUsd: number;
+  execution: StrategyExecutionConfig;
+  strategyDocument: StrategyVersionDocument;
+}
+
+export interface StrategyEngineDurableObjectTask {
+  id: string;
+  side: 'buy' | 'sell';
+  amountUsd: number;
+  scheduledAt: number;
+  source: 'base' | 'tactic';
+  metadata?: Record<string, unknown>;
+}
 
 export interface StrategyEngineDurableObjectConfigureRequest {
   userId: number;
@@ -36,23 +70,17 @@ export interface StrategyEngineDurableObjectEventRequest
 }
 
 export interface PersistedStrategyEngineState {
-  userId: number;
-  versionId: number;
-  contractAddress: string;
-  macroObjective: MacroObjective;
-  currentState: EngineState;
-  triggerThresholdUsd: number;
-  execution: StrategyExecutionConfig;
-  dryRun: boolean;
-  paused: boolean;
-  queue: StrategyQueuedTask[];
+  config: StrategyEngineDurableObjectConfig | null;
+  status: StrategyEngineDurableObjectStatus;
+  metrics: StrategyEngineDurableObjectMetrics;
+  currentEngineState: EngineState | null;
+  pendingTasks: StrategyEngineDurableObjectTask[];
   dedupedTxHashes: string[];
-  baseOrderCount: number;
-  baseTotalVolumeUsd: number;
-  baseDurationMs: number;
-  distributionChunkCount: number;
-  distributionChunkDelayJitterMs: number;
   updatedAt: number;
+}
+
+function buildDurableObjectName(userId: number, contractAddress: string): string {
+  return `${userId}:${contractAddress}`;
 }
 
 function buildInitialStateForObjective(objective: MacroObjective): EngineState {
@@ -65,10 +93,6 @@ function buildInitialStateForObjective(objective: MacroObjective): EngineState {
     default:
       return 'ACCUMULATING';
   }
-}
-
-function buildDurableObjectName(userId: number, contractAddress: string): string {
-  return `${userId}:${contractAddress}`;
 }
 
 function parseTimeRangeTargetToDurationMs(timeRangeTarget: string): number {
@@ -92,22 +116,51 @@ function parseTimeRangeTargetToDurationMs(timeRangeTarget: string): number {
 function createTaskId(): string {
   return typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
-    : `strategy-task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    : `strategy-do-task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function sortQueuedTasks(tasks: StrategyQueuedTask[]): void {
-  tasks.sort((left, right) => {
-    if (left.priority !== right.priority) {
-      return left.priority === 'preemptive' ? -1 : 1;
-    }
-    if (left.scheduledAt !== right.scheduledAt) {
-      return left.scheduledAt - right.scheduledAt;
-    }
-    if (left.createdAt !== right.createdAt) {
-      return left.createdAt - right.createdAt;
-    }
-    return left.id.localeCompare(right.id);
-  });
+function createEmptyMetrics(startTime = 0): StrategyEngineDurableObjectMetrics {
+  return {
+    actualTotalVolumeUsd: 0,
+    actualNetInflowUsd: 0,
+    tacticsTriggeredCount: 0,
+    startTime,
+    endTime: null,
+  };
+}
+
+function createIdleState(): PersistedStrategyEngineState {
+  return {
+    config: null,
+    status: 'idle',
+    metrics: createEmptyMetrics(0),
+    currentEngineState: null,
+    pendingTasks: [],
+    dedupedTxHashes: [],
+    updatedAt: Date.now(),
+  };
+}
+
+function clampPositiveNumber(value: number, fallback = 0): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  return value;
+}
+
+function buildExecutionReportFromMetrics(
+  metrics: StrategyEngineDurableObjectMetrics,
+  abortReason?: string,
+): ExecutionReport {
+  return {
+    actualTotalVolume: metrics.actualTotalVolumeUsd,
+    actualNetInflow: metrics.actualNetInflowUsd,
+    tacticsTriggeredCount: metrics.tacticsTriggeredCount,
+    pnl: metrics.actualNetInflowUsd,
+    startTime: metrics.startTime,
+    endTime: metrics.endTime ?? Date.now(),
+    ...(abortReason ? { abortReason } : {}),
+  };
 }
 
 export function strategyEngineDurableObjectNameFor(
@@ -117,53 +170,63 @@ export function strategyEngineDurableObjectNameFor(
   return buildDurableObjectName(userId, contractAddress);
 }
 
-export class StrategyEngineDurableObject implements StrategyEventRouterTarget {
-  private persistedState: PersistedStrategyEngineState | null = null;
+export class StrategyEngineDurableObject {
+  private persistedState: PersistedStrategyEngineState = createIdleState();
 
   private hydrated = false;
 
   constructor(
-    private readonly state: DurableObjectState,
+    private readonly ctx: DurableObjectState,
     private readonly env: Env,
-  ) {}
-
-  public get macroObjective(): MacroObjective {
-    return this.requireState().macroObjective;
-  }
-
-  public get contractAddress(): string {
-    return this.requireState().contractAddress;
+  ) {
+    void this.env;
   }
 
   public async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    await this.ensureHydrated();
 
-    if (request.method === 'GET' && url.pathname === '/state') {
-      await this.ensureHydrated();
-      return Response.json(this.persistedState);
+    if (request.method === 'GET' && (url.pathname === '/metrics' || url.pathname === '/state')) {
+      return Response.json(this.buildMetricsResponse());
     }
 
     if (request.method === 'POST' && url.pathname === '/configure') {
       const body = await request.json<StrategyEngineDurableObjectConfigureRequest>();
-      await this.applyConfiguration(body);
-      return Response.json({ ok: true, configured: true });
+      await this.configure(body);
+      return Response.json({ ok: true, configured: true, state: this.buildMetricsResponse() });
     }
 
-    if (request.method === 'POST' && url.pathname === '/event') {
+    if (request.method === 'POST' && url.pathname === '/start') {
+      const body = await request.json<StrategyEngineDurableObjectConfigureRequest>();
+      await this.start(body);
+      return Response.json({ ok: true, started: true, state: this.buildMetricsResponse() });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/abort') {
+      const body = await this.readOptionalJsonObject(request);
+      const reason =
+        typeof body?.reason === 'string' && body.reason.trim().length > 0
+          ? body.reason.trim()
+          : 'Manual user abort';
+      const report = await this.abort(reason);
+      return Response.json({ ok: true, status: this.persistedState.status, report });
+    }
+
+    if (request.method === 'POST' && (url.pathname === '/webhook' || url.pathname === '/event')) {
       const body = await request.json<StrategyEngineDurableObjectEventRequest>();
-      await this.applyConfiguration(body);
-      const duplicate = await this.handleExternalTradeEvent(body.event);
-      return Response.json({ ok: true, accepted: !duplicate, duplicate });
+      await this.configure(body);
+      const duplicate = await this.handleWebhookEvent(body.event);
+      return Response.json({
+        ok: true,
+        duplicate,
+        status: this.persistedState.status,
+        metrics: this.persistedState.metrics,
+      });
     }
 
     if (request.method === 'POST' && url.pathname === '/clear') {
-      await this.ensureHydrated();
-      if (this.persistedState) {
-        this.persistedState.queue = [];
-        this.persistedState.paused = false;
-        await this.persistState();
-      }
-      return Response.json({ ok: true, cleared: true });
+      await this.clear();
+      return Response.json({ ok: true, cleared: true, state: this.buildMetricsResponse() });
     }
 
     return new Response('Not found', { status: 404 });
@@ -171,352 +234,305 @@ export class StrategyEngineDurableObject implements StrategyEventRouterTarget {
 
   public async alarm(): Promise<void> {
     await this.ensureHydrated();
-    const currentState = this.requireState();
+    const state = this.persistedState;
+    const config = state.config;
+    if (!config || state.status !== 'running') {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+
+    if (state.metrics.actualTotalVolumeUsd >= config.targetTotalVolumeUsd) {
+      await this.markCompleted();
+      return;
+    }
+
+    if (state.pendingTasks.length === 0) {
+      this.ensureBasePlanIfNeeded(Date.now());
+    }
+
+    const nextTask = this.popNextDueTask(Date.now());
+    if (!nextTask) {
+      await this.persistState();
+      return;
+    }
+
+    this.applyExecutedTask(nextTask);
+
+    if (state.metrics.actualTotalVolumeUsd >= config.targetTotalVolumeUsd) {
+      await this.markCompleted();
+      return;
+    }
+
+    if (state.pendingTasks.length === 0) {
+      this.ensureBasePlanIfNeeded(Date.now());
+    }
+
+    await this.persistState();
+  }
+
+  private async start(input: StrategyEngineDurableObjectConfigureRequest): Promise<void> {
+    await this.configure(input);
+    const state = this.persistedState;
+    if (!state.config) {
+      throw new ApiError(409, 'Strategy engine durable object could not be configured');
+    }
+    const startTime = Date.now();
+    state.status = 'running';
+    state.metrics = createEmptyMetrics(startTime);
+    state.currentEngineState = buildInitialStateForObjective(state.config.macroObjective);
+    state.pendingTasks = [];
+    state.dedupedTxHashes = [];
+    this.ensureBasePlanIfNeeded(startTime);
+    await this.persistState();
+    await this.ctx.storage.setAlarm(startTime);
+  }
+
+  private async abort(reason: string): Promise<ExecutionReport> {
     const now = Date.now();
-
-    while (true) {
-      const nextTask = this.popNextReadyTask(now, currentState);
-      if (!nextTask) {
-        break;
-      }
-      try {
-        await executeTradeTask(nextTask, {
-          env: this.env,
-          userId: currentState.userId,
-        });
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(
-          `[StrategyEngineDO] Failed to execute task ${nextTask.id} for ${currentState.contractAddress}: ${message}`,
-          error,
-        );
-      }
-    }
-
-    await this.ensureBasePulseIfNeeded();
-    await this.persistState();
+    this.persistedState.status = 'aborted';
+    this.persistedState.metrics.endTime = now;
+    this.persistedState.pendingTasks = [];
+    await this.ctx.storage.deleteAlarm();
+    await this.persistState({ scheduleAlarm: false });
+    return buildExecutionReportFromMetrics(this.persistedState.metrics, reason);
   }
 
-  public async executeDump(externalBuyAmount: number): Promise<void> {
-    const currentState = this.requireState();
-    if (
-      currentState.currentState === 'DUMPING' ||
-      currentState.currentState === 'WAITING_FOR_LOSS_CUT'
-    ) {
-      return;
-    }
-
-    const dumpAmountUsd = Math.max(
-      0,
-      externalBuyAmount * currentState.execution.tactics.dumpRatio,
-    );
-    if (dumpAmountUsd <= 0) {
-      return;
-    }
-
-    currentState.currentState = 'DUMPING';
-    currentState.paused = true;
-    this.enqueueTask({
-      action: 'SELL',
-      accountId: null,
-      walletAddress: null,
-      contractAddress: currentState.contractAddress,
-      requestedAmount: dumpAmountUsd,
-      scheduledAt: Date.now(),
-      metadata: {
-        tacticalAction: 'dump',
-      },
-    }, 'preemptive');
-    currentState.currentState = 'WAITING_FOR_LOSS_CUT';
-    await this.persistState();
+  private async clear(): Promise<void> {
+    this.persistedState = createIdleState();
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.put(STORAGE_KEY, this.persistedState);
   }
 
-  public async onExternalWhaleBuy(amountUsd: number): Promise<void> {
-    switch (this.macroObjective) {
-      case 'shakeout':
-        await this.executeDump(amountUsd);
-        break;
-      case 'distribution':
-        await this.executeFollowSell(amountUsd);
-        break;
-      default:
-        break;
-    }
-  }
-
-  public async onExternalWhaleSell(amountUsd: number): Promise<void> {
-    if (this.macroObjective === 'accumulation') {
-      await this.executeAbsorb(amountUsd);
-    }
-  }
-
-  public async onLossCut(amountUsd: number): Promise<void> {
-    if (this.macroObjective === 'shakeout') {
-      await this.executeScoop(amountUsd);
-    }
-  }
-
-  public async executeScoop(lossCutAmount: number): Promise<void> {
-    const currentState = this.requireState();
-    if (currentState.currentState !== 'WAITING_FOR_LOSS_CUT') {
-      return;
-    }
-
-    if (!Number.isFinite(lossCutAmount) || lossCutAmount <= 0) {
-      return;
-    }
-
-    this.enqueueTask({
-      action: 'BUY',
-      accountId: null,
-      walletAddress: null,
-      contractAddress: currentState.contractAddress,
-      requestedAmount: lossCutAmount,
-      scheduledAt: Date.now(),
-      metadata: {
-        tacticalAction: 'scoop',
-      },
-    }, 'preemptive');
-    currentState.currentState = 'BUILDING_TREND';
-    currentState.paused = false;
-    await this.ensureBasePulseIfNeeded();
-    await this.persistState();
-  }
-
-  public async executeFollowSell(externalBuyAmount: number): Promise<void> {
-    const currentState = this.requireState();
-    const totalSellUsd = Math.max(
-      0,
-      externalBuyAmount * currentState.execution.tactics.followSellRatio,
-    );
-    if (totalSellUsd <= 0) {
-      return;
-    }
-
-    currentState.currentState = 'DISTRIBUTING';
-    for (let index = 0; index < currentState.distributionChunkCount; index += 1) {
-      this.enqueueTask({
-        action: 'SELL',
-        accountId: null,
-        walletAddress: null,
-        contractAddress: currentState.contractAddress,
-        requestedAmount: totalSellUsd / currentState.distributionChunkCount,
-        scheduledAt:
-          Date.now() +
-          Math.round(Math.random() * currentState.distributionChunkDelayJitterMs),
-        metadata: {
-          tacticalAction: 'follow_sell',
-          chunkIndex: index + 1,
-          chunkCount: currentState.distributionChunkCount,
-        },
-      }, 'preemptive');
-    }
-    await this.persistState();
-  }
-
-  public async executeAbsorb(externalSellAmount: number): Promise<void> {
-    const currentState = this.requireState();
-    const absorbAmountUsd = Math.max(
-      0,
-      externalSellAmount * currentState.execution.tactics.absorbRatio,
-    );
-    if (absorbAmountUsd <= 0) {
-      return;
-    }
-
-    currentState.currentState = 'ACCUMULATING';
-    this.enqueueTask({
-      action: 'BUY',
-      accountId: null,
-      walletAddress: null,
-      contractAddress: currentState.contractAddress,
-      requestedAmount: absorbAmountUsd,
-      scheduledAt: Date.now(),
-      metadata: {
-        tacticalAction: 'absorb',
-      },
-    }, 'preemptive');
-    await this.ensureBasePulseIfNeeded();
-    await this.persistState();
-  }
-
-  private async ensureHydrated(): Promise<void> {
-    if (this.hydrated) {
-      return;
-    }
-
-    await this.state.blockConcurrencyWhile(async () => {
-      if (this.hydrated) {
-        return;
-      }
-      const stored = await this.state.storage.get<PersistedStrategyEngineState>(STORAGE_KEY);
-      this.persistedState = stored ?? null;
-      this.hydrated = true;
-    });
-  }
-
-  private requireState(): PersistedStrategyEngineState {
-    if (!this.persistedState) {
-      throw new ApiError(409, 'Strategy engine durable object is not configured');
-    }
-    return this.persistedState;
-  }
-
-  private async applyConfiguration(
+  private async configure(
     input: StrategyEngineDurableObjectConfigureRequest,
   ): Promise<void> {
-    await this.ensureHydrated();
     const normalizedDocument = normalizeStrategyDocument(input.strategyDocument);
     const contractAddress = normalizePubkey(normalizedDocument.parameters.contractAddress);
-    const versionChanged =
-      !this.persistedState ||
-      this.persistedState.versionId !== input.versionId ||
-      this.persistedState.contractAddress !== contractAddress ||
-      this.persistedState.macroObjective !== normalizedDocument.execution.macroObjective;
-
-    const nextState: PersistedStrategyEngineState = {
+    const nextConfig: StrategyEngineDurableObjectConfig = {
       userId: input.userId,
       versionId: input.versionId,
       contractAddress,
       macroObjective: normalizedDocument.execution.macroObjective,
-      currentState: versionChanged
-        ? buildInitialStateForObjective(normalizedDocument.execution.macroObjective)
-        : this.persistedState?.currentState ??
-          buildInitialStateForObjective(normalizedDocument.execution.macroObjective),
-      triggerThresholdUsd: normalizedDocument.triggers.triggerThresholdUsd,
-      execution: normalizedDocument.execution,
-      dryRun: normalizedDocument.riskControls.dryRun,
-      paused: versionChanged ? false : this.persistedState?.paused ?? false,
-      queue: versionChanged ? [] : this.persistedState?.queue ?? [],
-      dedupedTxHashes: this.persistedState?.dedupedTxHashes ?? [],
+      targetTotalVolumeUsd: clampPositiveNumber(
+        normalizedDocument.riskControls.maxPositionUsd ?? normalizedDocument.targets.volumeUsdMin,
+        DEFAULT_STRATEGY_TASK_BASE_VOLUME_USD,
+      ),
       baseOrderCount: Math.max(
         1,
         Math.min(12, Math.max(3, normalizedDocument.riskControls.maxConcurrentOrders * 3)),
       ),
-      baseTotalVolumeUsd:
-        normalizedDocument.riskControls.maxPositionUsd ??
-        (normalizedDocument.targets.volumeUsdMin > 0
-          ? normalizedDocument.targets.volumeUsdMin
-          : DEFAULT_STRATEGY_TASK_BASE_VOLUME_USD),
       baseDurationMs: parseTimeRangeTargetToDurationMs(
         normalizedDocument.parameters.timeRangeTarget,
       ),
-      distributionChunkCount: 3,
-      distributionChunkDelayJitterMs: 2_000,
-      updatedAt: Date.now(),
+      distributionChunkCount: DEFAULT_DISTRIBUTION_CHUNK_COUNT,
+      distributionChunkDelayJitterMs: DEFAULT_DISTRIBUTION_DELAY_JITTER_MS,
+      triggerThresholdUsd: Math.max(0, normalizedDocument.triggers.triggerThresholdUsd),
+      execution: normalizedDocument.execution,
+      strategyDocument: normalizedDocument,
     };
 
-    this.persistedState = nextState;
-    if (!normalizedDocument.execution.enabled || normalizedDocument.riskControls.dryRun) {
-      nextState.queue = [];
-      nextState.paused = false;
-    } else {
-      await this.ensureBasePulseIfNeeded();
+    const previousConfig = this.persistedState.config;
+    const configChanged =
+      !previousConfig ||
+      previousConfig.versionId !== nextConfig.versionId ||
+      previousConfig.contractAddress !== nextConfig.contractAddress ||
+      previousConfig.macroObjective !== nextConfig.macroObjective;
+
+    this.persistedState.config = nextConfig;
+    if (configChanged && this.persistedState.status !== 'running') {
+      this.persistedState.currentEngineState = buildInitialStateForObjective(nextConfig.macroObjective);
+      this.persistedState.pendingTasks = [];
+      this.persistedState.dedupedTxHashes = [];
     }
-    await this.persistState();
+    await this.persistState({ scheduleAlarm: this.persistedState.status === 'running' });
   }
 
-  private async handleExternalTradeEvent(event: ExternalTradeEvent): Promise<boolean> {
-    const currentState = this.requireState();
-    const normalizedContractAddress = normalizePubkey(event.contractAddress);
-    if (normalizedContractAddress !== currentState.contractAddress) {
+  private async handleWebhookEvent(event: ExternalTradeEvent): Promise<boolean> {
+    const config = this.persistedState.config;
+    if (!config) {
+      throw new ApiError(409, 'Strategy engine durable object is not configured');
+    }
+    if (this.persistedState.status !== 'running') {
       return false;
     }
 
-    if (currentState.dedupedTxHashes.includes(event.txHash)) {
+    const normalizedContractAddress = normalizePubkey(event.contractAddress);
+    if (normalizedContractAddress !== config.contractAddress) {
+      return false;
+    }
+
+    if (this.persistedState.dedupedTxHashes.includes(event.txHash)) {
       return true;
     }
-    currentState.dedupedTxHashes = [
-      ...currentState.dedupedTxHashes,
+    this.persistedState.dedupedTxHashes = [
+      ...this.persistedState.dedupedTxHashes,
       event.txHash,
     ].slice(-MAX_DEDUPED_TX_HASHES);
 
-    const triggerHandler = new TriggerHandler(this, currentState.triggerThresholdUsd);
-    await triggerHandler.handleWebhookEvent({
-      ...event,
-      contractAddress: normalizedContractAddress,
-    });
+    const amountUsd = clampPositiveNumber(event.amount, 0);
+    if (amountUsd < config.triggerThresholdUsd) {
+      await this.persistState();
+      return false;
+    }
+
+    let triggered = false;
+    const now = Date.now();
+    if (event.type === 'whale_buy') {
+      if (config.macroObjective === 'shakeout') {
+        this.persistedState.currentEngineState = 'WAITING_FOR_LOSS_CUT';
+        this.enqueueTask({
+          side: 'sell',
+          amountUsd: amountUsd * config.execution.tactics.dumpRatio,
+          scheduledAt: now,
+          source: 'tactic',
+          metadata: { tactic: 'dump', txHash: event.txHash },
+        });
+        triggered = true;
+      } else if (config.macroObjective === 'distribution') {
+        this.persistedState.currentEngineState = 'DISTRIBUTING';
+        const chunkCount = Math.max(1, config.distributionChunkCount);
+        const totalSellUsd = amountUsd * config.execution.tactics.followSellRatio;
+        for (let index = 0; index < chunkCount; index += 1) {
+          this.enqueueTask({
+            side: 'sell',
+            amountUsd: totalSellUsd / chunkCount,
+            scheduledAt:
+              now + Math.round(Math.random() * config.distributionChunkDelayJitterMs),
+            source: 'tactic',
+            metadata: {
+              tactic: 'follow_sell',
+              txHash: event.txHash,
+              chunkIndex: index + 1,
+              chunkCount,
+            },
+          });
+        }
+        triggered = true;
+      }
+    }
+
+    if (event.type === 'whale_sell' && config.macroObjective === 'accumulation') {
+      this.persistedState.currentEngineState = 'ACCUMULATING';
+      this.enqueueTask({
+        side: 'buy',
+        amountUsd: amountUsd * config.execution.tactics.absorbRatio,
+        scheduledAt: now,
+        source: 'tactic',
+        metadata: { tactic: 'absorb', txHash: event.txHash },
+      });
+      triggered = true;
+    }
+
+    if (event.is_loss_cut && config.macroObjective === 'shakeout') {
+      this.persistedState.currentEngineState = 'BUILDING_TREND';
+      this.enqueueTask({
+        side: 'buy',
+        amountUsd,
+        scheduledAt: now,
+        source: 'tactic',
+        metadata: { tactic: 'scoop', txHash: event.txHash },
+      });
+      triggered = true;
+    }
+
+    if (triggered) {
+      this.persistedState.metrics.tacticsTriggeredCount += 1;
+      await this.ctx.storage.setAlarm(now);
+    }
+
     await this.persistState();
     return false;
   }
 
-  private enqueueTask(
-    task: StrategyExecutionTaskPayload & {
-      metadata?: Record<string, unknown>;
-      delayMs?: number;
-    },
-    priority: StrategyQueuedTask['priority'],
-  ): void {
-    const currentState = this.requireState();
-    currentState.queue.push({
-      id: createTaskId(),
-      priority,
-      createdAt: Date.now(),
-      delayMs: Math.max(0, Math.round(task.delayMs ?? 0)),
-      action: task.action,
-      accountId: task.accountId,
-      walletAddress: task.walletAddress,
-      contractAddress: task.contractAddress,
-      requestedAmount: task.requestedAmount,
-      scheduledAt: task.scheduledAt,
-      metadata: task.metadata,
-    });
-    sortQueuedTasks(currentState.queue);
+  private applyExecutedTask(task: StrategyEngineDurableObjectTask): void {
+    const config = this.persistedState.config;
+    if (!config) {
+      throw new ApiError(409, 'Strategy engine durable object is not configured');
+    }
+
+    const executableUsd = Math.max(
+      0,
+      Math.min(
+        task.amountUsd,
+        config.targetTotalVolumeUsd - this.persistedState.metrics.actualTotalVolumeUsd,
+      ),
+    );
+    if (executableUsd <= 0) {
+      return;
+    }
+
+    this.persistedState.metrics.actualTotalVolumeUsd += executableUsd;
+    this.persistedState.metrics.actualNetInflowUsd +=
+      task.side === 'sell' ? executableUsd : -executableUsd;
+
+    if (task.source === 'base') {
+      this.persistedState.currentEngineState = buildInitialStateForObjective(
+        config.macroObjective,
+      );
+    }
   }
 
-  private async ensureBasePulseIfNeeded(): Promise<void> {
-    const currentState = this.requireState();
-    if (!currentState.execution.enabled || currentState.dryRun) {
+  private ensureBasePlanIfNeeded(startTime: number): void {
+    const config = this.persistedState.config;
+    if (!config || this.persistedState.status !== 'running') {
       return;
     }
 
-    const hasNormalTasks = currentState.queue.some((task) => task.priority === 'normal');
-    if (hasNormalTasks) {
+    const hasBaseTasks = this.persistedState.pendingTasks.some(
+      (task) => task.source === 'base',
+    );
+    if (hasBaseTasks) {
       return;
     }
 
-    switch (currentState.currentState) {
-      case 'BUILDING_TREND':
+    switch (config.macroObjective) {
+      case 'distribution': {
         this.enqueuePlan(
           'buy',
-          currentState.baseTotalVolumeUsd,
-          currentState.baseOrderCount,
-          currentState.baseDurationMs,
-          'normal',
-          { basePulse: 'trend' },
-        );
-        break;
-      case 'DISTRIBUTING':
-        this.enqueuePlan(
-          'buy',
-          currentState.baseTotalVolumeUsd / 2,
-          Math.max(1, Math.floor(currentState.baseOrderCount / 2)),
-          currentState.baseDurationMs,
-          'normal',
-          { basePulse: 'wash_buy' },
+          config.targetTotalVolumeUsd / 2,
+          Math.max(1, Math.floor(config.baseOrderCount / 2)),
+          config.baseDurationMs,
+          'base',
+          startTime,
+          { pulse: 'wash_buy' },
         );
         this.enqueuePlan(
           'sell',
-          currentState.baseTotalVolumeUsd / 2,
-          Math.max(1, Math.floor(currentState.baseOrderCount / 2)),
-          currentState.baseDurationMs,
-          'normal',
-          { basePulse: 'wash_sell' },
+          config.targetTotalVolumeUsd / 2,
+          Math.max(1, Math.floor(config.baseOrderCount / 2)),
+          config.baseDurationMs,
+          'base',
+          startTime,
+          { pulse: 'wash_sell' },
           750,
         );
         break;
-      case 'ACCUMULATING':
+      }
+      case 'accumulation': {
         this.enqueuePlan(
           'buy',
-          currentState.baseTotalVolumeUsd,
-          Math.max(1, Math.ceil(currentState.baseOrderCount / 2)),
-          Math.round(currentState.baseDurationMs * 1.5),
-          'normal',
-          { basePulse: 'slow_buy' },
+          config.targetTotalVolumeUsd,
+          Math.max(1, Math.ceil(config.baseOrderCount / 2)),
+          Math.round(config.baseDurationMs * 1.5),
+          'base',
+          startTime,
+          { pulse: 'slow_buy' },
         );
         break;
-      default:
+      }
+      case 'shakeout':
+      default: {
+        this.enqueuePlan(
+          'buy',
+          config.targetTotalVolumeUsd,
+          config.baseOrderCount,
+          config.baseDurationMs,
+          'base',
+          startTime,
+          { pulse: 'trend' },
+        );
         break;
+      }
     }
   }
 
@@ -525,83 +541,143 @@ export class StrategyEngineDurableObject implements StrategyEventRouterTarget {
     totalVolumeUsd: number,
     orderCount: number,
     durationMs: number,
-    priority: StrategyQueuedTask['priority'],
+    source: StrategyEngineDurableObjectTask['source'],
+    startTime: number,
     metadata?: Record<string, unknown>,
     scheduledOffsetMs = 0,
   ): void {
-    const currentState = this.requireState();
-    const plan = buildRandomizedTwapPlan(currentState.execution, {
+    const config = this.persistedState.config;
+    if (!config) {
+      return;
+    }
+    const normalizedVolume = clampPositiveNumber(totalVolumeUsd, 0);
+    if (normalizedVolume <= 0) {
+      return;
+    }
+
+    const plan = buildRandomizedTwapPlan(config.execution, {
       side,
-      totalVolume: totalVolumeUsd,
-      orderCount,
-      durationMs,
-      startTime: Date.now(),
-      contractAddress: currentState.contractAddress,
+      totalVolume: normalizedVolume,
+      orderCount: Math.max(1, Math.floor(orderCount)),
+      durationMs: Math.max(1_000, Math.round(durationMs)),
+      startTime,
+      contractAddress: config.contractAddress,
     });
 
     for (const slice of plan.slices) {
       this.enqueueTask({
-        ...slice.taskPayload,
-        accountId: null,
-        walletAddress: null,
+        id: `${source}-${slice.orderIndex}-${slice.scheduledAt}`,
+        side,
+        amountUsd: slice.targetVolume,
         scheduledAt: slice.scheduledAt + scheduledOffsetMs,
+        source,
         metadata: {
-          macroObjective: currentState.macroObjective,
-          engineState: currentState.currentState,
           orderIndex: slice.orderIndex,
           totalOrders: plan.orderCount,
           ...metadata,
         },
-      }, priority);
+      });
     }
   }
 
-  private popNextReadyTask(
-    now: number,
-    currentState: PersistedStrategyEngineState,
-  ): StrategyQueuedTask | null {
-    const preemptiveIndex = currentState.queue.findIndex(
-      (task) => task.priority === 'preemptive' && task.scheduledAt <= now,
-    );
-    if (preemptiveIndex >= 0) {
-      return currentState.queue.splice(preemptiveIndex, 1)[0] ?? null;
-    }
-    if (currentState.paused) {
-      return null;
-    }
-    const normalIndex = currentState.queue.findIndex(
-      (task) => task.priority === 'normal' && task.scheduledAt <= now,
-    );
-    if (normalIndex >= 0) {
-      return currentState.queue.splice(normalIndex, 1)[0] ?? null;
-    }
-    return null;
-  }
-
-  private async persistState(): Promise<void> {
-    const currentState = this.requireState();
-    currentState.updatedAt = Date.now();
-    await this.state.storage.put(STORAGE_KEY, currentState);
-    await this.scheduleNextAlarm(currentState);
-  }
-
-  private async scheduleNextAlarm(
-    currentState: PersistedStrategyEngineState,
-  ): Promise<void> {
-    const nextTask = currentState.queue
-      .filter((task) => !currentState.paused || task.priority === 'preemptive')
-      .sort((left, right) => left.scheduledAt - right.scheduledAt)[0];
-
-    const currentAlarm = await this.state.storage.getAlarm();
-    if (!nextTask) {
-      if (currentAlarm != null) {
-        await this.state.storage.deleteAlarm();
-      }
+  private enqueueTask(task: Omit<StrategyEngineDurableObjectTask, 'id'> & { id?: string }): void {
+    const amountUsd = clampPositiveNumber(task.amountUsd, 0);
+    if (amountUsd <= 0) {
       return;
     }
+    this.persistedState.pendingTasks.push({
+      id: task.id ?? createTaskId(),
+      side: task.side,
+      amountUsd,
+      scheduledAt: Math.max(Date.now(), Math.round(task.scheduledAt)),
+      source: task.source,
+      metadata: task.metadata,
+    });
+    this.persistedState.pendingTasks.sort(
+      (left, right) => left.scheduledAt - right.scheduledAt || left.id.localeCompare(right.id),
+    );
+  }
 
-    if (currentAlarm == null || currentAlarm !== nextTask.scheduledAt) {
-      await this.state.storage.setAlarm(nextTask.scheduledAt);
+  private popNextDueTask(now: number): StrategyEngineDurableObjectTask | null {
+    const nextTask = this.persistedState.pendingTasks[0] ?? null;
+    if (!nextTask) {
+      return null;
+    }
+    if (nextTask.scheduledAt > now) {
+      return null;
+    }
+    return this.persistedState.pendingTasks.shift() ?? null;
+  }
+
+  private async markCompleted(): Promise<void> {
+    this.persistedState.status = 'completed';
+    this.persistedState.metrics.endTime = Date.now();
+    this.persistedState.pendingTasks = [];
+    await this.ctx.storage.deleteAlarm();
+    await this.persistState({ scheduleAlarm: false });
+  }
+
+  private buildMetricsResponse() {
+    return {
+      status: this.persistedState.status,
+      metrics: this.persistedState.metrics,
+      currentEngineState: this.persistedState.currentEngineState,
+      config: this.persistedState.config,
+      nextExecutionTime: this.persistedState.pendingTasks[0]?.scheduledAt ?? null,
+    };
+  }
+
+  private async ensureHydrated(): Promise<void> {
+    if (this.hydrated) {
+      return;
+    }
+    await this.ctx.blockConcurrencyWhile(async () => {
+      if (this.hydrated) {
+        return;
+      }
+      const stored = await this.ctx.storage.get<PersistedStrategyEngineState>(STORAGE_KEY);
+      this.persistedState = stored ?? createIdleState();
+      this.hydrated = true;
+    });
+  }
+
+  private async persistState(options?: { scheduleAlarm?: boolean }): Promise<void> {
+    this.persistedState.updatedAt = Date.now();
+    await this.ctx.storage.put(STORAGE_KEY, this.persistedState);
+    if (options?.scheduleAlarm === false) {
+      return;
+    }
+    await this.syncAlarmFromState();
+  }
+
+  private async syncAlarmFromState(): Promise<void> {
+    if (this.persistedState.status !== 'running' || this.persistedState.pendingTasks.length === 0) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    const nextExecutionTime = this.persistedState.pendingTasks[0]?.scheduledAt ?? Date.now();
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (currentAlarm == null || currentAlarm !== nextExecutionTime) {
+      await this.ctx.storage.setAlarm(nextExecutionTime);
+    }
+  }
+
+  private async readOptionalJsonObject(request: Request): Promise<Record<string, unknown> | null> {
+    const rawBody = await request.text();
+    if (!rawBody.trim()) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(rawBody) as unknown;
+      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new ApiError(400, 'Request body must be a JSON object');
+      }
+      return parsed as Record<string, unknown>;
+    } catch (error: unknown) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      throw new ApiError(400, 'Request body must be valid JSON');
     }
   }
 }

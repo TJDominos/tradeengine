@@ -1235,13 +1235,7 @@ export default function App() {
   );
 
   const renderSetups = () => (
-    <HistoricalSetupsPage
-      activeStrategyVersion={engineState.activeStrategyVersion}
-      strategyVersions={engineState.strategyVersions}
-      strategyEvaluations={engineState.strategyEvaluations}
-      onCleanupStrategyVersions={handleCleanupStrategyVersions}
-      isCleaningStrategyVersions={submitting === 'strategy-cleanup'}
-    />
+    <HistoricalSetupsPage />
   );
 
   return (
