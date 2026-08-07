@@ -38,6 +38,7 @@ import type {
   SettingsState,
   StrategyVersionDocument,
   TabId,
+  TokenWebhookCheck,
   TokenMarketSnapshot,
   TradableToken,
   WalletBalance,
@@ -702,12 +703,68 @@ export default function App() {
       await refresh();
     });
 
+  const handleDeleteTrackedToken = (tokenId: number) =>
+    submitWithFeedback(`token-delete-${tokenId}`, async () => {
+      const response = await api<{
+        success: boolean;
+        token: TradableToken;
+        clearedActiveContractAddress: boolean;
+      }>(`/api/tradable-tokens/${tokenId}`, {
+        method: 'DELETE',
+      });
+
+      const clearedDraftTarget = strategyDraft?.parameters.contractAddress === response.token.contractAddress;
+      if (clearedDraftTarget) {
+        strategyDraftDirtyRef.current = true;
+        setStrategyDraft((current) =>
+          current
+            ? {
+                ...current,
+                parameters: {
+                  ...current.parameters,
+                  contractAddress: '',
+                },
+              }
+            : current,
+        );
+      }
+
+      if (response.clearedActiveContractAddress) {
+        setSettings((current) => ({
+          ...current,
+          contractAddress: '',
+        }));
+      }
+
+      setEngineState((current) =>
+        current
+          ? {
+              ...current,
+              tradableTokens: current.tradableTokens.filter((token) => token.id !== tokenId),
+              marketSnapshot: response.clearedActiveContractAddress ? null : current.marketSnapshot,
+            }
+          : current,
+      );
+
+      setNotice(
+        response.clearedActiveContractAddress
+          ? clearedDraftTarget
+            ? 'Tracked token removed. Active token and draft target were cleared.'
+            : 'Tracked token removed and active token was cleared.'
+          : clearedDraftTarget
+            ? 'Tracked token removed and draft target was cleared.'
+            : 'Tracked token removed.',
+      );
+      await refresh();
+    });
+
   const handleAddTrackedToken = () =>
     submitWithFeedback('token', async () => {
       const hadActiveContract = settings.contractAddress.trim().length > 0;
       const response = await api<{
         token: TradableToken;
         marketSnapshot: TokenMarketSnapshot | null;
+        webhookCheck: TokenWebhookCheck;
       }>('/api/tradable-tokens', {
         method: 'POST',
         body: JSON.stringify({
@@ -749,12 +806,17 @@ export default function App() {
       }
 
       setTradableTokenForm((current) => ({ ...current, contractAddress: '' }));
+      const webhookNotice = response.webhookCheck.ok
+        ? response.webhookCheck.latestSignature
+          ? 'Webhook RPC check passed.'
+          : 'Webhook RPC check passed, but no recent signatures were found yet.'
+        : `Webhook RPC check failed: ${response.webhookCheck.errorMessage ?? 'unknown RPC error'}`;
       setNotice(
         hadActiveContract
-          ? 'Tracked token added.'
+          ? `Tracked token added. ${webhookNotice}`
           : activeMarketSnapshot
-            ? 'Token saved as active with stored market data.'
-            : 'Token saved as active. Market data refresh now runs only on manual refresh or webhook events.',
+            ? `Token saved as active with stored market data. ${webhookNotice}`
+            : `Token saved as active. Market data refresh now runs only on manual refresh or webhook events. ${webhookNotice}`,
       );
       await refresh();
     });
@@ -1217,6 +1279,7 @@ export default function App() {
   const renderSetup = () => (
     <TradingSetupPage
       engineState={engineState}
+      activeContractAddress={settings.contractAddress}
       strategyDraft={strategyDraft}
       tradableTokenForm={tradableTokenForm}
       setTradableTokenForm={setTradableTokenForm}
@@ -1225,6 +1288,7 @@ export default function App() {
       submitting={submitting}
       handleAddTrackedToken={handleAddTrackedToken}
       handleUseToken={handleUseToken}
+      handleDeleteTrackedToken={handleDeleteTrackedToken}
       handleAddRpcEndpoint={handleAddRpcEndpoint}
       handleDeleteRpcEndpoint={handleDeleteRpcEndpoint}
       updateStrategyDraft={updateStrategyDraft}

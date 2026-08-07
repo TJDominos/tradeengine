@@ -1,6 +1,14 @@
 import { ApiError } from '../errors';
+import {
+  fetchJupiterTokenMetadata,
+  fetchJupiterTokenPrice,
+} from '../jupiter';
+import {
+  dbGetLatestTokenMarketSnapshot,
+  dbResolveTradableTokenId,
+} from '../tokenStore';
 import type { Env } from '../workerShared';
-import { normalizePubkey } from '../workerCore';
+import { fetchSolanaMintDecimals, normalizePubkey } from '../workerCore';
 import {
   buildRandomizedTwapPlan,
   type EngineState,
@@ -13,6 +21,10 @@ import type {
   StrategyVersionDocument,
 } from './types';
 import type { ExternalTradeEvent } from './triggers';
+import { executeSwap } from '../services/jupiterSwapService';
+import { SOLANA_USDC_MINT } from '../workerShared';
+import { getActiveAccounts } from '../services/accountPoolService';
+import { distributeVolumeAcrossAccounts } from '../services/tradeMath';
 
 const STORAGE_KEY = 'strategy-engine-state';
 const MAX_DEDUPED_TX_HASHES = 256;
@@ -250,13 +262,43 @@ export class StrategyEngineDurableObject {
       this.ensureBasePlanIfNeeded(Date.now());
     }
 
-    const nextTask = this.popNextDueTask(Date.now());
+    const now = Date.now();
+    const nextTask = this.popNextDueTask(now);
     if (!nextTask) {
       await this.persistState();
       return;
     }
 
-    this.applyExecutedTask(nextTask);
+    try {
+      const execution = await this.executeDueTask(nextTask);
+      if (execution.executedVolumeUsd > 0) {
+        this.applyExecutedTask(nextTask, execution.executedVolumeUsd);
+      }
+      if (execution.retryVolumeUsd > 0) {
+        this.scheduleTaskRetry(
+          {
+            ...nextTask,
+            amountUsd: execution.retryVolumeUsd,
+          },
+          now,
+        );
+      }
+    } catch (error: unknown) {
+      if (
+        error instanceof ApiError &&
+        error.message === 'No active managed accounts available for strategy execution'
+      ) {
+        await this.abort(error.message);
+        return;
+      }
+      console.error(
+        `[StrategyEngineDO] Swap execution failed for ${nextTask.side} ${nextTask.amountUsd} on ${config.contractAddress}:`,
+        error,
+      );
+      this.scheduleTaskRetry(nextTask, now);
+      await this.persistState();
+      return;
+    }
 
     if (state.metrics.actualTotalVolumeUsd >= config.targetTotalVolumeUsd) {
       await this.markCompleted();
@@ -444,7 +486,10 @@ export class StrategyEngineDurableObject {
     return false;
   }
 
-  private applyExecutedTask(task: StrategyEngineDurableObjectTask): void {
+  private applyExecutedTask(
+    task: StrategyEngineDurableObjectTask,
+    executedVolumeUsd: number,
+  ): void {
     const config = this.persistedState.config;
     if (!config) {
       throw new ApiError(409, 'Strategy engine durable object is not configured');
@@ -453,7 +498,7 @@ export class StrategyEngineDurableObject {
     const executableUsd = Math.max(
       0,
       Math.min(
-        task.amountUsd,
+        executedVolumeUsd,
         config.targetTotalVolumeUsd - this.persistedState.metrics.actualTotalVolumeUsd,
       ),
     );
@@ -470,6 +515,171 @@ export class StrategyEngineDurableObject {
         config.macroObjective,
       );
     }
+  }
+
+  private async executeDueTask(
+    task: StrategyEngineDurableObjectTask,
+  ): Promise<{ executedVolumeUsd: number; retryVolumeUsd: number }> {
+    const config = this.persistedState.config;
+    if (!config) {
+      throw new ApiError(409, 'Strategy engine durable object is not configured');
+    }
+
+    const activeAccounts = await getActiveAccounts(this.env, config.userId);
+    if (activeAccounts.length === 0) {
+      throw new ApiError(
+        409,
+        'No active managed accounts available for strategy execution',
+      );
+    }
+
+    const slices = distributeVolumeAcrossAccounts(
+      task.amountUsd,
+      activeAccounts.length,
+    );
+    let executedVolumeUsd = 0;
+    let retryVolumeUsd = 0;
+
+    for (let index = 0; index < activeAccounts.length; index += 1) {
+      const account = activeAccounts[index];
+      const sliceVolumeUsd = slices[index] ?? 0;
+      if (!Number.isFinite(sliceVolumeUsd) || sliceVolumeUsd <= 0) {
+        continue;
+      }
+
+      try {
+        const swapInput = await this.resolveSwapInput(task.side, sliceVolumeUsd);
+        const swap = await executeSwap(
+          this.env,
+          task.side,
+          swapInput.amountAtomic,
+          swapInput.inputMint,
+          swapInput.outputMint,
+          {
+            slippageBps: Math.max(1, config.strategyDocument.parameters.maxSlippageBps),
+            commitment: config.execution.commitment,
+            signer: {
+              publicKey: account.publicKey,
+              privateKey: account.privateKeyBytes,
+            },
+          },
+        );
+        executedVolumeUsd += swap.executedVolumeUsd;
+      } catch (error: unknown) {
+        retryVolumeUsd += sliceVolumeUsd;
+        console.error(
+          `[StrategyEngineDO] Account ${account.publicKey} failed ${task.side} slice ${sliceVolumeUsd} on ${config.contractAddress}:`,
+          error,
+        );
+      }
+    }
+
+    return {
+      executedVolumeUsd,
+      retryVolumeUsd: Number(retryVolumeUsd.toFixed(6)),
+    };
+  }
+
+  private async resolveSwapInput(
+    side: 'buy' | 'sell',
+    volumeUsd: number,
+  ): Promise<{
+    amountAtomic: string;
+    inputMint: string;
+    outputMint: string;
+  }> {
+    const config = this.persistedState.config;
+    if (!config) {
+      throw new ApiError(409, 'Strategy engine durable object is not configured');
+    }
+
+    if (side === 'buy') {
+      return {
+        amountAtomic: String(Math.max(1, Math.round(volumeUsd * 1_000_000))),
+        inputMint: SOLANA_USDC_MINT,
+        outputMint: config.contractAddress,
+      };
+    }
+
+    const tokenRow = await this.env.TRADINGBOT_DB
+      .prepare(
+        'SELECT decimals FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2 LIMIT 1',
+      )
+      .bind('solana', config.contractAddress)
+      .first<{ decimals: number | null }>();
+
+    const tokenId = await dbResolveTradableTokenId(
+      this.env.TRADINGBOT_DB,
+      config.contractAddress,
+    );
+    const marketSnapshot = tokenId
+      ? await dbGetLatestTokenMarketSnapshot(this.env.TRADINGBOT_DB, tokenId)
+      : null;
+    const jupiterMeta = await fetchJupiterTokenMetadata(config.contractAddress);
+    const tokenPriceUsd =
+      marketSnapshot?.priceUsd ??
+      jupiterMeta?.usdPrice ??
+      (await fetchJupiterTokenPrice(config.contractAddress));
+    const tokenDecimals =
+      tokenRow?.decimals ??
+      jupiterMeta?.decimals ??
+      (await fetchSolanaMintDecimals(
+        this.env.RPC_URL?.trim() || this.env.SOLANA_RPC_URL?.trim() || '',
+        config.contractAddress,
+      ));
+
+    if (
+      tokenPriceUsd == null ||
+      !Number.isFinite(tokenPriceUsd) ||
+      tokenPriceUsd <= 0
+    ) {
+      throw new ApiError(
+        503,
+        `Cannot resolve a positive USD price for ${config.contractAddress}`,
+      );
+    }
+    if (tokenDecimals == null || !Number.isFinite(tokenDecimals) || tokenDecimals < 0) {
+      throw new ApiError(
+        503,
+        `Cannot resolve token decimals for ${config.contractAddress}`,
+      );
+    }
+
+    const tokenAmount = volumeUsd / tokenPriceUsd;
+    const amountAtomic = Math.max(1, Math.round(tokenAmount * 10 ** tokenDecimals));
+    return {
+      amountAtomic: String(amountAtomic),
+      inputMint: config.contractAddress,
+      outputMint: SOLANA_USDC_MINT,
+    };
+  }
+
+  private scheduleTaskRetry(
+    task: StrategyEngineDurableObjectTask,
+    now: number,
+  ): void {
+    this.enqueueTask({
+      ...task,
+      scheduledAt: now + this.buildRetryDelayMs(),
+      metadata: {
+        ...task.metadata,
+        lastRetryAt: now,
+      },
+    });
+  }
+
+  private buildRetryDelayMs(): number {
+    const config = this.persistedState.config;
+    if (!config) {
+      return 5_000;
+    }
+    const baseIntervalMs = Math.max(
+      1_000,
+      Math.round(config.baseDurationMs / Math.max(1, config.baseOrderCount)),
+    );
+    const jitterRatio = Math.max(0, Math.min(0.5, config.execution.timeJitterRatio));
+    const jitterMultiplier = 1 + ((Math.random() * 2) - 1) * jitterRatio;
+    return Math.max(1_000, Math.round(baseIntervalMs * jitterMultiplier));
   }
 
   private ensureBasePlanIfNeeded(startTime: number): void {

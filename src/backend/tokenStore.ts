@@ -6,6 +6,7 @@ import {
   isHeliusRpcUrl,
   normalizePubkey,
   normalizeRpcUrl,
+  solanaRpc,
 } from './workerCore';
 import { dbEnsureTradeDomainSchema } from './workerSchema';
 import type {
@@ -156,7 +157,7 @@ export async function dbListTradableTokens(db: D1Database): Promise<TradableToke
   await dbEnsureTradeDomainSchema(db);
   const rows = await db
     .prepare(
-      'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens ORDER BY id ASC',
+      'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens WHERE is_active = 1 ORDER BY id ASC',
     )
     .all<{
       id: number;
@@ -251,6 +252,83 @@ export async function dbCreateTradableToken(
     decimals: row.decimals,
     isActive: row.is_active === 1,
   };
+}
+
+export async function dbDeleteTradableToken(
+  db: D1Database,
+  tokenId: number,
+): Promise<TradableToken> {
+  await dbEnsureTradeDomainSchema(db);
+  const row = await db
+    .prepare(
+      'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens WHERE id = ?1 LIMIT 1',
+    )
+    .bind(tokenId)
+    .first<{
+      id: number;
+      network: string;
+      contract_address: string;
+      symbol: string | null;
+      name: string | null;
+      decimals: number | null;
+      is_active: number;
+    }>();
+  if (!row || row.is_active === 0) {
+    throw new ApiError(404, 'Tracked token not found');
+  }
+
+  await db
+    .prepare(
+      `UPDATE tradable_tokens
+       SET is_active = 0
+       WHERE id = ?1`,
+    )
+    .bind(tokenId)
+    .run();
+
+  return {
+    id: row.id,
+    network: row.network,
+    contractAddress: row.contract_address,
+    symbol: row.symbol,
+    name: row.name,
+    decimals: row.decimals,
+    isActive: false,
+  };
+}
+
+export async function checkTradableTokenWebhookSupport(
+  rpcUrls: string | string[],
+  contractAddress: string,
+): Promise<{
+  ok: boolean;
+  checkedAt: number;
+  latestSignature: string | null;
+  errorMessage: string | null;
+}> {
+  const normalizedContractAddress = normalizePubkey(contractAddress);
+  const checkedAt = nowTs();
+
+  try {
+    const results = await solanaRpc<Array<{ signature?: string | null }>>(
+      rpcUrls,
+      'getSignaturesForAddress',
+      [normalizedContractAddress, { limit: 1 }],
+    );
+    return {
+      ok: true,
+      checkedAt,
+      latestSignature: results[0]?.signature ?? null,
+      errorMessage: null,
+    };
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      checkedAt,
+      latestSignature: null,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 export async function dbUpdateTradableTokenMetadata(

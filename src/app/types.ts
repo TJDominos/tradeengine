@@ -172,6 +172,13 @@ export type TradableToken = {
   isActive: boolean;
 };
 
+export type TokenWebhookCheck = {
+  ok: boolean;
+  checkedAt: number;
+  latestSignature: string | null;
+  errorMessage: string | null;
+};
+
 export type HistoricalSetup = {
   id: number;
   tokenSymbol: string | null;

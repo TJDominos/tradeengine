@@ -28,6 +28,16 @@ export interface StrategyExecutionTactics {
   absorbRatio: number;
 }
 
+export type TradableToken = {
+  id: number;
+  network: string;
+  contractAddress: string;
+  symbol: string | null;
+  name: string | null;
+  decimals: number | null;
+  isActive: boolean;
+};
+
 export type StrategyExternalBuyAction =
   | 'reduce_target'
   | 'counter_trade'
@@ -64,7 +74,6 @@ export interface StrategyRiskControls {
   maxPositionUsd: number | null;
   maxDailyLossUsd: number | null;
   maxConcurrentOrders: number;
-  dryRun: boolean;
   requireCompleteMetrics: boolean;
 }
 
@@ -125,7 +134,6 @@ export interface StrategyEvaluationRecord {
   txSignature: string | null;
   status: StrategyEvaluationStatus;
   shouldExecute: boolean;
-  dryRun: boolean;
   summary: Record<string, unknown>;
   createdAt: number;
 }
@@ -168,7 +176,6 @@ export type StrategyFieldPath =
   | 'riskControls.maxPositionUsd'
   | 'riskControls.maxDailyLossUsd'
   | 'riskControls.maxConcurrentOrders'
-  | 'riskControls.dryRun'
   | 'riskControls.requireCompleteMetrics'
   | 'execution.enabled'
   | 'execution.route'

@@ -83,7 +83,6 @@ export interface StrategyRiskControls {
   maxPositionUsd: number | null;
   maxDailyLossUsd: number | null;
   maxConcurrentOrders: number;
-  dryRun: boolean;
   requireCompleteMetrics: boolean;
 }
 
@@ -278,7 +277,6 @@ export interface StrategyEvaluationResult {
   status: StrategyEvaluationStatus;
   qualified: boolean;
   shouldExecute: boolean;
-  dryRun: boolean;
   reasons: string[];
   metrics: StrategyEvaluationMetric[];
   triggerAccepted: boolean;
@@ -333,7 +331,6 @@ export interface StrategyEvaluationPersistedRecord {
   txSignature: string | null;
   status: StrategyEvaluationStatus;
   shouldExecute: boolean;
-  dryRun: boolean;
   summaryJson: string;
   createdAt: number;
 }

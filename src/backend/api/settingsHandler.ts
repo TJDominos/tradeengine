@@ -1,5 +1,13 @@
 import { parseActiveTokenUpdateRequest, parseJsonBody, parseRpcEndpointCreateRequest, parseTradableTokenCreateRequest } from '../workerSchema';
-import { dbAddRpcEndpoint, dbCreateTradableToken, dbDeleteRpcEndpoint, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
+import {
+  checkTradableTokenWebhookSupport,
+  dbAddRpcEndpoint,
+  dbCreateTradableToken,
+  dbDeleteRpcEndpoint,
+  dbDeleteTradableToken,
+  dbResolveSolanaRpcUrls,
+  dbResolveTradableTokenId,
+} from '../tokenStore';
 import { dbAddAuditLog, dbLoadSettings, dbSaveActiveContractAddress, dbSaveSettings } from '../userStore';
 import { fetchSolanaMintDecimals, jsonResponse, normalizePubkey } from '../workerCore';
 import type { Env, SettingsUpdateRequest, TokenMarketSnapshot } from '../workerShared';
@@ -143,6 +151,10 @@ export async function handleSettingsRoutes(
       { network: body.network, contractAddress: normalizedAddress },
       decimals,
     );
+    const webhookCheck = await checkTradableTokenWebhookSupport(
+      rpcUrls,
+      normalizedAddress,
+    );
     const marketSnapshot = await loadStoredMarketSnapshotByContractAddress(
       env.TRADINGBOT_DB,
       normalizedAddress,
@@ -152,11 +164,49 @@ export async function handleSettingsRoutes(
       user.id,
       'token.added',
       token.contractAddress,
-      marketSnapshot
-        ? `Added tradable token on ${token.network} and reused the latest stored market snapshot.`
-        : `Added tradable token on ${token.network}. Market data will refresh only on manual refresh or webhook events.`,
+      [
+        marketSnapshot
+          ? `Added tradable token on ${token.network} and reused the latest stored market snapshot.`
+          : `Added tradable token on ${token.network}. Market data will refresh only on manual refresh or webhook events.`,
+        webhookCheck.ok
+          ? webhookCheck.latestSignature
+            ? 'Webhook RPC verification passed.'
+            : 'Webhook RPC verification passed, but no recent signatures were found for this mint yet.'
+          : `Webhook RPC verification failed: ${webhookCheck.errorMessage ?? 'unknown RPC error'}`,
+      ].join(' '),
     );
-    return jsonResponse({ token, marketSnapshot }, 201);
+    return jsonResponse({ token, marketSnapshot, webhookCheck }, 201);
+  }
+
+  if (method === 'DELETE' && /^\/api\/tradable-tokens\/\d+$/.test(pathname)) {
+    const user = await requireAdmin(request, env);
+    const tokenId = Number.parseInt(url.pathname.split('/').pop() ?? '', 10);
+    if (!Number.isInteger(tokenId) || tokenId <= 0) {
+      return jsonResponse({ error: 'Tracked token id is invalid' }, 400);
+    }
+
+    const token = await dbDeleteTradableToken(env.TRADINGBOT_DB, tokenId);
+    const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+    const clearedActiveContractAddress = settings.contractAddress === token.contractAddress;
+    if (clearedActiveContractAddress) {
+      await dbSaveActiveContractAddress(env.TRADINGBOT_DB, user.id, '');
+    }
+
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      user.id,
+      'token.deleted',
+      token.contractAddress,
+      clearedActiveContractAddress
+        ? `Removed tracked token on ${token.network} and cleared the active token selection.`
+        : `Removed tracked token on ${token.network}.`,
+    );
+
+    return jsonResponse({
+      success: true,
+      token,
+      clearedActiveContractAddress,
+    });
   }
 
   if (method === 'POST' && pathname === '/api/rpc-endpoints') {

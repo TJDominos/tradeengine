@@ -4,6 +4,7 @@ import { Controller, useForm } from 'react-hook-form';
 import type {
   StrategyMacroObjective,
   StrategyVersionDocument,
+  TradableToken,
 } from '../app/strategyTypes';
 
 type StrategySchemaFormProps = {
@@ -13,6 +14,7 @@ type StrategySchemaFormProps = {
   isSubmitting: boolean;
   activeStrategyVersionNo: number | null;
   activeStrategyStatus: string | null;
+  tradableTokens: TradableToken[];
 };
 
 const macroObjectiveOptions: Array<{
@@ -72,12 +74,23 @@ function parseNumber(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function parseNullableNumber(value: string): number | null {
+function parseBlankableNumber(value: string): number | null {
   if (value.trim() === '') {
     return null;
   }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseNullableNumber(value: string): number | null {
+  return parseBlankableNumber(value);
+}
+
+function formatNumberInputValue(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) {
+    return '';
+  }
+  return String(value);
 }
 
 function formatCurrency(value: number | null | undefined): string {
@@ -186,6 +199,7 @@ export default function StrategySchemaForm({
   isSubmitting,
   activeStrategyVersionNo,
   activeStrategyStatus,
+  tradableTokens,
 }: StrategySchemaFormProps) {
   const { control, register, watch, handleSubmit, reset, getValues, formState } = useForm<StrategyVersionDocument>({
     defaultValues: draft,
@@ -196,6 +210,30 @@ export default function StrategySchemaForm({
   const objective = formData.execution?.macroObjective ?? 'accumulation';
   const activeTactic = tacticConfig[objective];
   const draftSignature = React.useMemo(() => JSON.stringify(draft), [draft]);
+  const contractOptions = React.useMemo(() => {
+    const options = tradableTokens
+      .filter((token) => token.network === 'solana' && token.isActive)
+      .map((token) => ({
+        value: token.contractAddress,
+        label:
+          token.symbol ??
+          token.name ??
+          contractPreview(token.contractAddress),
+      }));
+
+    const currentContractAddress = draft.parameters.contractAddress.trim();
+    if (
+      currentContractAddress &&
+      !options.some((option) => option.value === currentContractAddress)
+    ) {
+      options.unshift({
+        value: currentContractAddress,
+        label: `${contractPreview(currentContractAddress)} (removed from registry)`,
+      });
+    }
+
+    return options;
+  }, [draft.parameters.contractAddress, tradableTokens]);
 
   React.useEffect(() => {
     const currentSignature = JSON.stringify(getValues());
@@ -284,12 +322,24 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
-            <FieldShell label="Target Contract" helper="Managed by the tracked token registry. Activating a token updates this value automatically.">
-              <input
-                {...register('parameters.contractAddress')}
-                readOnly
-                className={textInputClassName(true)}
-                placeholder="No token selected"
+            <FieldShell label="Target Contract" helper="Select any token from the tracked registry. Activating a token in the registry still controls the live market context separately until you save this draft.">
+              <Controller
+                control={control}
+                name="parameters.contractAddress"
+                render={({ field }) => (
+                  <select
+                    {...field}
+                    className={textInputClassName()}
+                    disabled={contractOptions.length === 0}
+                  >
+                    <option value="">No token selected</option>
+                    {contractOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
               />
             </FieldShell>
 
@@ -326,20 +376,34 @@ export default function StrategySchemaForm({
             </FieldShell>
 
             <FieldShell label="Target Volume (USD)" helper="Minimum aggregate volume needed before the setup qualifies for execution.">
-              <input
-                type="number"
-                step="0.01"
-                {...register('targets.volumeUsdMin', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="targets.volumeUsdMin"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
 
             <FieldShell label="Max Trades" helper="Upper bound for accepted aggregate transaction count in the selected operating window.">
-              <input
-                type="number"
-                step="1"
-                {...register('parameters.maxTransactions', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="parameters.maxTransactions"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="1"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
 
@@ -351,8 +415,11 @@ export default function StrategySchemaForm({
                   <input
                     type="number"
                     step="0.01"
-                    value={((field.value ?? 0) / 100).toString()}
-                    onChange={(event) => field.onChange(Math.round(parseNumber(event.target.value) * 100))}
+                    value={field.value == null ? '' : ((field.value ?? 0) / 100).toString()}
+                    onChange={(event) => {
+                      const parsed = parseBlankableNumber(event.target.value);
+                      field.onChange(parsed == null ? null : Math.round(parsed * 100));
+                    }}
                     className={textInputClassName()}
                   />
                 )}
@@ -360,38 +427,66 @@ export default function StrategySchemaForm({
             </FieldShell>
 
             <FieldShell label="External Trigger Floor (USD)" helper="Ignore outside activity smaller than this notional value.">
-              <input
-                type="number"
-                step="0.01"
-                {...register('triggers.triggerThresholdUsd', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="triggers.triggerThresholdUsd"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
 
             <FieldShell label="Net Buy-In Target (USD)" helper="Optional qualification target for future signal enrichment.">
-              <input
-                type="number"
-                step="0.01"
-                {...register('targets.netBuyinUsdMin', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="targets.netBuyinUsdMin"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
 
             <FieldShell label="Volatility Target (%)" helper="Optional filter used when full market metrics are available.">
-              <input
-                type="number"
-                step="0.01"
-                {...register('targets.volatilityPctMin', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="targets.volatilityPctMin"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
 
             <FieldShell label="Pullback Limit (%)" helper="Maximum tolerated outsider pullback before the setup blocks execution.">
-              <input
-                type="number"
-                step="0.01"
-                {...register('targets.pullbackPctMax', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="targets.pullbackPctMax"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
           </div>
@@ -410,8 +505,11 @@ export default function StrategySchemaForm({
                   <input
                     type="number"
                     step="0.01"
-                    value={field.value ?? 0}
-                    onChange={(event) => field.onChange(Math.max(0, parseNumber(event.target.value)))}
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => {
+                      const parsed = parseBlankableNumber(event.target.value);
+                      field.onChange(parsed == null ? null : Math.max(0, parsed));
+                    }}
                     className={textInputClassName()}
                   />
                 )}
@@ -419,47 +517,82 @@ export default function StrategySchemaForm({
             </FieldShell>
 
             <FieldShell label="Cooldown (ms)" helper="Minimum delay before the strategy reacts again to a fresh trigger.">
-              <input
-                type="number"
-                step="1"
-                {...register('triggers.cooldownMs', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="triggers.cooldownMs"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="1"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
 
             <FieldShell label="Idempotency Window (ms)" helper="How long duplicate trigger identifiers are treated as the same event.">
-              <input
-                type="number"
-                step="1"
-                {...register('triggers.idempotencyWindowMs', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="triggers.idempotencyWindowMs"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="1"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
 
             <FieldShell label="Max Concurrent Orders" helper="Execution safety cap used by backend planning when live routing is enabled.">
-              <input
-                type="number"
-                step="1"
-                {...register('riskControls.maxConcurrentOrders', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="riskControls.maxConcurrentOrders"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="1"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
 
             <FieldShell label="Time Jitter Ratio" helper="Randomizes delay distribution across scheduled TWAP slices.">
-              <input
-                type="number"
-                step="0.01"
-                {...register('execution.timeJitterRatio', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="execution.timeJitterRatio"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
 
             <FieldShell label="Volume Jitter Ratio" helper="Randomizes per-slice notional while preserving total campaign volume.">
-              <input
-                type="number"
-                step="0.01"
-                {...register('execution.volumeJitterRatio', { setValueAs: (value) => parseNumber(String(value ?? '0')) })}
-                className={textInputClassName()}
+              <Controller
+                control={control}
+                name="execution.volumeJitterRatio"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    className={textInputClassName()}
+                  />
+                )}
               />
             </FieldShell>
 
@@ -471,7 +604,7 @@ export default function StrategySchemaForm({
                   <input
                     type="number"
                     step="0.01"
-                    value={field.value ?? ''}
+                    value={formatNumberInputValue(field.value)}
                     onChange={(event) => field.onChange(parseNullableNumber(event.target.value))}
                     className={textInputClassName()}
                   />
@@ -487,7 +620,7 @@ export default function StrategySchemaForm({
                   <input
                     type="number"
                     step="0.01"
-                    value={field.value ?? ''}
+                    value={formatNumberInputValue(field.value)}
                     onChange={(event) => field.onChange(parseNullableNumber(event.target.value))}
                     className={textInputClassName()}
                   />
@@ -543,21 +676,6 @@ export default function StrategySchemaForm({
           </div>
 
           <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
-            <Controller
-              control={control}
-              name="riskControls.dryRun"
-              render={({ field }) => (
-                <button
-                  type="button"
-                  onClick={() => field.onChange(!field.value)}
-                  className={`flex items-center justify-between rounded-xl border px-4 py-3 text-sm transition ${field.value ? 'border-emerald-500 bg-emerald-500/10 text-emerald-200' : 'border-slate-700 bg-slate-900 text-slate-300'}`}
-                >
-                  <span>Dry Run</span>
-                  <span>{field.value ? 'On' : 'Off'}</span>
-                </button>
-              )}
-            />
-
             <Controller
               control={control}
               name="riskControls.requireCompleteMetrics"
@@ -622,9 +740,6 @@ export default function StrategySchemaForm({
             <div className="mt-3 flex flex-wrap gap-2">
               <span className={`rounded-full px-3 py-1 text-xs font-medium ${formData.execution?.enabled ? 'bg-blue-500/15 text-blue-200' : 'bg-slate-700 text-slate-300'}`}>
                 Execution {formData.execution?.enabled ? 'On' : 'Off'}
-              </span>
-              <span className={`rounded-full px-3 py-1 text-xs font-medium ${formData.riskControls?.dryRun ? 'bg-emerald-500/15 text-emerald-200' : 'bg-slate-700 text-slate-300'}`}>
-                Dry Run {formData.riskControls?.dryRun ? 'On' : 'Off'}
               </span>
               <span className={`rounded-full px-3 py-1 text-xs font-medium ${formData.riskControls?.requireCompleteMetrics ? 'bg-blue-500/15 text-blue-200' : 'bg-slate-700 text-slate-300'}`}>
                 Complete Metrics {formData.riskControls?.requireCompleteMetrics ? 'Required' : 'Optional'}

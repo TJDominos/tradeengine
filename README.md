@@ -91,6 +91,7 @@ Optional environment variables:
 | Variable | Description |
 |----------|-------------|
 | `SOLANA_RPC_URL` | Preferred Solana HTTP RPC endpoint for metadata, balances, and transaction enrichment. |
+| `RPC_URL` | Optional alias used by the Jupiter swap executor in the strategy Durable Object. Falls back to `SOLANA_RPC_URL`. |
 | `ALCHEMY_WEBHOOK_SIGNING_KEY` | Signing key from the Alchemy webhook detail page. The Worker verifies the `X-Alchemy-Signature` HMAC-SHA256 header against the raw request body. |
 | `ALCHEMY_WEBHOOK_SECRET` | Backward-compatible alias for `ALCHEMY_WEBHOOK_SIGNING_KEY`. Use only if you already deployed that variable name. |
 

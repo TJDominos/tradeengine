@@ -34,7 +34,6 @@ export const DEFAULT_RISK_CONTROLS: StrategyRiskControls = {
   maxPositionUsd: null,
   maxDailyLossUsd: null,
   maxConcurrentOrders: 1,
-  dryRun: true,
   requireCompleteMetrics: true,
 };
 

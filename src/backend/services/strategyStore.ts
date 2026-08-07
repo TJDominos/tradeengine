@@ -565,7 +565,6 @@ function mapStrategyEvaluationRow(row: {
   tx_signature: string | null;
   status: string;
   should_execute: number;
-  dry_run: number;
   summary_json: string;
   created_at: number;
 }) {
@@ -582,7 +581,6 @@ function mapStrategyEvaluationRow(row: {
     txSignature: row.tx_signature,
     status: row.status,
     shouldExecute: row.should_execute === 1,
-    dryRun: row.dry_run === 1,
     summary: parseJsonText<Record<string, unknown>>(row.summary_json),
     createdAt: row.created_at,
   };
@@ -1146,7 +1144,6 @@ export async function dbListStrategyEvaluations(
   txSignature: string | null;
   status: string;
   shouldExecute: boolean;
-  dryRun: boolean;
   summary: Record<string, unknown>;
   createdAt: number;
 }>> {
@@ -1166,7 +1163,6 @@ export async function dbListStrategyEvaluations(
          se.tx_signature,
          se.status,
          se.should_execute,
-         se.dry_run,
          se.summary_json,
          se.created_at
        FROM strategy_evaluations se
@@ -1189,7 +1185,6 @@ export async function dbListStrategyEvaluations(
       tx_signature: string | null;
       status: string;
       should_execute: number;
-      dry_run: number;
       summary_json: string;
       created_at: number;
     }>();
@@ -1238,10 +1233,9 @@ async function dbCreateStrategyEvaluation(
          tx_signature,
          status,
          should_execute,
-         dry_run,
          summary_json,
          created_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
     )
     .bind(
       userId,
@@ -1254,7 +1248,6 @@ async function dbCreateStrategyEvaluation(
       trigger.txSignature,
       runtime.evaluation.status,
       runtime.evaluation.shouldExecute ? 1 : 0,
-      runtime.evaluation.dryRun ? 1 : 0,
       JSON.stringify(runtime.summary),
       createdAt,
     )

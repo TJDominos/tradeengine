@@ -652,14 +652,12 @@ export function evaluateStrategy(
   }
 
   const qualified = reasons.length === 0;
-  const dryRun = strategy.riskControls.dryRun || !strategy.execution.enabled;
-  const shouldExecute = qualified && strategy.execution.enabled && !strategy.riskControls.dryRun;
+  const shouldExecute = qualified && strategy.execution.enabled;
 
   return {
     status: qualified ? 'accepted' : 'blocked',
     qualified,
     shouldExecute,
-    dryRun,
     reasons,
     metrics,
     triggerAccepted,

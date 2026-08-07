@@ -10,6 +10,7 @@ export interface Env {
   STRATEGY_ENGINE_DO: DurableObjectNamespace;
   ASSETS?: Fetcher;
   PRIVATE_KEY_ENCRYPTION_KEY?: string;
+  RPC_URL?: string;
   SOLANA_RPC_URL?: string;
   ALCHEMY_WEBHOOK_SIGNING_KEY?: string;
   ALCHEMY_WEBHOOK_SECRET?: string;

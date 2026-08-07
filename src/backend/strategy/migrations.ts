@@ -111,7 +111,6 @@ function normalizeRiskControls(value: unknown): StrategyRiskControls {
       raw.maxConcurrentOrders,
       DEFAULT_RISK_CONTROLS.maxConcurrentOrders,
     ),
-    dryRun: readBoolean(raw.dryRun, DEFAULT_RISK_CONTROLS.dryRun),
     requireCompleteMetrics: readBoolean(
       raw.requireCompleteMetrics,
       DEFAULT_RISK_CONTROLS.requireCompleteMetrics,

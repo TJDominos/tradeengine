@@ -72,7 +72,6 @@ export function buildStrategyDocumentFromSettings(
     changeNote?: string;
     origin?: 'settings-sync' | 'manual' | 'migration';
     executionEnabled?: boolean;
-    dryRun?: boolean;
   },
 ): StrategyVersionDocument {
   return normalizeStrategyDocument({
@@ -103,7 +102,6 @@ export function buildStrategyDocumentFromSettings(
     },
     riskControls: {
       ...DEFAULT_RISK_CONTROLS,
-      dryRun: options?.dryRun ?? DEFAULT_RISK_CONTROLS.dryRun,
     },
     execution: {
       ...DEFAULT_EXECUTION_CONFIG,
@@ -202,7 +200,6 @@ export function runStrategyRuntime(input: {
       snapshotFetchedAt: input.marketSnapshot?.fetchedAt ?? null,
       qualified: evaluation.qualified,
       shouldExecute: evaluation.shouldExecute,
-      dryRun: evaluation.dryRun,
       reasons: evaluation.reasons,
       metrics: evaluation.metrics,
       executionPlan,
@@ -215,7 +212,7 @@ export function summarizeStrategyRuntime(result: StrategyRuntimeResult): string 
   if (result.evaluation.qualified) {
     return result.evaluation.shouldExecute
       ? 'Strategy qualified and produced an executable plan.'
-      : 'Strategy qualified, but execution remains disabled or dry-run only.';
+      : 'Strategy qualified, but execution remains disabled.';
   }
   return result.evaluation.reasons.length > 0
     ? `Strategy blocked: ${result.evaluation.reasons.join(' | ')}`

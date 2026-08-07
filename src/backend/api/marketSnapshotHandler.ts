@@ -163,7 +163,6 @@ async function runManualMarketRefreshWorkflow(
         status: strategyResult.runtime.evaluation.status,
         qualified: strategyResult.runtime.evaluation.qualified,
         shouldExecute: strategyResult.runtime.evaluation.shouldExecute,
-        dryRun: strategyResult.runtime.evaluation.dryRun,
         reasons: strategyResult.runtime.evaluation.reasons,
       };
     }

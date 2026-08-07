@@ -195,7 +195,6 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     tx_signature TEXT,
     status TEXT NOT NULL,
     should_execute INTEGER NOT NULL DEFAULT 0,
-    dry_run INTEGER NOT NULL DEFAULT 1,
     summary_json TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,

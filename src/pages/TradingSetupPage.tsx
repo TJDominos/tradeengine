@@ -6,6 +6,7 @@ import StrategySchemaForm from '../components/StrategySchemaForm';
 
 type TradingSetupPageProps = {
   engineState: EngineState;
+  activeContractAddress: string;
   strategyDraft: StrategyVersionDocument | null;
   tradableTokenForm: { network: string; contractAddress: string };
   setTradableTokenForm: React.Dispatch<React.SetStateAction<{ network: string; contractAddress: string }>>;
@@ -14,6 +15,7 @@ type TradingSetupPageProps = {
   submitting: string | null;
   handleAddTrackedToken: () => void;
   handleUseToken: (contractAddress: string) => void;
+  handleDeleteTrackedToken: (tokenId: number) => void;
   handleAddRpcEndpoint: () => void;
   handleDeleteRpcEndpoint: (endpointId: number) => void;
   updateStrategyDraft: (updater: (current: StrategyVersionDocument) => StrategyVersionDocument) => void;
@@ -24,6 +26,7 @@ type TradingSetupPageProps = {
 
 export default function TradingSetupPage({
   engineState,
+  activeContractAddress,
   strategyDraft,
   tradableTokenForm,
   setTradableTokenForm,
@@ -32,6 +35,7 @@ export default function TradingSetupPage({
   submitting,
   handleAddTrackedToken,
   handleUseToken,
+  handleDeleteTrackedToken,
   handleAddRpcEndpoint,
   handleDeleteRpcEndpoint,
   updateStrategyDraft,
@@ -140,9 +144,14 @@ export default function TradingSetupPage({
                         <span className="rounded-full bg-slate-700 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">
                           {token.network}
                         </span>
-                        {strategyDraft?.parameters.contractAddress === token.contractAddress ? (
+                        {activeContractAddress === token.contractAddress ? (
                           <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-blue-300">
                             active
+                          </span>
+                        ) : null}
+                        {strategyDraft?.parameters.contractAddress === token.contractAddress ? (
+                          <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-emerald-300">
+                            draft target
                           </span>
                         ) : null}
                       </div>
@@ -150,17 +159,27 @@ export default function TradingSetupPage({
                         {token.contractAddress}
                       </div>
                     </div>
-                    <button
-                      onClick={() => void handleUseToken(token.contractAddress)}
-                      disabled={submitting === 'use-token' || strategyDraft?.parameters.contractAddress === token.contractAddress}
-                      className="rounded-xl border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-medium text-white transition hover:bg-slate-700 disabled:opacity-60"
-                    >
-                      {strategyDraft?.parameters.contractAddress === token.contractAddress
-                        ? 'Active'
-                        : submitting === 'use-token'
-                          ? 'Activating...'
-                          : 'Use'}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => void handleUseToken(token.contractAddress)}
+                        disabled={submitting === 'use-token' || activeContractAddress === token.contractAddress}
+                        className="rounded-xl border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-medium text-white transition hover:bg-slate-700 disabled:opacity-60"
+                      >
+                        {activeContractAddress === token.contractAddress
+                          ? 'Active'
+                          : submitting === 'use-token'
+                            ? 'Activating...'
+                            : 'Activate'}
+                      </button>
+                      <button
+                        onClick={() => void handleDeleteTrackedToken(token.id)}
+                        disabled={submitting === `token-delete-${token.id}`}
+                        className="rounded-xl border border-rose-500/20 bg-rose-500/10 p-2 text-rose-400 transition hover:bg-rose-500/20 disabled:opacity-60"
+                        title="Remove tracked token"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </div>
                 ))
               ) : (
@@ -241,6 +260,7 @@ export default function TradingSetupPage({
               isSubmitting={submitting === 'settings'}
               activeStrategyVersionNo={activeStrategyVersionNo}
               activeStrategyStatus={activeStrategyStatus}
+              tradableTokens={engineState.tradableTokens}
             />
           ) : (
             <div className="rounded-xl border border-dashed border-slate-700 px-4 py-4 text-sm text-slate-500">

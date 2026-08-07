@@ -140,7 +140,6 @@ function buildStrategyDocument(note, volumeUsd) {
       maxPositionUsd: volumeUsd,
       maxDailyLossUsd: null,
       maxConcurrentOrders: 1,
-      dryRun: false,
       requireCompleteMetrics: false,
     },
     execution: {
