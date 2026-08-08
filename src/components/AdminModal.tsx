@@ -142,32 +142,48 @@ export default function AdminModal({
                     <h4 className="font-semibold">Recovery Phrase</h4>
                     <p className="text-xs text-slate-400">Import an existing wallet with a 12, 15, 18, 21, or 24-word recovery phrase.</p>
                   </div>
-                  <div className="rounded border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
-                    <div className="font-semibold text-amber-300">Derived Account Range</div>
-                    <div className="mt-1">Currently imported internal wallets: {managedAccountCount}</div>
-                    <div className="mt-1">This import will preview and import the first {adminImportForm.derivedAccountCount} derived accounts from the phrase.</div>
+                  <div className="rounded-xl border-2 border-amber-500/30 bg-amber-500/10 p-4 shadow-sm">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-amber-300">How Many Derived Accounts To Import</div>
+                        <div className="mt-1 text-xs text-amber-100">Currently imported internal wallets: {managedAccountCount}</div>
+                        <div className="mt-1 text-xs text-amber-100">This import will preview and import the first {adminImportForm.derivedAccountCount} derived accounts from the phrase.</div>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-4 gap-2">
+                      {[20, 40, 60, 100].map((count) => (
+                        <button
+                          key={count}
+                          type="button"
+                          onClick={() => setAdminImportForm({ ...adminImportForm, derivedAccountCount: count })}
+                          className={`rounded border px-2 py-2 text-xs font-semibold ${adminImportForm.derivedAccountCount === count ? 'border-amber-500 bg-amber-600 text-white' : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-500/50 hover:text-white'}`}
+                        >
+                          First {count}
+                        </button>
+                      ))}
+                    </div>
+                    <label className="mt-3 block space-y-1.5">
+                      <span className="text-xs font-semibold uppercase text-slate-300">Custom Count</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        step={1}
+                        value={adminImportForm.derivedAccountCount}
+                        onChange={(event) => {
+                          const nextCount = Number.parseInt(event.target.value, 10);
+                          setAdminImportForm({
+                            ...adminImportForm,
+                            derivedAccountCount: Number.isFinite(nextCount) ? nextCount : 1,
+                          });
+                        }}
+                        className="w-full rounded border-2 border-amber-500/40 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-amber-500"
+                      />
+                      <p className="text-[10px] leading-tight text-slate-400">
+                        Increase this number above your current imported wallet count to continue importing more derived accounts.
+                      </p>
+                    </label>
                   </div>
-                  <label className="block space-y-1.5">
-                    <span className="text-xs font-semibold uppercase text-slate-400">Derived Accounts To Import</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      step={1}
-                      value={adminImportForm.derivedAccountCount}
-                      onChange={(event) => {
-                        const nextCount = Number.parseInt(event.target.value, 10);
-                        setAdminImportForm({
-                          ...adminImportForm,
-                          derivedAccountCount: Number.isFinite(nextCount) ? nextCount : 1,
-                        });
-                      }}
-                      className="w-full rounded border-2 border-amber-500/40 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-amber-500"
-                    />
-                    <p className="text-[10px] leading-tight text-slate-500">
-                      Increase this number above your current imported wallet count to continue importing more derived accounts.
-                    </p>
-                  </label>
                   <div className="space-y-1.5">
                     <span className="text-xs font-semibold uppercase text-slate-400">Word Count</span>
                     <div className="grid grid-cols-5 gap-2">
