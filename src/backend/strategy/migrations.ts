@@ -47,11 +47,12 @@ function readRecord(value: unknown): Record<string, unknown> {
 
 function normalizeParameters(value: unknown): StrategyParameters {
   const raw = readRecord(value);
-  const legacyContractAddress = readString(raw.contractAddress);
+  const legacyContractAddress = readString(raw.contractAddress).trim();
   const baseTokenAddress = readString(raw.baseTokenAddress).trim() || legacyContractAddress;
   const quoteTokenAddress = readString(raw.quoteTokenAddress).trim() || SOLANA_USDC_MINT;
   const ammPoolAddress = readString(raw.ammPoolAddress).trim();
   return {
+    contractAddress: legacyContractAddress || baseTokenAddress,
     baseTokenAddress,
     quoteTokenAddress,
     ammPoolAddress,

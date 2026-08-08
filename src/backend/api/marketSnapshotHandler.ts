@@ -223,7 +223,9 @@ export async function handleMarketSnapshotRoutes(
   if (method === 'GET' && pathname === '/api/market-snapshots') {
     const user = await requireAdmin(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-    const contractAddress = settings.baseTokenAddress.trim();
+    const contractAddress =
+      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+    const quoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || undefined;
 
     if (!contractAddress) {
       return jsonResponse(
@@ -265,6 +267,7 @@ export async function handleMarketSnapshotRoutes(
     const tokenId = await dbResolveTradableTokenId(
       env.TRADINGBOT_DB,
       contractAddress,
+      quoteTokenAddress,
     );
 
     if (!tokenId) {
@@ -285,7 +288,9 @@ export async function handleMarketSnapshotRoutes(
   if (method === 'POST' && pathname === '/api/market-snapshot/refresh') {
     const user = await requireAdmin(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-    const contractAddress = settings.baseTokenAddress.trim();
+    const contractAddress =
+      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+    const quoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || undefined;
     if (!contractAddress) {
       return jsonResponse(
         { error: 'Set an active trading token before forcing a live market refresh' },
@@ -312,6 +317,7 @@ export async function handleMarketSnapshotRoutes(
     const currentSnapshot = await loadStoredMarketSnapshotByContractAddress(
       env.TRADINGBOT_DB,
       contractAddress,
+      quoteTokenAddress,
     );
     const refreshStart = await dbTryStartMarketRefresh(
       env.TRADINGBOT_DB,
@@ -395,7 +401,8 @@ export async function handleMarketSnapshotRoutes(
   if (method === 'POST' && pathname === '/api/market-snapshot/refresh/cancel') {
     const user = await requireAdmin(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-    const contractAddress = settings.baseTokenAddress.trim();
+    const contractAddress =
+      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
     if (!contractAddress) {
       return jsonResponse({ error: 'No active token configured for refresh cancellation' }, 400);
     }

@@ -145,6 +145,10 @@ export default function App() {
   const [loadingDerivedAccountPreview, setLoadingDerivedAccountPreview] = React.useState(false);
 
   const [loadingMarketSnapshots, setLoadingMarketSnapshots] = React.useState(false);
+
+  const activeBaseTokenAddress =
+    settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+  const activeQuoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || '';
   
   const settingsDirtyRef = React.useRef(false);
   const strategyDraftDirtyRef = React.useRef(false);
@@ -226,7 +230,7 @@ export default function App() {
   }, [syncSettingsFromServer, syncStrategyDraftFromServer]);
 
   const loadOutsideHolderPage = React.useCallback(async () => {
-    if (!auth?.authenticated || !settings.baseTokenAddress.trim()) {
+    if (!auth?.authenticated || !activeBaseTokenAddress) {
       setOutsideHolderPage({
         items: [],
         page: 1,
@@ -260,7 +264,7 @@ export default function App() {
     } finally {
       setOutsideHolderPageLoading(false);
     }
-  }, [accountSearchTerm, auth?.authenticated, outsideHolderSort, outsiderPage, settings.baseTokenAddress]);
+  }, [accountSearchTerm, activeBaseTokenAddress, auth?.authenticated, outsideHolderSort, outsiderPage]);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -458,7 +462,7 @@ export default function App() {
     });
 
   const loadMarketSnapshotHistory = React.useCallback(async () => {
-    if (!auth?.authenticated || !settings.baseTokenAddress.trim()) {
+    if (!auth?.authenticated || !activeBaseTokenAddress) {
       return;
     }
     if (!dateRange.from || !dateRange.to) {
@@ -499,11 +503,11 @@ export default function App() {
     } finally {
       setLoadingMarketSnapshots(false);
     }
-  }, [auth?.authenticated, dateRange.from, dateRange.to, settings.baseTokenAddress]);
+  }, [activeBaseTokenAddress, auth?.authenticated, dateRange.from, dateRange.to]);
 
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
-      if (auth?.authenticated && settings.baseTokenAddress.trim()) {
+      if (auth?.authenticated && activeBaseTokenAddress) {
         setNotice('Refresh started. Fetching market data and syncing token holders...');
         const refreshQuery = hasDateRange
           ? `?startTime=${toRangeStartMs(dateRange.from)}&endTime=${toRangeEndMs(dateRange.to)}`
@@ -540,14 +544,14 @@ export default function App() {
 
   useEffect(() => {
     if (!auth?.authenticated || activeTab !== 'dashboard') return;
-    if (!settings.baseTokenAddress.trim() || !hasDateRange) return;
+    if (!activeBaseTokenAddress || !hasDateRange) return;
     void loadMarketSnapshotHistory();
   }, [
     activeTab,
+    activeBaseTokenAddress,
     auth?.authenticated,
     hasDateRange,
     loadMarketSnapshotHistory,
-    settings.baseTokenAddress,
   ]);
 
   useEffect(() => {
@@ -686,7 +690,7 @@ export default function App() {
       const activated = result.contractAddress || contractAddress;
       setSettings((current) => ({
         ...current,
-        contractAddress: activated,
+        baseTokenAddress: activated,
         activeBaseTokenAddress: activated,
         activeQuoteTokenAddress: result.quoteTokenAddress || quoteTokenAddress,
       }));
@@ -755,7 +759,7 @@ export default function App() {
       if (response.clearedActiveContractAddress) {
         setSettings((current) => ({
           ...current,
-          contractAddress: '',
+          baseTokenAddress: '',
           activeBaseTokenAddress: '',
           activeQuoteTokenAddress: '',
         }));
@@ -785,7 +789,7 @@ export default function App() {
 
   const handleAddTrackedToken = () =>
     submitWithFeedback('token', async () => {
-      const hadActiveContract = settings.baseTokenAddress.trim().length > 0;
+      const hadActiveContract = activeBaseTokenAddress.length > 0;
       const response = await api<{
         token: TradableToken;
         marketSnapshot: TokenMarketSnapshot | null;
@@ -1224,9 +1228,11 @@ export default function App() {
     activityLogPage * ITEMS_PER_PAGE,
   );
 
-  const activeTokenContractAddress = settings.baseTokenAddress.trim();
+  const activeTokenContractAddress = activeBaseTokenAddress;
   const activeTrackedToken = engineState.tradableTokens.find(
-    (token) => token.baseTokenAddress === activeTokenContractAddress,
+    (token) =>
+      token.baseTokenAddress === activeTokenContractAddress &&
+      (!activeQuoteTokenAddress || token.quoteTokenAddress === activeQuoteTokenAddress),
   );
   const activeTokenSymbol =
     activeTrackedToken?.symbol ?? dashboardSnapshot?.tokenSymbol ?? engineState.marketSnapshot?.tokenSymbol ?? 'WLT';
@@ -1324,7 +1330,7 @@ export default function App() {
       }}
       hasDateRange={hasDateRange}
       marketSnapshotSubtitle={marketSnapshotSubtitle}
-      settingsContractAddress={settings.baseTokenAddress}
+      settingsContractAddress={activeBaseTokenAddress}
       activeTokenSymbol={activeTokenSymbol}
       activeTokenName={activeTokenName}
       activeTokenContractAddress={activeTokenContractAddress}
@@ -1393,7 +1399,7 @@ export default function App() {
   const renderSetup = () => (
     <TradingSetupPage
       engineState={engineState}
-      activeContractAddress={settings.baseTokenAddress}
+      activeContractAddress={activeBaseTokenAddress}
       strategyDraft={strategyDraft}
       tradableTokenForm={tradableTokenForm}
       setTradableTokenForm={setTradableTokenForm}
@@ -1419,7 +1425,7 @@ export default function App() {
   return (
     <div className="flex min-h-screen flex-col bg-slate-950 p-4 font-sans text-slate-200 md:p-6">
       <AppHeader
-        contractAddress={settings.baseTokenAddress || CONTRACT_ADDRESS}
+        contractAddress={activeBaseTokenAddress || CONTRACT_ADDRESS}
         lastUpdated={lastUpdated}
         isTradingActive={isTradingActive}
         isRefreshing={isRefreshPending}

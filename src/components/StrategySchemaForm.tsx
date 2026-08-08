@@ -232,7 +232,8 @@ export default function StrategySchemaForm({
         label: registryPairLabel(token),
       }));
 
-    const currentContractAddress = draft.parameters.contractAddress.trim();
+    const currentContractAddress =
+      (draft.parameters.contractAddress ?? draft.parameters.baseTokenAddress ?? '').trim();
     if (
       currentContractAddress &&
       !options.some((option) => option.value === currentContractAddress)

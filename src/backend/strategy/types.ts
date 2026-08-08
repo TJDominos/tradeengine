@@ -56,6 +56,7 @@ export interface StrategySettingsInput {
 }
 
 export interface StrategyParameters {
+  contractAddress?: string;
   baseTokenAddress: string;
   quoteTokenAddress: string;
   ammPoolAddress: string;

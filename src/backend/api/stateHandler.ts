@@ -254,7 +254,8 @@ export async function handleStateRoutes(
   if (method === 'GET' && pathname === '/api/token-holders') {
     const user = await requireUser(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-    const normalizedContractAddress = settings.baseTokenAddress.trim();
+    const normalizedContractAddress =
+      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
     if (!normalizedContractAddress) {
       return jsonResponse({ items: [], page: 1, pageSize: 20, totalItems: 0 });
     }
