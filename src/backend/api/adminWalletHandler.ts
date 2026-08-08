@@ -1,6 +1,6 @@
 import { ApiError } from '../errors';
 import { parseManagedWalletImportRequest, parseJsonBody } from '../workerSchema';
-import { dbResolveSolanaRpcUrls, dbListTradableTokens } from '../tokenStore';
+import { dbListTradableTokens, dbResolveSolanaRpcUrls } from '../tokenStore';
 import {
   dbAddAuditLog,
   dbDeleteOtherSessions,
@@ -10,13 +10,15 @@ import {
   dbVerifyUserPassword,
 } from '../userStore';
 import {
-  deriveSolanaKeypairFromRecoveryPhrase,
+  buildSolanaAccountDerivationPath,
+  deriveSolanaKeypairsFromRecoveryPhrase,
   executeTradeTask,
   hashPassword,
   jsonResponse,
   loadWalletBalance,
   normalizePubkey,
   sessionTokenFromCookie,
+  solanaPubkeyFromKeypairBytes,
   validatePassword,
   verifyPassword,
 } from '../workerCore';
@@ -25,6 +27,47 @@ import type { Env } from '../workerShared';
 import { requireAdmin, requireUser } from '../services/accessControl';
 import { buildStrategyTaskExecutionContext } from '../services/strategyAutomationService';
 import { dbUserOwnsAccount } from '../services/strategyStore';
+
+const DEFAULT_RECOVERY_PHRASE_DERIVED_ACCOUNT_COUNT = 20;
+const MAX_RECOVERY_PHRASE_DERIVED_ACCOUNT_COUNT = 100;
+
+type DerivedManagedAccountCandidate = {
+  accountIndex: number;
+  derivationPath: string;
+  keypairBytes: Uint8Array;
+  address: string;
+};
+
+function buildManagedAccountLabel(baseLabel: string, accountIndex: number): string {
+  const trimmed = baseLabel.trim();
+  if (accountIndex === 0) {
+    return trimmed;
+  }
+  const suffix = ` #${accountIndex + 1}`;
+  return `${trimmed.slice(0, Math.max(3, 80 - suffix.length)).trim()}${suffix}`;
+}
+
+async function deriveRecoveryPhraseAccounts(
+  recoveryPhrase: string,
+  baseDerivationPath: string,
+  derivedAccountCount: number,
+): Promise<DerivedManagedAccountCandidate[]> {
+  const derivationPaths = Array.from(
+    { length: derivedAccountCount },
+    (_, accountIndex) => buildSolanaAccountDerivationPath(accountIndex, baseDerivationPath),
+  );
+  const keypairBytesList = deriveSolanaKeypairsFromRecoveryPhrase(
+    recoveryPhrase,
+    derivationPaths,
+  );
+  const candidates = keypairBytesList.map((keypairBytes, accountIndex) => ({
+    accountIndex,
+    derivationPath: derivationPaths[accountIndex],
+    keypairBytes,
+    address: solanaPubkeyFromKeypairBytes(keypairBytes),
+  }));
+  return candidates;
+}
 
 export async function handleAdminWalletRoutes(
   request: Request,
@@ -58,34 +101,82 @@ export async function handleAdminWalletRoutes(
         throw new ApiError(401, 'Admin password is incorrect');
       }
     }
-    const account = body.privateKey
-      ? await dbImportManagedKey(
-          env.TRADINGBOT_DB,
-          user.id,
-          body.label,
-          body.privateKey,
-          env.PRIVATE_KEY_ENCRYPTION_KEY,
-        )
-      : await dbImportManagedKeyBytes(
-          env.TRADINGBOT_DB,
-          user.id,
-          body.label,
-          deriveSolanaKeypairFromRecoveryPhrase(
-            body.recoveryPhrase ?? '',
-            body.derivationPath,
-          ),
-          env.PRIVATE_KEY_ENCRYPTION_KEY,
-        );
-    await dbAddAuditLog(
-      env.TRADINGBOT_DB,
-      user.id,
-      'private_key.imported',
-      account.address,
-      body.privateKey
-        ? `Imported managed key '${account.label}' from a private key. Private key material was encrypted at rest and is never returned by the API.`
-        : `Imported managed key '${account.label}' from a recovery phrase using ${body.derivationPath ?? DEFAULT_SOLANA_DERIVATION_PATH}. Derived key material was encrypted at rest and is never returned by the API.`,
+    if (body.privateKey) {
+      const account = await dbImportManagedKey(
+        env.TRADINGBOT_DB,
+        user.id,
+        body.label,
+        body.privateKey,
+        env.PRIVATE_KEY_ENCRYPTION_KEY,
+      );
+      await dbAddAuditLog(
+        env.TRADINGBOT_DB,
+        user.id,
+        'private_key.imported',
+        account.address,
+        `Imported managed key '${account.label}' from a private key. Private key material was encrypted at rest and is never returned by the API.`,
+      );
+      return jsonResponse({ account, accounts: [account], importedCount: 1 }, 201);
+    }
+
+    const baseDerivationPath = body.derivationPath ?? DEFAULT_SOLANA_DERIVATION_PATH;
+    const derivedAccountCount = Math.min(
+      Math.max(body.derivedAccountCount ?? DEFAULT_RECOVERY_PHRASE_DERIVED_ACCOUNT_COUNT, 1),
+      MAX_RECOVERY_PHRASE_DERIVED_ACCOUNT_COUNT,
     );
-    return jsonResponse({ account }, 201);
+    const derivedAccounts = await deriveRecoveryPhraseAccounts(
+      body.recoveryPhrase ?? '',
+      baseDerivationPath,
+      derivedAccountCount,
+    );
+
+    const existingAddresses = new Set(
+      (
+        await env.TRADINGBOT_DB
+          .prepare(
+            "SELECT wallet_address FROM accounts WHERE user_id = ?1 AND type = 'managed'",
+          )
+          .bind(user.id)
+          .all<{ wallet_address: string }>()
+      ).results.map((row) => row.wallet_address),
+    );
+
+    const missingDerivedAccounts = derivedAccounts.filter(
+      (derivedAccount) => !existingAddresses.has(derivedAccount.address),
+    );
+
+    if (missingDerivedAccounts.length === 0) {
+      throw new ApiError(409, 'All requested derived accounts have already been imported');
+    }
+
+    const importedAccounts = [];
+    for (const derivedAccount of missingDerivedAccounts) {
+      const account = await dbImportManagedKeyBytes(
+        env.TRADINGBOT_DB,
+        user.id,
+        buildManagedAccountLabel(body.label, derivedAccount.accountIndex),
+        derivedAccount.keypairBytes,
+        env.PRIVATE_KEY_ENCRYPTION_KEY,
+      );
+      importedAccounts.push(account);
+      await dbAddAuditLog(
+        env.TRADINGBOT_DB,
+        user.id,
+        'private_key.imported',
+        account.address,
+        `Imported managed key '${account.label}' from a recovery phrase using ${derivedAccount.derivationPath}. Derived key material was encrypted at rest and is never returned by the API.`,
+      );
+    }
+
+    return jsonResponse(
+      {
+        account: importedAccounts[0],
+        accounts: importedAccounts,
+        importedCount: importedAccounts.length,
+        requestedDerivedAccountCount: derivedAccountCount,
+      },
+      201,
+    );
   }
 
   if (method === 'POST' && pathname === '/api/trade') {

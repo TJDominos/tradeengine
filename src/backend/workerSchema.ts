@@ -478,12 +478,20 @@ export function parseManagedWalletImportRequest(
       'Wallet label and either a private key or recovery phrase are required',
     );
   }
-  const { label, adminPassword, privateKey, recoveryPhrase, derivationPath } = body as {
+  const {
+    label,
+    adminPassword,
+    privateKey,
+    recoveryPhrase,
+    derivationPath,
+    derivedAccountCount,
+  } = body as {
     label?: unknown;
     adminPassword?: unknown;
     privateKey?: unknown;
     recoveryPhrase?: unknown;
     derivationPath?: unknown;
+    derivedAccountCount?: unknown;
   };
   if (typeof label !== 'string') {
     throw new ApiError(400, 'Wallet label is required');
@@ -501,6 +509,12 @@ export function parseManagedWalletImportRequest(
   if (derivationPath != null && typeof derivationPath !== 'string') {
     throw new ApiError(400, 'Derivation path must be a string');
   }
+  if (
+    derivedAccountCount != null &&
+    (!Number.isInteger(derivedAccountCount) || (derivedAccountCount as number) <= 0)
+  ) {
+    throw new ApiError(400, 'Derived account count must be a positive integer');
+  }
   if (adminPassword != null && typeof adminPassword !== 'string') {
     throw new ApiError(400, 'Admin password must be a string');
   }
@@ -513,6 +527,10 @@ export function parseManagedWalletImportRequest(
     privateKey: hasPrivateKey ? (privateKey as string) : undefined,
     recoveryPhrase: hasRecoveryPhrase ? (recoveryPhrase as string) : undefined,
     derivationPath: typeof derivationPath === 'string' ? derivationPath : undefined,
+    derivedAccountCount:
+      typeof derivedAccountCount === 'number' && Number.isInteger(derivedAccountCount)
+        ? derivedAccountCount
+        : undefined,
   };
 }
 

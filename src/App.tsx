@@ -136,6 +136,7 @@ export default function App() {
     recoveryPhrase: createEmptyRecoveryPhrase(),
     isRecovery: false,
     wordCount: 12,
+    derivedAccountCount: 20,
   });
   const [adminMsg, setAdminMsg] = React.useState({ type: '', text: '' });
 
@@ -882,6 +883,10 @@ export default function App() {
         setAdminMsg({ type: 'error', text: 'Recovery phrase must contain 12, 15, 18, 21, or 24 words' });
         return;
       }
+      if (!Number.isInteger(adminImportForm.derivedAccountCount) || adminImportForm.derivedAccountCount <= 0) {
+        setAdminMsg({ type: 'error', text: 'Derived account count must be a positive integer' });
+        return;
+      }
     }
 
     setAdminMsg({ type: '', text: 'Importing...' });
@@ -891,6 +896,7 @@ export default function App() {
             label: 'Imported Wallet',
             adminPassword: adminImportForm.password,
             recoveryPhrase: phrase,
+            derivedAccountCount: adminImportForm.derivedAccountCount,
           }
         : {
             label: 'Imported Wallet',
@@ -903,7 +909,12 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      const data = (await response.json()) as { error?: string; account?: { address: string } };
+      const data = (await response.json()) as {
+        error?: string;
+        account?: { address: string };
+        accounts?: Array<{ address: string }>;
+        importedCount?: number;
+      };
       if (!response.ok) {
         setAdminMsg({ type: 'error', text: data.error || 'Failed to import wallet' });
         return;
@@ -914,10 +925,17 @@ export default function App() {
         recoveryPhrase: createEmptyRecoveryPhrase(),
         isRecovery: false,
         wordCount: 12,
+        derivedAccountCount: 20,
       });
       await refresh();
       await refreshWalletBalances();
-      setAdminMsg({ type: 'success', text: `Imported successfully: ${data.account?.address ?? ''}`.trim() });
+      setAdminMsg({
+        type: 'success',
+        text:
+          data.importedCount && data.importedCount > 1
+            ? `Imported ${data.importedCount} derived wallets successfully`
+            : `Imported successfully: ${data.account?.address ?? ''}`.trim(),
+      });
       setAdminTab('list');
     } catch {
       setAdminMsg({ type: 'error', text: 'Network error' });

@@ -315,6 +315,7 @@ export interface ManagedWalletImportRequest {
   privateKey?: string;
   recoveryPhrase?: string;
   derivationPath?: string;
+  derivedAccountCount?: number;
 }
 
 export interface TradableTokenCreateRequest {

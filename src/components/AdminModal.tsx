@@ -22,6 +22,7 @@ type AdminImportFormState = {
   recoveryPhrase: string[];
   isRecovery: boolean;
   wordCount: number;
+  derivedAccountCount: number;
 };
 
 type AdminMessageState = {
@@ -67,11 +68,6 @@ export default function AdminModal({
   onDelete,
 }: AdminModalProps) {
   if (!open) return null;
-
-  const recoveryPhraseText = adminImportForm.recoveryPhrase
-    .slice(0, adminImportForm.wordCount)
-    .filter(Boolean)
-    .join(' ');
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
@@ -140,36 +136,6 @@ export default function AdminModal({
                     <h4 className="font-semibold">Recovery Phrase</h4>
                     <p className="text-xs text-slate-400">Import an existing wallet with a 12, 15, 18, 21, or 24-word recovery phrase.</p>
                   </div>
-                  <label className="block space-y-1.5">
-                    <span className="text-xs font-semibold uppercase text-slate-400">Paste Recovery Phrase</span>
-                    <textarea
-                      value={recoveryPhraseText}
-                      onChange={(event) => {
-                        const words = event.target.value
-                          .toLowerCase()
-                          .split(/\s+/)
-                          .filter(Boolean)
-                          .slice(0, MAX_RECOVERY_PHRASE_WORD_COUNT);
-                        const nextPhrase = Array(MAX_RECOVERY_PHRASE_WORD_COUNT).fill('');
-                        words.forEach((word, index) => {
-                          nextPhrase[index] = word;
-                        });
-                        const nextWordCount = RECOVERY_PHRASE_WORD_COUNTS.includes(
-                          words.length as (typeof RECOVERY_PHRASE_WORD_COUNTS)[number],
-                        )
-                          ? words.length
-                          : adminImportForm.wordCount;
-                        setAdminImportForm({
-                          ...adminImportForm,
-                          recoveryPhrase: nextPhrase,
-                          wordCount: nextWordCount,
-                        });
-                      }}
-                      placeholder="Paste your recovery phrase here"
-                      rows={3}
-                      className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-amber-500"
-                    />
-                  </label>
                   <div className="space-y-1.5">
                     <span className="text-xs font-semibold uppercase text-slate-400">Word Count</span>
                     <div className="grid grid-cols-5 gap-2">
@@ -192,9 +158,27 @@ export default function AdminModal({
                         <input
                           type="text"
                           value={word}
+                          autoComplete="off"
                           onChange={(event) => {
                             const nextPhrase = [...adminImportForm.recoveryPhrase];
                             nextPhrase[index] = event.target.value.trim().toLowerCase();
+                            setAdminImportForm({ ...adminImportForm, recoveryPhrase: nextPhrase });
+                          }}
+                          onPaste={(event) => {
+                            const pastedText = event.clipboardData.getData('text');
+                            const words = pastedText
+                              .toLowerCase()
+                              .split(/\s+/)
+                              .filter(Boolean)
+                              .slice(0, adminImportForm.wordCount - index);
+                            if (words.length <= 1) {
+                              return;
+                            }
+                            event.preventDefault();
+                            const nextPhrase = [...adminImportForm.recoveryPhrase];
+                            words.forEach((pastedWord, wordOffset) => {
+                              nextPhrase[index + wordOffset] = pastedWord;
+                            });
                             setAdminImportForm({ ...adminImportForm, recoveryPhrase: nextPhrase });
                           }}
                           className="w-full rounded border border-slate-800 bg-slate-900 py-1.5 pl-7 pr-2 text-sm text-slate-200 outline-none focus:border-amber-500"
@@ -202,6 +186,27 @@ export default function AdminModal({
                       </div>
                     ))}
                   </div>
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-semibold uppercase text-slate-400">Derived Accounts To Import</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={adminImportForm.derivedAccountCount}
+                      onChange={(event) => {
+                        const nextCount = Number.parseInt(event.target.value, 10);
+                        setAdminImportForm({
+                          ...adminImportForm,
+                          derivedAccountCount: Number.isFinite(nextCount) ? nextCount : 1,
+                        });
+                      }}
+                      className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-amber-500"
+                    />
+                    <p className="text-[10px] leading-tight text-slate-500">
+                      Imports the first N derived Solana accounts from this recovery phrase, whether active or not.
+                    </p>
+                  </label>
                 </div>
               )}
 
