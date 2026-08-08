@@ -5,7 +5,7 @@ import {
   MAX_RECOVERY_PHRASE_WORD_COUNT,
   RECOVERY_PHRASE_WORD_COUNTS,
 } from '../app/constants';
-import type { AccountRecord, WalletBalance } from '../app/types';
+import type { AccountRecord, DerivedAccountPreview, WalletBalance } from '../app/types';
 import BalanceBadges from './BalanceBadges';
 
 type AdminTab = 'password' | 'import' | 'list';
@@ -41,6 +41,8 @@ type AdminModalProps = {
   setAdminPasswordForm: React.Dispatch<React.SetStateAction<AdminPasswordFormState>>;
   adminImportForm: AdminImportFormState;
   setAdminImportForm: React.Dispatch<React.SetStateAction<AdminImportFormState>>;
+  derivedAccountPreview: DerivedAccountPreview[];
+  loadingDerivedAccountPreview: boolean;
   managedWallets: AccountRecord[];
   walletBalanceErrors: Record<string, string>;
   walletBalances: Record<string, WalletBalance>;
@@ -60,6 +62,8 @@ export default function AdminModal({
   setAdminPasswordForm,
   adminImportForm,
   setAdminImportForm,
+  derivedAccountPreview,
+  loadingDerivedAccountPreview,
   managedWallets,
   walletBalanceErrors,
   walletBalances,
@@ -207,6 +211,29 @@ export default function AdminModal({
                       Imports the first N derived Solana accounts from this recovery phrase, whether active or not.
                     </p>
                   </label>
+                  <div className="space-y-1.5">
+                    <span className="text-xs font-semibold uppercase text-slate-400">Derived Account Preview</span>
+                    <div className="max-h-40 overflow-y-auto rounded border border-slate-800 bg-slate-950/60 p-2">
+                      {loadingDerivedAccountPreview ? (
+                        <div className="text-xs text-slate-400">Loading derived accounts...</div>
+                      ) : derivedAccountPreview.length === 0 ? (
+                        <div className="text-xs text-slate-500">Fill the recovery phrase to preview the derived account list.</div>
+                      ) : (
+                        derivedAccountPreview.map((account) => (
+                          <div key={account.address} className="mb-2 last:mb-0 rounded border border-slate-800 bg-slate-900 px-2 py-1.5">
+                            <div className="flex items-center justify-between gap-2 text-xs">
+                              <span className="font-semibold text-slate-200">Account {account.accountIndex + 1}</span>
+                              <span className={account.alreadyImported ? 'text-amber-400' : 'text-emerald-400'}>
+                                {account.alreadyImported ? 'Already Imported' : 'Will Import'}
+                              </span>
+                            </div>
+                            <div className="mt-1 font-mono text-[11px] text-slate-300" title={account.address}>{account.address}</div>
+                            <div className="mt-1 font-mono text-[10px] text-slate-500">{account.derivationPath}</div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 

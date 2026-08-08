@@ -32,6 +32,13 @@ export type AccountRecord = {
   createdAt: number;
 };
 
+export type DerivedAccountPreview = {
+  accountIndex: number;
+  derivationPath: string;
+  address: string;
+  alreadyImported: boolean;
+};
+
 export type AuditLog = {
   id: number;
   action: string;

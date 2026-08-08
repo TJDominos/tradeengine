@@ -38,6 +38,13 @@ type DerivedManagedAccountCandidate = {
   address: string;
 };
 
+function clampDerivedAccountCount(value: number | undefined): number {
+  return Math.min(
+    Math.max(value ?? DEFAULT_RECOVERY_PHRASE_DERIVED_ACCOUNT_COUNT, 1),
+    MAX_RECOVERY_PHRASE_DERIVED_ACCOUNT_COUNT,
+  );
+}
+
 function buildManagedAccountLabel(baseLabel: string, accountIndex: number): string {
   const trimmed = baseLabel.trim();
   if (accountIndex === 0) {
@@ -120,10 +127,7 @@ export async function handleAdminWalletRoutes(
     }
 
     const baseDerivationPath = body.derivationPath ?? DEFAULT_SOLANA_DERIVATION_PATH;
-    const derivedAccountCount = Math.min(
-      Math.max(body.derivedAccountCount ?? DEFAULT_RECOVERY_PHRASE_DERIVED_ACCOUNT_COUNT, 1),
-      MAX_RECOVERY_PHRASE_DERIVED_ACCOUNT_COUNT,
-    );
+    const derivedAccountCount = clampDerivedAccountCount(body.derivedAccountCount);
     const derivedAccounts = await deriveRecoveryPhraseAccounts(
       body.recoveryPhrase ?? '',
       baseDerivationPath,
@@ -177,6 +181,54 @@ export async function handleAdminWalletRoutes(
       },
       201,
     );
+  }
+
+  if (method === 'POST' && pathname === '/api/admin/private-keys/preview') {
+    const user = await requireAdmin(request, env);
+    const body = parseManagedWalletImportRequest(
+      await parseJsonBody<unknown>(request),
+    );
+    if (!body.recoveryPhrase) {
+      throw new ApiError(400, 'Recovery phrase is required');
+    }
+    if (body.adminPassword) {
+      const passwordValid = await dbVerifyUserPassword(
+        env.TRADINGBOT_DB,
+        user.id,
+        body.adminPassword,
+      );
+      if (!passwordValid) {
+        throw new ApiError(401, 'Admin password is incorrect');
+      }
+    }
+
+    const baseDerivationPath = body.derivationPath ?? DEFAULT_SOLANA_DERIVATION_PATH;
+    const derivedAccountCount = clampDerivedAccountCount(body.derivedAccountCount);
+    const derivedAccounts = await deriveRecoveryPhraseAccounts(
+      body.recoveryPhrase,
+      baseDerivationPath,
+      derivedAccountCount,
+    );
+    const existingAddresses = new Set(
+      (
+        await env.TRADINGBOT_DB
+          .prepare(
+            "SELECT wallet_address FROM accounts WHERE user_id = ?1 AND type = 'managed'",
+          )
+          .bind(user.id)
+          .all<{ wallet_address: string }>()
+      ).results.map((row) => row.wallet_address),
+    );
+
+    return jsonResponse({
+      accounts: derivedAccounts.map((account) => ({
+        accountIndex: account.accountIndex,
+        derivationPath: account.derivationPath,
+        address: account.address,
+        alreadyImported: existingAddresses.has(account.address),
+      })),
+      derivedAccountCount,
+    });
   }
 
   if (method === 'POST' && pathname === '/api/trade') {

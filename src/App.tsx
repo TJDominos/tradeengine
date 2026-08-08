@@ -32,6 +32,7 @@ import {
 import { createStrategyDraftFromSettings } from './app/strategyFormSchema';
 import type {
   AuthStatus,
+  DerivedAccountPreview,
   DashboardLogTab,
   DashboardTransactionLog,
   DateRangeState,
@@ -139,6 +140,8 @@ export default function App() {
     derivedAccountCount: 20,
   });
   const [adminMsg, setAdminMsg] = React.useState({ type: '', text: '' });
+  const [derivedAccountPreview, setDerivedAccountPreview] = React.useState<DerivedAccountPreview[]>([]);
+  const [loadingDerivedAccountPreview, setLoadingDerivedAccountPreview] = React.useState(false);
 
   const [loadingMarketSnapshots, setLoadingMarketSnapshots] = React.useState(false);
   
@@ -927,7 +930,8 @@ export default function App() {
         wordCount: 12,
         derivedAccountCount: 20,
       });
-      await refresh();
+      setDerivedAccountPreview([]);
+      await loadState();
       await refreshWalletBalances();
       setAdminMsg({
         type: 'success',
@@ -961,13 +965,58 @@ export default function App() {
         setAdminMsg({ type: 'error', text: data.error || 'Failed to delete wallet' });
         return;
       }
-      await refresh();
+      await loadState();
       await refreshWalletBalances();
       setAdminMsg({ type: 'success', text: data.message || 'Deleted successfully' });
     } catch {
       setAdminMsg({ type: 'error', text: 'Network error' });
     }
   };
+
+  const previewDerivedAccounts = React.useCallback(async () => {
+    const phraseWords = adminImportForm.recoveryPhrase
+      .slice(0, adminImportForm.wordCount)
+      .map((word) => word.trim().toLowerCase());
+    const phrase = phraseWords.join(' ');
+    if (!adminImportForm.isRecovery || phraseWords.some((word) => !word)) {
+      setDerivedAccountPreview([]);
+      return;
+    }
+    setLoadingDerivedAccountPreview(true);
+    try {
+      const response = await fetch('/api/admin/private-keys/preview', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          label: 'Imported Wallet',
+          adminPassword: adminImportForm.password,
+          recoveryPhrase: phrase,
+          derivedAccountCount: adminImportForm.derivedAccountCount,
+        }),
+      });
+      const data = (await response.json()) as {
+        error?: string;
+        accounts?: DerivedAccountPreview[];
+      };
+      if (!response.ok) {
+        setDerivedAccountPreview([]);
+        return;
+      }
+      setDerivedAccountPreview(data.accounts ?? []);
+    } catch {
+      setDerivedAccountPreview([]);
+    } finally {
+      setLoadingDerivedAccountPreview(false);
+    }
+  }, [adminImportForm]);
+
+  useEffect(() => {
+    if (!isAdminModalOpen || !adminImportForm.isRecovery) {
+      return;
+    }
+    void previewDerivedAccounts();
+  }, [isAdminModalOpen, adminImportForm, previewDerivedAccounts]);
 
   const authPanel = () => (
     <AuthPanel
@@ -1374,6 +1423,8 @@ export default function App() {
         setAdminPasswordForm={setAdminPasswordForm}
         adminImportForm={adminImportForm}
         setAdminImportForm={setAdminImportForm}
+        derivedAccountPreview={derivedAccountPreview}
+        loadingDerivedAccountPreview={loadingDerivedAccountPreview}
         managedWallets={managedWallets}
         walletBalanceErrors={walletBalanceErrors}
         walletBalances={walletBalances}
