@@ -1,6 +1,8 @@
 export const CONTRACT_ADDRESS = '';
 export const ITEMS_PER_PAGE = 20;
 export const DASHBOARD_AUTO_REFRESH_INTERVAL_MS = 10_000;
+export const RECOVERY_PHRASE_WORD_COUNTS = [12, 15, 18, 21, 24] as const;
+export const MAX_RECOVERY_PHRASE_WORD_COUNT = 24;
 
 export const workerAlgorithmTemplate = `// Cloudflare Worker trade execution sketch
 // This editor is stored locally in the browser for planning only.

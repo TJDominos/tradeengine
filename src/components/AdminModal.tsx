@@ -1,6 +1,10 @@
 import React from 'react';
 import { Key, Shield, Trash2 } from 'lucide-react';
 
+import {
+  MAX_RECOVERY_PHRASE_WORD_COUNT,
+  RECOVERY_PHRASE_WORD_COUNTS,
+} from '../app/constants';
 import type { AccountRecord, WalletBalance } from '../app/types';
 import BalanceBadges from './BalanceBadges';
 
@@ -63,6 +67,11 @@ export default function AdminModal({
   onDelete,
 }: AdminModalProps) {
   if (!open) return null;
+
+  const recoveryPhraseText = adminImportForm.recoveryPhrase
+    .slice(0, adminImportForm.wordCount)
+    .filter(Boolean)
+    .join(' ');
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
@@ -129,7 +138,52 @@ export default function AdminModal({
                 <div className="space-y-3">
                   <div className="space-y-1 text-center">
                     <h4 className="font-semibold">Recovery Phrase</h4>
-                    <p className="text-xs text-slate-400">Import an existing wallet with your 12 or 24-word recovery phrase.</p>
+                    <p className="text-xs text-slate-400">Import an existing wallet with a 12, 15, 18, 21, or 24-word recovery phrase.</p>
+                  </div>
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-semibold uppercase text-slate-400">Paste Recovery Phrase</span>
+                    <textarea
+                      value={recoveryPhraseText}
+                      onChange={(event) => {
+                        const words = event.target.value
+                          .toLowerCase()
+                          .split(/\s+/)
+                          .filter(Boolean)
+                          .slice(0, MAX_RECOVERY_PHRASE_WORD_COUNT);
+                        const nextPhrase = Array(MAX_RECOVERY_PHRASE_WORD_COUNT).fill('');
+                        words.forEach((word, index) => {
+                          nextPhrase[index] = word;
+                        });
+                        const nextWordCount = RECOVERY_PHRASE_WORD_COUNTS.includes(
+                          words.length as (typeof RECOVERY_PHRASE_WORD_COUNTS)[number],
+                        )
+                          ? words.length
+                          : adminImportForm.wordCount;
+                        setAdminImportForm({
+                          ...adminImportForm,
+                          recoveryPhrase: nextPhrase,
+                          wordCount: nextWordCount,
+                        });
+                      }}
+                      placeholder="Paste your recovery phrase here"
+                      rows={3}
+                      className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-amber-500"
+                    />
+                  </label>
+                  <div className="space-y-1.5">
+                    <span className="text-xs font-semibold uppercase text-slate-400">Word Count</span>
+                    <div className="grid grid-cols-5 gap-2">
+                      {RECOVERY_PHRASE_WORD_COUNTS.map((count) => (
+                        <button
+                          key={count}
+                          type="button"
+                          onClick={() => setAdminImportForm({ ...adminImportForm, wordCount: count })}
+                          className={`rounded border px-2 py-1 text-xs font-medium ${adminImportForm.wordCount === count ? 'border-amber-500 bg-amber-600 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:text-slate-200'}`}
+                        >
+                          {count}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                   <div className="grid grid-cols-3 gap-2">
                     {adminImportForm.recoveryPhrase.slice(0, adminImportForm.wordCount).map((word, index) => (
@@ -148,19 +202,6 @@ export default function AdminModal({
                       </div>
                     ))}
                   </div>
-                  <button
-                    onClick={() => {
-                      const newCount = adminImportForm.wordCount === 12 ? 24 : 12;
-                      const nextPhrase = Array(24).fill('');
-                      adminImportForm.recoveryPhrase.forEach((word, index) => {
-                        nextPhrase[index] = word;
-                      });
-                      setAdminImportForm({ ...adminImportForm, wordCount: newCount, recoveryPhrase: nextPhrase });
-                    }}
-                    className="w-full py-1 text-sm text-slate-400 hover:text-slate-200"
-                  >
-                    I have a {adminImportForm.wordCount === 12 ? '24' : '12'}-word recovery phrase
-                  </button>
                 </div>
               )}
 

@@ -26,6 +26,8 @@ import PageTabs from './components/PageTabs';
 import {
   CONTRACT_ADDRESS,
   ITEMS_PER_PAGE,
+  MAX_RECOVERY_PHRASE_WORD_COUNT,
+  RECOVERY_PHRASE_WORD_COUNTS,
 } from './app/constants';
 import { createStrategyDraftFromSettings } from './app/strategyFormSchema';
 import type {
@@ -64,6 +66,10 @@ import AccountsPage from './pages/AccountsPage';
 import DashboardPage from './pages/DashboardPage';
 import HistoricalSetupsPage from './pages/HistoricalSetupsPage';
 import TradingSetupPage from './pages/TradingSetupPage';
+
+function createEmptyRecoveryPhrase(): string[] {
+  return Array(MAX_RECOVERY_PHRASE_WORD_COUNT).fill('');
+}
 
 export default function App() {
   const [auth, setAuth] = React.useState<AuthStatus | null>(null);
@@ -127,7 +133,7 @@ export default function App() {
   const [adminImportForm, setAdminImportForm] = React.useState({
     key: '',
     password: '',
-    recoveryPhrase: Array(24).fill(''),
+    recoveryPhrase: createEmptyRecoveryPhrase(),
     isRecovery: false,
     wordCount: 12,
   });
@@ -855,7 +861,10 @@ export default function App() {
   };
 
   const handleAdminImport = async () => {
-    const phrase = adminImportForm.recoveryPhrase.slice(0, adminImportForm.wordCount).join(' ');
+    const phraseWords = adminImportForm.recoveryPhrase
+      .slice(0, adminImportForm.wordCount)
+      .map((word) => word.trim().toLowerCase());
+    const phrase = phraseWords.join(' ');
     if (!adminImportForm.password) {
       setAdminMsg({ type: 'error', text: 'Please enter your admin password' });
       return;
@@ -864,9 +873,15 @@ export default function App() {
       setAdminMsg({ type: 'error', text: 'Private key is required' });
       return;
     }
-    if (adminImportForm.isRecovery && phrase.split(' ').filter(Boolean).length !== adminImportForm.wordCount) {
-      setAdminMsg({ type: 'error', text: 'Please fill the full recovery phrase' });
-      return;
+    if (adminImportForm.isRecovery) {
+      if (phraseWords.some((word) => !word)) {
+        setAdminMsg({ type: 'error', text: 'Please fill the full recovery phrase' });
+        return;
+      }
+      if (!RECOVERY_PHRASE_WORD_COUNTS.includes(adminImportForm.wordCount as (typeof RECOVERY_PHRASE_WORD_COUNTS)[number])) {
+        setAdminMsg({ type: 'error', text: 'Recovery phrase must contain 12, 15, 18, 21, or 24 words' });
+        return;
+      }
     }
 
     setAdminMsg({ type: '', text: 'Importing...' });
@@ -896,7 +911,7 @@ export default function App() {
       setAdminImportForm({
         key: '',
         password: '',
-        recoveryPhrase: Array(24).fill(''),
+        recoveryPhrase: createEmptyRecoveryPhrase(),
         isRecovery: false,
         wordCount: 12,
       });

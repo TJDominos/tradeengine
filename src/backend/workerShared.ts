@@ -682,8 +682,8 @@ export function normalizeRecoveryPhrase(raw: string): string {
     throw new ApiError(400, 'Recovery phrase is required');
   }
   const wordCount = normalized.split(' ').length;
-  if (wordCount !== 12 && wordCount !== 24) {
-    throw new ApiError(400, 'Recovery phrase must contain 12 or 24 words');
+  if (![12, 15, 18, 21, 24].includes(wordCount)) {
+    throw new ApiError(400, 'Recovery phrase must contain 12, 15, 18, 21, or 24 words');
   }
   if (!validateMnemonic(normalized, englishWordlist)) {
     throw new ApiError(400, 'Recovery phrase is not a valid BIP39 mnemonic');
