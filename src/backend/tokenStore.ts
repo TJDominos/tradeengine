@@ -1,6 +1,7 @@
 import { ApiError } from './errors';
 import { fetchJupiterTokenMetadata } from './jupiter';
 import { nowTs, normalizeTimestampMs } from './time';
+import { dbTableHasColumn } from './workerSchema';
 import {
   dedupeStrings,
   isHeliusRpcUrl,
@@ -244,43 +245,155 @@ export async function dbCreateTradableToken(
     // non-fatal
   }
 
-  await db
-    .prepare(
-      `INSERT INTO tradable_tokens (
-         network,
-         base_token_address,
-         quote_token_address,
-         symbol,
-         name,
-         decimals,
-         quote_token_symbol,
-         quote_token_name,
-         quote_token_decimals,
-         is_active,
-         created_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)
-      ON CONFLICT(network, base_token_address, quote_token_address) DO UPDATE SET
-         is_active = 1,
-         symbol = COALESCE(?4, tradable_tokens.symbol),
-         name = COALESCE(?5, tradable_tokens.name),
-         decimals = COALESCE(?6, tradable_tokens.decimals),
-         quote_token_symbol = COALESCE(?7, tradable_tokens.quote_token_symbol),
-         quote_token_name = COALESCE(?8, tradable_tokens.quote_token_name),
-         quote_token_decimals = COALESCE(?9, tradable_tokens.quote_token_decimals)`,
-    )
-    .bind(
-      network,
-      contractAddress,
-      quoteTokenAddress,
-      jupiterSymbol,
-      jupiterName,
-      resolvedDecimals,
-      quoteTokenSymbol,
-      quoteTokenName,
-      quoteTokenDecimals,
-      createdAt,
-    )
-    .run();
+  const hasLegacyContractAddressColumn = await dbTableHasColumn(
+    db,
+    'tradable_tokens',
+    'contract_address',
+  );
+
+  const findExistingTokenId = async (): Promise<number | null> => {
+    const pairRow = await db
+      .prepare(
+        `SELECT id
+         FROM tradable_tokens
+         WHERE network = ?1 AND base_token_address = ?2 AND quote_token_address = ?3
+         LIMIT 1`,
+      )
+      .bind(network, contractAddress, quoteTokenAddress)
+      .first<{ id: number }>();
+    if (pairRow?.id != null) {
+      return pairRow.id;
+    }
+    if (!hasLegacyContractAddressColumn) {
+      return null;
+    }
+    const legacyRow = await db
+      .prepare(
+        `SELECT id
+         FROM tradable_tokens
+         WHERE network = ?1 AND contract_address = ?2
+         LIMIT 1`,
+      )
+      .bind(network, contractAddress)
+      .first<{ id: number }>();
+    return legacyRow?.id ?? null;
+  };
+
+  const persistExistingToken = async (tokenId: number): Promise<void> => {
+    const statement = hasLegacyContractAddressColumn
+      ? db.prepare(
+          `UPDATE tradable_tokens
+           SET contract_address = ?2,
+               base_token_address = ?2,
+               quote_token_address = ?3,
+               symbol = COALESCE(?4, symbol),
+               name = COALESCE(?5, name),
+               decimals = COALESCE(?6, decimals),
+               quote_token_symbol = COALESCE(?7, quote_token_symbol),
+               quote_token_name = COALESCE(?8, quote_token_name),
+               quote_token_decimals = COALESCE(?9, quote_token_decimals),
+               is_active = 1
+           WHERE id = ?1`,
+        )
+      : db.prepare(
+          `UPDATE tradable_tokens
+           SET base_token_address = ?2,
+               quote_token_address = ?3,
+               symbol = COALESCE(?4, symbol),
+               name = COALESCE(?5, name),
+               decimals = COALESCE(?6, decimals),
+               quote_token_symbol = COALESCE(?7, quote_token_symbol),
+               quote_token_name = COALESCE(?8, quote_token_name),
+               quote_token_decimals = COALESCE(?9, quote_token_decimals),
+               is_active = 1
+           WHERE id = ?1`,
+        );
+
+    await statement
+      .bind(
+        tokenId,
+        contractAddress,
+        quoteTokenAddress,
+        jupiterSymbol,
+        jupiterName,
+        resolvedDecimals,
+        quoteTokenSymbol,
+        quoteTokenName,
+        quoteTokenDecimals,
+      )
+      .run();
+  };
+
+  const insertNewToken = async (): Promise<void> => {
+    const statement = hasLegacyContractAddressColumn
+      ? db.prepare(
+          `INSERT INTO tradable_tokens (
+             network,
+             contract_address,
+             base_token_address,
+             quote_token_address,
+             symbol,
+             name,
+             decimals,
+             quote_token_symbol,
+             quote_token_name,
+             quote_token_decimals,
+             is_active,
+             created_at
+           ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)`,
+        )
+      : db.prepare(
+          `INSERT INTO tradable_tokens (
+             network,
+             base_token_address,
+             quote_token_address,
+             symbol,
+             name,
+             decimals,
+             quote_token_symbol,
+             quote_token_name,
+             quote_token_decimals,
+             is_active,
+             created_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)`,
+        );
+
+    await statement
+      .bind(
+        network,
+        contractAddress,
+        quoteTokenAddress,
+        jupiterSymbol,
+        jupiterName,
+        resolvedDecimals,
+        quoteTokenSymbol,
+        quoteTokenName,
+        quoteTokenDecimals,
+        createdAt,
+      )
+      .run();
+  };
+
+  const existingTokenId = await findExistingTokenId();
+  if (existingTokenId != null) {
+    await persistExistingToken(existingTokenId);
+  } else {
+    try {
+      await insertNewToken();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!message.includes('UNIQUE constraint failed')) {
+        throw err;
+      }
+
+      const conflictingTokenId = await findExistingTokenId();
+      if (conflictingTokenId == null) {
+        throw err;
+      }
+      await persistExistingToken(conflictingTokenId);
+    }
+  }
+
   const row = await db
     .prepare(
       `SELECT id, network, base_token_address, quote_token_address, symbol, name, decimals,

@@ -345,18 +345,50 @@ export interface CredentialsBody {
 let schemaInitPromise: Promise<void> | undefined;
 let tradeDomainSchemaInitPromise: Promise<void> | undefined;
 
+export async function dbTableHasColumn(
+  db: D1Database,
+  tableName: string,
+  columnName: string,
+): Promise<boolean> {
+  const rows = await db
+    .prepare(`PRAGMA table_info(${tableName})`)
+    .all<{
+      name: string;
+    }>();
+  return rows.results.some((row) => row.name === columnName);
+}
+
+async function dbBackfillRenamedColumn(
+  db: D1Database,
+  tableName: string,
+  legacyColumnName: string,
+  nextColumnName: string,
+): Promise<void> {
+  if (!(await dbTableHasColumn(db, tableName, legacyColumnName))) {
+    return;
+  }
+  if (!(await dbTableHasColumn(db, tableName, nextColumnName))) {
+    return;
+  }
+
+  await db
+    .prepare(
+      `UPDATE ${tableName}
+       SET ${nextColumnName} = ${legacyColumnName}
+       WHERE (${nextColumnName} IS NULL OR TRIM(${nextColumnName}) = '')
+         AND ${legacyColumnName} IS NOT NULL
+         AND TRIM(${legacyColumnName}) <> ''`,
+    )
+    .run();
+}
+
 export async function dbEnsureTableColumn(
   db: D1Database,
   tableName: string,
   columnName: string,
   columnDefinition: string,
 ): Promise<void> {
-  const rows = await db
-    .prepare(`PRAGMA table_info(${tableName})`)
-    .all<{
-      name: string;
-    }>();
-  if (rows.results.some((row) => row.name === columnName)) {
+  if (await dbTableHasColumn(db, tableName, columnName)) {
     return;
   }
   await db
@@ -460,6 +492,40 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
         await dbEnsureTableColumn(db, 'tradable_tokens', 'quote_token_symbol', 'TEXT');
         await dbEnsureTableColumn(db, 'tradable_tokens', 'quote_token_name', 'TEXT');
         await dbEnsureTableColumn(db, 'tradable_tokens', 'quote_token_decimals', 'INTEGER');
+        // Legacy deployments may still store the old contract_address columns.
+        // Backfill the renamed base_token_address columns during lazy schema setup.
+        await dbBackfillRenamedColumn(
+          db,
+          'tradable_tokens',
+          'contract_address',
+          'base_token_address',
+        );
+        await dbBackfillRenamedColumn(
+          db,
+          'token_market_snapshots',
+          'contract_address',
+          'base_token_address',
+        );
+        await dbBackfillRenamedColumn(
+          db,
+          'historic_setups',
+          'contract_address',
+          'base_token_address',
+        );
+        await dbBackfillRenamedColumn(
+          db,
+          'strategy_evaluations',
+          'contract_address',
+          'base_token_address',
+        );
+        await db
+          .prepare(
+            `UPDATE tradable_tokens
+             SET quote_token_address = ?1
+             WHERE quote_token_address IS NULL OR TRIM(quote_token_address) = ''`,
+          )
+          .bind(SOLANA_USDC_MINT)
+          .run();
         await dbEnsureTableColumn(
           db,
           'trade_logs',
