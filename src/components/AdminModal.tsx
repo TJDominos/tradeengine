@@ -151,7 +151,7 @@ export default function AdminModal({
                       </div>
                     </div>
                     <div className="mt-3 grid grid-cols-4 gap-2">
-                      {[20, 40, 60, 100].map((count) => (
+                      {[20, 40, 70, 100].map((count) => (
                         <button
                           key={count}
                           type="button"

@@ -791,7 +791,7 @@ export async function dbListWebhookTransactionLogs(
   db: D1Database,
   userId: number,
 ): Promise<WebhookTransactionLogRecord[]> {
-  const [rows, tokens] = await Promise.all([
+  const [rows, tokens, managedAccounts] = await Promise.all([
     db
       .prepare(
         `SELECT
@@ -830,12 +830,21 @@ export async function dbListWebhookTransactionLogs(
         contract_address: string;
         symbol: string | null;
       }>(),
+    db
+      .prepare(
+        "SELECT wallet_address FROM accounts WHERE user_id = ?1 AND type = 'managed'",
+      )
+      .bind(userId)
+      .all<{ wallet_address: string }>(),
   ]);
 
   const symbolByContract = new Map<string, string | null>();
   for (const token of tokens.results) {
     symbolByContract.set(normalizePubkey(token.contract_address), token.symbol);
   }
+  const managedAddressSet = new Set(
+    managedAccounts.results.map((row) => row.wallet_address),
+  );
 
   const grouped = new Map<string, typeof rows.results>();
   const orderedKeys: string[] = [];
@@ -877,16 +886,31 @@ export async function dbListWebhookTransactionLogs(
       : hasPending || mergedDetails.transactionStatus === 'PENDING'
         ? 'PENDING'
         : 'CONFIRMED';
+    const fromIsManaged =
+      !!mergedDetails.fromWalletAddress &&
+      managedAddressSet.has(mergedDetails.fromWalletAddress);
+    const toIsManaged =
+      !!mergedDetails.toWalletAddress &&
+      managedAddressSet.has(mergedDetails.toWalletAddress);
     const normalizedAction: WebhookTransactionLogRecord['action'] =
-      mergedDetails.primaryWalletAddress &&
-      mergedDetails.toWalletAddress &&
-      mergedDetails.primaryWalletAddress === mergedDetails.toWalletAddress
+      fromIsManaged && !toIsManaged
+        ? 'SELL'
+        : toIsManaged && !fromIsManaged
         ? 'BUY'
         : mergedDetails.primaryWalletAddress &&
             mergedDetails.fromWalletAddress &&
             mergedDetails.primaryWalletAddress === mergedDetails.fromWalletAddress
           ? 'SELL'
+          : mergedDetails.primaryWalletAddress &&
+              mergedDetails.toWalletAddress &&
+              mergedDetails.primaryWalletAddress === mergedDetails.toWalletAddress
+            ? 'BUY'
           : mergedDetails.action;
+    const normalizedWalletAddress = fromIsManaged
+      ? mergedDetails.fromWalletAddress
+      : toIsManaged
+        ? mergedDetails.toWalletAddress
+        : mergedDetails.primaryWalletAddress ?? firstRow.wallet_address;
 
     return {
       id: firstRow.id,
@@ -894,7 +918,7 @@ export async function dbListWebhookTransactionLogs(
       tokenSymbol: tokenContractAddress
         ? (symbolByContract.get(tokenContractAddress) ?? null)
         : null,
-      walletAddress: mergedDetails.primaryWalletAddress ?? firstRow.wallet_address,
+      walletAddress: normalizedWalletAddress,
       fromWalletAddress: mergedDetails.fromWalletAddress,
       toWalletAddress: mergedDetails.toWalletAddress,
       action: normalizedAction,

@@ -917,6 +917,7 @@ export default function App() {
         account?: { address: string };
         accounts?: Array<{ address: string }>;
         importedCount?: number;
+        requestedDerivedAccountCount?: number;
       };
       if (!response.ok) {
         setAdminMsg({ type: 'error', text: data.error || 'Failed to import wallet' });
@@ -928,7 +929,10 @@ export default function App() {
         recoveryPhrase: createEmptyRecoveryPhrase(),
         isRecovery: false,
         wordCount: 12,
-        derivedAccountCount: Math.min((engineState?.internalAccs.length ?? 0) + 20, 100),
+        derivedAccountCount: Math.min(
+          (data.requestedDerivedAccountCount ?? adminImportForm.derivedAccountCount) + 20,
+          100,
+        ),
       });
       setDerivedAccountPreview([]);
       await loadState();
