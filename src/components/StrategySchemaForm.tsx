@@ -144,6 +144,20 @@ function contractPreview(contractAddress: string): string {
   return `${contractAddress.slice(0, 8)}...${contractAddress.slice(-8)}`;
 }
 
+function mintPreview(mintAddress: string): string {
+  if (mintAddress.length <= 18) {
+    return mintAddress || 'Not configured';
+  }
+  return `${mintAddress.slice(0, 8)}...${mintAddress.slice(-8)}`;
+}
+
+function registryPairLabel(token: TradableToken): string {
+  const baseLabel = token.symbol ?? token.name ?? contractPreview(token.baseTokenAddress);
+  const quoteLabel =
+    token.quoteTokenSymbol ?? token.quoteTokenName ?? contractPreview(token.quoteTokenAddress);
+  return `${baseLabel} / ${quoteLabel}`;
+}
+
 function FormCard({
   title,
   description,
@@ -214,11 +228,8 @@ export default function StrategySchemaForm({
     const options = tradableTokens
       .filter((token) => token.network === 'solana' && token.isActive)
       .map((token) => ({
-        value: token.contractAddress,
-        label:
-          token.symbol ??
-          token.name ??
-          contractPreview(token.contractAddress),
+        value: token.baseTokenAddress,
+        label: registryPairLabel(token),
       }));
 
     const currentContractAddress = draft.parameters.contractAddress.trim();
@@ -235,6 +246,17 @@ export default function StrategySchemaForm({
     return options;
   }, [draft.parameters.contractAddress, tradableTokens]);
 
+  const selectedRegistryToken = React.useMemo(
+    () =>
+      tradableTokens.find(
+        (token) =>
+          token.network === 'solana' &&
+          token.isActive &&
+          token.baseTokenAddress === formData.parameters?.contractAddress,
+      ) ?? null,
+    [formData.parameters?.contractAddress, tradableTokens],
+  );
+
   React.useEffect(() => {
     const currentSignature = JSON.stringify(getValues());
     if (currentSignature !== draftSignature) {
@@ -248,6 +270,26 @@ export default function StrategySchemaForm({
     }
     onChange(() => formData as StrategyVersionDocument);
   }, [formData, formState.isDirty, onChange]);
+
+  React.useEffect(() => {
+    if (!selectedRegistryToken) {
+      return;
+    }
+    if (
+      formData.parameters?.baseTokenAddress === selectedRegistryToken.baseTokenAddress &&
+      formData.parameters?.quoteTokenAddress === selectedRegistryToken.quoteTokenAddress
+    ) {
+      return;
+    }
+    reset({
+      ...formData,
+      parameters: {
+        ...formData.parameters,
+        baseTokenAddress: selectedRegistryToken.baseTokenAddress,
+        quoteTokenAddress: selectedRegistryToken.quoteTokenAddress,
+      },
+    });
+  }, [formData, reset, selectedRegistryToken]);
 
   const summaryItems = [
     {
@@ -322,7 +364,7 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
-            <FieldShell label="Target Contract" helper="Select any token from the tracked registry. Activating a token in the registry still controls the live market context separately until you save this draft.">
+            <FieldShell label="Trading Pair" helper="Select a tracked trading pair from the registry. Base and quote mints are inherited from the selected pair.">
               <Controller
                 control={control}
                 name="parameters.contractAddress"
@@ -340,6 +382,32 @@ export default function StrategySchemaForm({
                     ))}
                   </select>
                 )}
+              />
+            </FieldShell>
+
+            <FieldShell label="Base Token Mint" helper="Inherited from the selected registry pair.">
+              <input
+                value={formData.parameters?.baseTokenAddress ?? ''}
+                readOnly
+                className={textInputClassName(true)}
+                placeholder="Base token mint address"
+              />
+            </FieldShell>
+
+            <FieldShell label="Quote Token Mint" helper="Inherited from the selected registry pair.">
+              <input
+                value={formData.parameters?.quoteTokenAddress ?? ''}
+                readOnly
+                className={textInputClassName(true)}
+                placeholder="Quote token mint address"
+              />
+            </FieldShell>
+
+            <FieldShell label="Main AMM Pool Address" helper="Used to classify webhook events by checking whether the base token is flowing out of or into the configured pool.">
+              <input
+                {...register('parameters.ammPoolAddress')}
+                className={textInputClassName()}
+                placeholder="Raydium or AMM pool address"
               />
             </FieldShell>
 

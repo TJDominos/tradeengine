@@ -12,7 +12,9 @@ export type AuthStatus = {
 };
 
 export type SettingsState = {
-  contractAddress: string;
+  baseTokenAddress: string;
+  activeBaseTokenAddress?: string;
+  activeQuoteTokenAddress?: string;
   volatilityTarget: number;
   pullbackTarget: number;
   volumeTarget: number;
@@ -29,6 +31,8 @@ export type AccountRecord = {
   label: string;
   address: string;
   type: string;
+  capabilityBaseMint?: string | null;
+  capabilityQuoteMint?: string | null;
   createdAt: number;
 };
 
@@ -59,6 +63,7 @@ export type TradeLog = {
   executedAmount: number | null;
   executedPrice: number | null;
   txSignature: string | null;
+  executionTraceJson?: string | null;
   status: 'PENDING' | 'SUCCESS' | 'FAILED';
   errorMessage: string | null;
   createdAt: number;
@@ -94,7 +99,7 @@ export type RpcEndpoint = {
 
 export type TokenMarketSnapshot = {
   network: string;
-  contractAddress: string;
+  baseTokenAddress: string;
   tokenName: string | null;
   tokenSymbol: string | null;
   priceUsd: number | null;
@@ -172,10 +177,14 @@ export type OutsideTokenHolderPage = {
 export type TradableToken = {
   id: number;
   network: string;
-  contractAddress: string;
+  baseTokenAddress: string;
+  quoteTokenAddress: string;
   symbol: string | null;
   name: string | null;
   decimals: number | null;
+  quoteTokenSymbol?: string | null;
+  quoteTokenName?: string | null;
+  quoteTokenDecimals?: number | null;
   isActive: boolean;
 };
 
@@ -189,7 +198,7 @@ export type TokenWebhookCheck = {
 export type HistoricalSetup = {
   id: number;
   tokenSymbol: string | null;
-  contractAddress: string | null;
+  baseTokenAddress: string | null;
   timeRangeTarget: string;
   maxTransactions: number;
   maxSlippage: number;

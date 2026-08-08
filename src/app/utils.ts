@@ -72,7 +72,9 @@ export function formatOptionalUsd(value: number | null | undefined): string {
 
 export function serializeSettings(settings: SettingsState) {
   return {
-    contractAddress: settings.contractAddress,
+    baseTokenAddress: settings.baseTokenAddress,
+    activeBaseTokenAddress: settings.activeBaseTokenAddress ?? settings.baseTokenAddress,
+    activeQuoteTokenAddress: settings.activeQuoteTokenAddress ?? '',
     volatilityTarget: Number(settings.volatilityTarget),
     pullbackTarget: Number(settings.pullbackTarget),
     volumeTarget: Number(settings.volumeTarget),
@@ -88,7 +90,8 @@ export function mergeTradableToken(tokens: TradableToken[], nextToken: TradableT
   const existingIndex = tokens.findIndex(
     (token) =>
       token.network === nextToken.network &&
-      token.contractAddress === nextToken.contractAddress,
+      token.baseTokenAddress === nextToken.baseTokenAddress &&
+      token.quoteTokenAddress === nextToken.quoteTokenAddress,
   );
   if (existingIndex === -1) {
     return [...tokens, nextToken];

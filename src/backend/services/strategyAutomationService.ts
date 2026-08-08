@@ -1,6 +1,7 @@
 import { ApiError } from '../errors';
 import {
-  buildJupiterSwapTransaction,
+  buildJupiterSwapTransactionWithTrace,
+  fetchJupiterTokenMetadata,
   fetchJupiterSwapQuote,
 } from '../jupiter';
 import {
@@ -18,7 +19,9 @@ import type {
 } from '../strategy/types';
 import { nowTs } from '../time';
 import {
+  accountCapabilityMatchesMintPair,
   dbAddAuditLog,
+  dbGetManagedAccountByAddress,
   dbGetManagedAccountById,
   dbLoadManagedKeypairBytes,
   dbLoadManagedKeypairBytesByAccountId,
@@ -30,8 +33,10 @@ import { dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore'
 import type { Env } from '../workerShared';
 import {
   executeTradeTask,
+  fetchSolanaMintDecimals,
   normalizePubkey,
   registerTradeTaskExecutor,
+  readNonEmptyString,
   type StrategyTaskExecutionContext,
   type StrategyTaskExecutionResult,
 } from '../workerCore';
@@ -64,6 +69,72 @@ interface StrategyEngineDurableObjectMetricsResponse {
   nextExecutionTime: number | null;
 }
 
+interface ResolvedExecutionPair {
+  targetMint: string;
+  baseMint: string;
+  quoteMint: string;
+}
+
+interface ResolvedExecutionDecimals {
+  baseTokenDecimals: number;
+  quoteTokenDecimals: number;
+}
+
+interface TradeExecutionTrace {
+  executionMode: 'default' | 'controlled_jupiter_acceptance';
+  task: StrategyExecutionTaskPayload;
+  walletAddress: string;
+  accountId: number | null;
+  pair: {
+    baseMint: string;
+    quoteMint: string;
+  };
+  decimals: {
+    baseTokenDecimals: number;
+    quoteTokenDecimals: number;
+  };
+  accountCapability: {
+    requestBaseMint: string | null;
+    requestQuoteMint: string | null;
+  };
+  quoteResponse?: unknown;
+  swapRequestPayload?: unknown;
+  swapTransactionBase64?: string;
+  txSignature?: string;
+  failureReason?: string;
+}
+
+function isControlledExecutionMode(
+  task: StrategyExecutionTaskPayload,
+): boolean {
+  return task.executionMode === 'controlled_jupiter_acceptance';
+}
+
+function assertManagedAccountCapabilityMatchesTaskPair(
+  account: {
+    capabilityBaseMint?: string | null;
+    capabilityQuoteMint?: string | null;
+  },
+  pair: ResolvedExecutionPair,
+  task: StrategyExecutionTaskPayload,
+): void {
+  const hasStoredCapability =
+    (account.capabilityBaseMint?.trim().length ?? 0) > 0 &&
+    (account.capabilityQuoteMint?.trim().length ?? 0) > 0;
+  if (isControlledExecutionMode(task) && !hasStoredCapability) {
+    throw new ApiError(
+      409,
+      'Controlled execution requires the managed account to have a stored capability baseMint/quoteMint pair',
+    );
+  }
+  if (!accountCapabilityMatchesMintPair(account, pair.baseMint, pair.quoteMint)) {
+    throw new ApiError(
+      409,
+      'Managed account capability mint pair does not match the task baseMint/quoteMint pair',
+    );
+  }
+}
+
 export interface StrategyQueueSnapshot {
   active: StrategyRecord | null;
   pending: StrategyRecord[];
@@ -73,7 +144,148 @@ export interface StrategyQueueSnapshot {
   currentMetrics: StrategyEngineMetrics | null;
 }
 
+function validateTaskTokenDecimals(
+  value: number | null | undefined,
+  label: string,
+): number | null {
+  if (value == null) {
+    return null;
+  }
+  if (!Number.isInteger(value) || value < 0 || value > 255) {
+    throw new ApiError(400, `${label} must be an integer between 0 and 255`);
+  }
+  return value;
+}
+
+function resolveExecutionPair(
+  task: StrategyExecutionTaskPayload,
+  settingsContractAddress: string,
+): ResolvedExecutionPair {
+  const explicitBaseMint = readNonEmptyString(task.baseMint);
+  const explicitQuoteMint = readNonEmptyString(task.quoteMint);
+  const explicitBaseTokenAddress = readNonEmptyString(task.baseTokenAddress);
+
+  const baseMint = normalizePubkey(
+    explicitBaseMint ?? explicitBaseTokenAddress ?? settingsContractAddress,
+  );
+  const quoteMint = normalizePubkey(explicitQuoteMint ?? SOLANA_USDC_MINT);
+  if (baseMint === quoteMint) {
+    throw new ApiError(400, 'baseMint and quoteMint must be different Solana mint addresses');
+  }
+  if (explicitBaseTokenAddress && normalizePubkey(explicitBaseTokenAddress) !== baseMint) {
+    throw new ApiError(400, 'baseTokenAddress must match baseMint when both are provided');
+  }
+
+  return {
+    targetMint: baseMint,
+    baseMint,
+    quoteMint,
+  };
+}
+
+async function resolveMintDecimals(
+  env: Env,
+  userId: number,
+  mint: string,
+  fallbackDecimals: number | null,
+): Promise<number> {
+  if (fallbackDecimals != null) {
+    return fallbackDecimals;
+  }
+
+  const tokenRecord = await env.TRADINGBOT_DB
+    .prepare(
+      'SELECT decimals FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2 LIMIT 1',
+    )
+    .bind('solana', mint)
+    .first<{ decimals: number | null }>();
+  if (tokenRecord?.decimals != null) {
+    return tokenRecord.decimals;
+  }
+
+  const jupiterMeta = await fetchJupiterTokenMetadata(mint);
+  if (jupiterMeta?.decimals != null) {
+    return jupiterMeta.decimals;
+  }
+
+  const rpcUrls = await dbResolveSolanaRpcUrls(
+    env.TRADINGBOT_DB,
+    userId,
+    env.SOLANA_RPC_URL,
+  );
+  return fetchSolanaMintDecimals(rpcUrls, mint);
+}
+
+async function resolveAndValidateExecutionDecimals(
+  env: Env,
+  userId: number,
+  pair: ResolvedExecutionPair,
+  task: StrategyExecutionTaskPayload,
+): Promise<ResolvedExecutionDecimals> {
+  const requestedBaseDecimals = validateTaskTokenDecimals(
+    task.baseTokenDecimals,
+    'baseTokenDecimals',
+  );
+  const requestedQuoteDecimals = validateTaskTokenDecimals(
+    task.quoteTokenDecimals,
+    'quoteTokenDecimals',
+  );
+
+  const [baseTokenDecimals, quoteTokenDecimals] = await Promise.all([
+    resolveMintDecimals(env, userId, pair.baseMint, requestedBaseDecimals),
+    resolveMintDecimals(
+      env,
+      userId,
+      pair.quoteMint,
+      requestedQuoteDecimals ?? (pair.quoteMint === SOLANA_USDC_MINT ? 6 : null),
+    ),
+  ]);
+
+  validateTaskTokenDecimals(baseTokenDecimals, 'resolved base token decimals');
+  validateTaskTokenDecimals(quoteTokenDecimals, 'resolved quote token decimals');
+
+  if (requestedBaseDecimals != null && requestedBaseDecimals !== baseTokenDecimals) {
+    throw new ApiError(
+      409,
+      `baseTokenDecimals ${requestedBaseDecimals} does not match resolved mint decimals ${baseTokenDecimals}`,
+    );
+  }
+  if (requestedQuoteDecimals != null && requestedQuoteDecimals !== quoteTokenDecimals) {
+    throw new ApiError(
+      409,
+      `quoteTokenDecimals ${requestedQuoteDecimals} does not match resolved mint decimals ${quoteTokenDecimals}`,
+    );
+  }
+
+  return {
+    baseTokenDecimals,
+    quoteTokenDecimals,
+  };
+}
+
+async function updateTradeLogExecutionTrace(
+  db: D1Database,
+  tradeLogId: number,
+  trace: TradeExecutionTrace,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE trade_logs
+       SET execution_trace_json = ?2, updated_at = ?3
+       WHERE id = ?1`,
+    )
+    .bind(tradeLogId, JSON.stringify(trace), nowTs())
+    .run();
+}
+
 export class StrategyAutomationService {
+  public async consumeExecutionTask(
+    task: StrategyExecutionTaskPayload,
+    context: StrategyTaskExecutionContext,
+  ): Promise<StrategyTaskExecutionResult> {
+    return executeTradeTask(task, context);
+  }
+
   public async isBusy(env: Env): Promise<boolean> {
     return (await getActiveStrategy(env)) != null;
   }
@@ -335,7 +547,7 @@ export class StrategyAutomationService {
     const stubId = env.STRATEGY_ENGINE_DO.idFromName(
       strategyEngineDurableObjectNameFor(
         record.config.userId,
-        record.config.contractAddress,
+        record.config.baseTokenAddress,
       ),
     );
     return env.STRATEGY_ENGINE_DO.get(stubId);
@@ -410,11 +622,8 @@ async function executeManagedTradeTask(
   }
 
   const settings = await dbLoadSettings(env.TRADINGBOT_DB, userId);
-  const targetMint = normalizePubkey(
-    typeof task.contractAddress === 'string' && task.contractAddress.trim().length > 0
-      ? task.contractAddress
-      : settings.contractAddress,
-  );
+  const pair = resolveExecutionPair(task, settings.baseTokenAddress);
+  const targetMint = pair.targetMint;
   if (!targetMint) {
     throw new ApiError(400, 'No active trading token configured');
   }
@@ -428,12 +637,31 @@ async function executeManagedTradeTask(
       ? normalizePubkey(task.walletAddress)
       : '';
 
+  if (task.requireExplicitAccount && resolvedAccountId == null && !resolvedSignerAddress) {
+    throw new ApiError(
+      400,
+      'controlled execution requires exactly one explicit managed wallet via accountId or walletAddress',
+    );
+  }
+
   if (resolvedAccountId != null) {
     const managedAccount = await dbGetManagedAccountById(
       env.TRADINGBOT_DB,
       userId,
       resolvedAccountId,
     );
+    assertManagedAccountCapabilityMatchesTaskPair(managedAccount, pair, task);
+    resolvedSignerAddress = managedAccount.address;
+  }
+
+  if (resolvedSignerAddress) {
+    const managedAccount = await dbGetManagedAccountByAddress(
+      env.TRADINGBOT_DB,
+      userId,
+      resolvedSignerAddress,
+    );
+    assertManagedAccountCapabilityMatchesTaskPair(managedAccount, pair, task);
+    resolvedAccountId ??= managedAccount.id;
     resolvedSignerAddress = managedAccount.address;
   }
 
@@ -445,6 +673,10 @@ async function executeManagedTradeTask(
       task.requestedAmount,
       {
         envRpcUrl: env.SOLANA_RPC_URL,
+        pair: {
+          baseMint: pair.baseMint,
+          quoteMint: pair.quoteMint,
+        },
       },
     );
     if (!allocatedAccount) {
@@ -480,34 +712,48 @@ async function executeManagedTradeTask(
           env.PRIVATE_KEY_ENCRYPTION_KEY,
         );
 
-  const tokenRecord = await env.TRADINGBOT_DB
-    .prepare('SELECT decimals FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2')
-    .bind('solana', targetMint)
-    .first<{ decimals: number | null }>();
-  const tokenDecimals = tokenRecord?.decimals ?? 6;
+  const { baseTokenDecimals, quoteTokenDecimals } =
+    await resolveAndValidateExecutionDecimals(env, userId, pair, task);
 
-  const USDC_DECIMALS = 6;
   let inputMint: string;
   let outputMint: string;
   let amountAtomicUnits: string;
 
   if (action === 'BUY') {
-    inputMint = SOLANA_USDC_MINT;
-    outputMint = targetMint;
+    inputMint = pair.quoteMint;
+    outputMint = pair.baseMint;
     amountAtomicUnits = String(
-      Math.round(task.requestedAmount * 10 ** USDC_DECIMALS),
+      Math.round(task.requestedAmount * 10 ** quoteTokenDecimals),
     );
   } else {
-    inputMint = targetMint;
-    outputMint = SOLANA_USDC_MINT;
+    inputMint = pair.baseMint;
+    outputMint = pair.quoteMint;
     amountAtomicUnits = String(
-      Math.round(task.requestedAmount * 10 ** tokenDecimals),
+      Math.round(task.requestedAmount * 10 ** baseTokenDecimals),
     );
   }
 
   const slippageBps = Math.round(settings.maxSlippage * 100);
   const tokenId = await dbResolveTradableTokenId(env.TRADINGBOT_DB, targetMint);
   const setupId = await dbGetLatestHistoricalSetupId(env.TRADINGBOT_DB, userId);
+  const executionTrace: TradeExecutionTrace = {
+    executionMode: task.executionMode ?? 'default',
+    task,
+    walletAddress: resolvedSignerAddress,
+    accountId: resolvedAccountId,
+    pair: {
+      baseMint: pair.baseMint,
+      quoteMint: pair.quoteMint,
+    },
+    decimals: {
+      baseTokenDecimals,
+      quoteTokenDecimals,
+    },
+    accountCapability: {
+      requestBaseMint: task.accountCapabilityBaseMint ?? null,
+      requestQuoteMint: task.accountCapabilityQuoteMint ?? null,
+    },
+  };
 
   let tradeLogId: number | null = null;
   if (tokenId) {
@@ -515,11 +761,19 @@ async function executeManagedTradeTask(
       .prepare(
         `INSERT INTO trade_logs (
            token_id, setup_id, wallet_address, action,
-           requested_amount, status, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, 'PENDING', ?6, ?6)
+           requested_amount, execution_trace_json, status, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'PENDING', ?7, ?7)
          RETURNING id`,
       )
-      .bind(tokenId, setupId, resolvedSignerAddress, action, task.requestedAmount, nowTs())
+      .bind(
+        tokenId,
+        setupId,
+        resolvedSignerAddress,
+        action,
+        task.requestedAmount,
+        JSON.stringify(executionTrace),
+        nowTs(),
+      )
       .first<{ id: number }>();
     tradeLogId = logRow?.id ?? null;
   }
@@ -531,30 +785,47 @@ async function executeManagedTradeTask(
       amountAtomicUnits,
       slippageBps,
     );
-    const unsignedTxBytes = await buildJupiterSwapTransaction(
+    executionTrace.quoteResponse = quote;
+    const swapBuild = await buildJupiterSwapTransactionWithTrace(
       quote,
       resolvedSignerAddress,
     );
-    const signedTxBytes = signSolanaTransaction(unsignedTxBytes, keypairBytes);
+    executionTrace.swapRequestPayload = swapBuild.requestPayload;
+    executionTrace.swapTransactionBase64 = swapBuild.swapTransactionBase64;
+    if (tradeLogId != null) {
+      await updateTradeLogExecutionTrace(env.TRADINGBOT_DB, tradeLogId, executionTrace);
+    }
+
+    const signedTxBytes = signSolanaTransaction(
+      swapBuild.swapTransactionBytes,
+      keypairBytes,
+    );
     const rpcUrls = await dbResolveSolanaRpcUrls(
       env.TRADINGBOT_DB,
       userId,
       env.SOLANA_RPC_URL,
     );
     const txSignature = await sendSolanaTransaction(rpcUrls, signedTxBytes);
+    executionTrace.txSignature = txSignature;
 
     const executedAmountRaw = Number(action === 'BUY' ? quote.outAmount : quote.inAmount);
-    const executedDecimals = action === 'BUY' ? tokenDecimals : USDC_DECIMALS;
+    const executedDecimals = action === 'BUY' ? baseTokenDecimals : quoteTokenDecimals;
     const executedAmount = executedAmountRaw / 10 ** executedDecimals;
 
     if (tradeLogId != null) {
       await env.TRADINGBOT_DB
         .prepare(
           `UPDATE trade_logs
-           SET status = 'PENDING', tx_signature = ?2, executed_amount = ?3, updated_at = ?4
+           SET status = 'PENDING', tx_signature = ?2, executed_amount = ?3, execution_trace_json = ?4, updated_at = ?5
            WHERE id = ?1`,
         )
-        .bind(tradeLogId, txSignature, executedAmount, nowTs())
+        .bind(
+          tradeLogId,
+          txSignature,
+          executedAmount,
+          JSON.stringify(executionTrace),
+          nowTs(),
+        )
         .run();
     }
 
@@ -563,7 +834,7 @@ async function executeManagedTradeTask(
       userId,
       'trade.submitted',
       txSignature,
-      `${action} ${task.requestedAmount} (${action === 'BUY' ? 'USDC → ' + targetMint : targetMint + ' → USDC'}) via Jupiter. Tx: ${txSignature}`,
+      `${action} ${task.requestedAmount} (${action === 'BUY' ? `${pair.quoteMint} → ${targetMint}` : `${targetMint} → ${pair.quoteMint}`}) via Jupiter. Tx: ${txSignature}`,
     );
 
     return {
@@ -580,12 +851,20 @@ async function executeManagedTradeTask(
     };
   } catch (err: unknown) {
     const errorMessage = err instanceof Error ? err.message : String(err);
+    executionTrace.failureReason = errorMessage;
     if (tradeLogId != null) {
       await env.TRADINGBOT_DB
         .prepare(
-          `UPDATE trade_logs SET status = 'FAILED', error_message = ?2, updated_at = ?3 WHERE id = ?1`,
+          `UPDATE trade_logs
+           SET status = 'FAILED', error_message = ?2, execution_trace_json = ?3, updated_at = ?4
+           WHERE id = ?1`,
         )
-        .bind(tradeLogId, errorMessage, nowTs())
+        .bind(
+          tradeLogId,
+          errorMessage,
+          JSON.stringify(executionTrace),
+          nowTs(),
+        )
         .run();
     }
     await dbAddAuditLog(

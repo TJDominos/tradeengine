@@ -8,6 +8,7 @@ export interface ExternalTradeEvent {
   txHash: string;
   wallet_address: string;
   is_loss_cut: boolean;
+  payloadJson?: string | null;
 }
 
 export interface StrategyEventRouterTarget {

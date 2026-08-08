@@ -36,7 +36,8 @@ export type StrategyTriggerSource =
   | 'unknown';
 
 export interface StrategySettingsInput {
-  contractAddress: string;
+  baseTokenAddress: string;
+  quoteTokenAddress: string;
   volatilityTarget: number;
   pullbackTarget: number;
   volumeTarget: number;
@@ -55,7 +56,9 @@ export interface StrategySettingsInput {
 }
 
 export interface StrategyParameters {
-  contractAddress: string;
+  baseTokenAddress: string;
+  quoteTokenAddress: string;
+  ammPoolAddress: string;
   timeRangeTarget: string;
   maxTransactions: number;
   maxSlippageBps: number;
@@ -103,7 +106,7 @@ export interface StrategyExecutionPlanningInput {
   durationMs: number;
   startTime: number;
   random?: () => number;
-  contractAddress?: string;
+  baseTokenAddress?: string;
 }
 
 export interface StrategyAllocatedAccount {
@@ -115,7 +118,15 @@ export interface StrategyExecutionTaskPayload {
   action: 'BUY' | 'SELL';
   accountId: number | null;
   walletAddress: string | null;
-  contractAddress: string | null;
+  baseTokenAddress: string | null;
+  baseMint?: string | null;
+  quoteMint?: string | null;
+  baseTokenDecimals?: number | null;
+  quoteTokenDecimals?: number | null;
+  accountCapabilityBaseMint?: string | null;
+  accountCapabilityQuoteMint?: string | null;
+  requireExplicitAccount?: boolean;
+  executionMode?: 'default' | 'controlled_jupiter_acceptance';
   requestedAmount: number;
   scheduledAt: number;
 }
@@ -211,7 +222,8 @@ export interface StrategyRecordConfig {
   strategyVersionNo: number | null;
   strategyType: StrategyType;
   document: StrategyVersionDocument;
-  contractAddress: string;
+  baseTokenAddress: string;
+  quoteTokenAddress: string;
   macroObjective: StrategyMacroObjective;
   tactics: StrategyExecutionTactics;
   execution: StrategyExecutionConfig;

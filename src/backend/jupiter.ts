@@ -32,6 +32,19 @@ export type JupiterQuoteResponse = {
   contextSlot?: number;
 };
 
+export interface JupiterSwapRequestPayload {
+  quoteResponse: JupiterQuoteResponse;
+  userPublicKey: string;
+  wrapAndUnwrapSol: boolean;
+  dynamicComputeUnitLimit: boolean;
+}
+
+export interface JupiterSwapTransactionBuildTrace {
+  requestPayload: JupiterSwapRequestPayload;
+  swapTransactionBase64: string;
+  swapTransactionBytes: Uint8Array;
+}
+
 function toFiniteNumber(value: unknown): number | null {
   if (typeof value === 'number') {
     return Number.isFinite(value) ? value : null;
@@ -275,22 +288,23 @@ export async function fetchJupiterSwapQuote(
   return body;
 }
 
-export async function buildJupiterSwapTransaction(
+export async function buildJupiterSwapTransactionWithTrace(
   quoteResponse: JupiterQuoteResponse,
   userPublicKey: string,
-): Promise<Uint8Array> {
+): Promise<JupiterSwapTransactionBuildTrace> {
+  const requestPayload: JupiterSwapRequestPayload = {
+    quoteResponse,
+    userPublicKey,
+    wrapAndUnwrapSol: true,
+    dynamicComputeUnitLimit: true,
+  };
   const response = await fetch('https://quote-api.jup.ag/v6/swap', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
     },
-    body: JSON.stringify({
-      quoteResponse,
-      userPublicKey,
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-    }),
+    body: JSON.stringify(requestPayload),
   });
   if (!response.ok) {
     const errText = await response.text().catch(() => '');
@@ -303,5 +317,23 @@ export async function buildJupiterSwapTransaction(
   if (!body.swapTransaction) {
     throw new ApiError(502, 'Jupiter swap response missing transaction');
   }
-  return Uint8Array.from(atob(body.swapTransaction), (c) => c.charCodeAt(0));
+  return {
+    requestPayload,
+    swapTransactionBase64: body.swapTransaction,
+    swapTransactionBytes: Uint8Array.from(
+      atob(body.swapTransaction),
+      (c) => c.charCodeAt(0),
+    ),
+  };
+}
+
+export async function buildJupiterSwapTransaction(
+  quoteResponse: JupiterQuoteResponse,
+  userPublicKey: string,
+): Promise<Uint8Array> {
+  const trace = await buildJupiterSwapTransactionWithTrace(
+    quoteResponse,
+    userPublicKey,
+  );
+  return trace.swapTransactionBytes;
 }

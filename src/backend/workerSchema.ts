@@ -5,6 +5,7 @@ import type {
   RpcEndpointCreateRequest,
   TradableTokenCreateRequest,
 } from './workerShared';
+import { SOLANA_USDC_MINT } from './workerShared';
 
 // ─── D1 schema + request parsers ─────────────────────────────────────────────
 
@@ -60,19 +61,23 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS tradable_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     network TEXT NOT NULL DEFAULT 'solana',
-    contract_address TEXT NOT NULL,
+    base_token_address TEXT NOT NULL,
+    quote_token_address TEXT NOT NULL DEFAULT '${SOLANA_USDC_MINT}',
     symbol TEXT,
     name TEXT,
     decimals INTEGER,
+    quote_token_symbol TEXT,
+    quote_token_name TEXT,
+    quote_token_decimals INTEGER,
     is_active INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL,
-    UNIQUE(network, contract_address)
+    UNIQUE(network, base_token_address, quote_token_address)
   )`,
   `CREATE TABLE IF NOT EXISTS token_market_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_id INTEGER NOT NULL,
     network TEXT NOT NULL DEFAULT 'solana',
-    contract_address TEXT NOT NULL,
+    base_token_address TEXT NOT NULL,
     token_name TEXT,
     token_symbol TEXT,
     price_usd REAL,
@@ -125,6 +130,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     executed_amount REAL,
     executed_price REAL,
     tx_signature TEXT,
+    execution_trace_json TEXT,
     status TEXT NOT NULL DEFAULT 'PENDING'
       CHECK(status IN ('PENDING', 'SUCCESS', 'FAILED')),
     error_message TEXT,
@@ -144,7 +150,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     net_buyin_target REAL NOT NULL DEFAULT 0,
     volatility_target REAL NOT NULL DEFAULT 0,
     pullback_target REAL NOT NULL DEFAULT 0,
-    contract_address TEXT,
+    base_token_address TEXT,
     metadata TEXT,
     created_at INTEGER NOT NULL,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -190,7 +196,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     source TEXT NOT NULL,
     event_type TEXT NOT NULL,
     external_id TEXT,
-    contract_address TEXT NOT NULL,
+    base_token_address TEXT NOT NULL,
     wallet_address TEXT,
     tx_signature TEXT,
     status TEXT NOT NULL,
@@ -304,7 +310,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_signals_processed_created ON signals(processed, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source)',
   'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_token_fetched ON token_market_snapshots(token_id, fetched_at DESC)',
-  'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_contract_fetched ON token_market_snapshots(network, contract_address, fetched_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_contract_fetched ON token_market_snapshots(network, base_token_address, fetched_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_token_created ON trade_logs(token_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_wallet_created ON trade_logs(wallet_address, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_strategy_definitions_user_type ON strategy_definitions(user_id, strategy_type)',
@@ -369,6 +375,8 @@ export async function dbEnsureSchema(db: D1Database): Promise<void> {
           'is_active',
           'INTEGER NOT NULL DEFAULT 1',
         );
+        await dbEnsureTableColumn(db, 'accounts', 'capability_base_mint', 'TEXT');
+        await dbEnsureTableColumn(db, 'accounts', 'capability_quote_mint', 'TEXT');
       })
       .catch((err) => {
         schemaInitPromise = undefined;
@@ -418,6 +426,45 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           'token_market_snapshots',
           'total_holders',
           'INTEGER',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'tradable_tokens',
+          'base_token_address',
+          'TEXT',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'token_market_snapshots',
+          'base_token_address',
+          'TEXT',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'historic_setups',
+          'base_token_address',
+          'TEXT',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'strategy_evaluations',
+          'base_token_address',
+          'TEXT',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'tradable_tokens',
+          'quote_token_address',
+          `TEXT NOT NULL DEFAULT '${SOLANA_USDC_MINT}'`,
+        );
+        await dbEnsureTableColumn(db, 'tradable_tokens', 'quote_token_symbol', 'TEXT');
+        await dbEnsureTableColumn(db, 'tradable_tokens', 'quote_token_name', 'TEXT');
+        await dbEnsureTableColumn(db, 'tradable_tokens', 'quote_token_decimals', 'INTEGER');
+        await dbEnsureTableColumn(
+          db,
+          'trade_logs',
+          'execution_trace_json',
+          'TEXT',
         );
         await dbEnsureTableColumn(
           db,
@@ -538,16 +585,27 @@ export function parseTradableTokenCreateRequest(
   body: unknown,
 ): TradableTokenCreateRequest {
   if (!body || typeof body !== 'object') {
-    throw new ApiError(400, 'Network and contract address are required');
+    throw new ApiError(400, 'Network, contract address, and quote token address are required');
   }
-  const { network, contractAddress } = body as {
+  const { network, contractAddress, baseTokenAddress, quoteTokenAddress } = body as {
     network?: unknown;
     contractAddress?: unknown;
+    baseTokenAddress?: unknown;
+    quoteTokenAddress?: unknown;
   };
-  if (typeof network !== 'string' || typeof contractAddress !== 'string') {
-    throw new ApiError(400, 'Network and contract address are required');
+  if (
+    typeof network !== 'string' ||
+    (typeof contractAddress !== 'string' && typeof baseTokenAddress !== 'string') ||
+    typeof quoteTokenAddress !== 'string'
+  ) {
+    throw new ApiError(400, 'Network, contract address, and quote token address are required');
   }
-  return { network, contractAddress };
+  return {
+    network,
+    baseTokenAddress:
+      typeof baseTokenAddress === 'string' ? baseTokenAddress : (contractAddress as string),
+    quoteTokenAddress,
+  };
 }
 
 export function parseActiveTokenUpdateRequest(
@@ -556,13 +614,22 @@ export function parseActiveTokenUpdateRequest(
   if (!body || typeof body !== 'object') {
     throw new ApiError(400, 'Contract address is required');
   }
-  const { contractAddress } = body as {
+  const { contractAddress, baseTokenAddress, quoteTokenAddress } = body as {
     contractAddress?: unknown;
+    baseTokenAddress?: unknown;
+    quoteTokenAddress?: unknown;
   };
-  if (typeof contractAddress !== 'string') {
+  if (typeof contractAddress !== 'string' && typeof baseTokenAddress !== 'string') {
     throw new ApiError(400, 'Contract address is required');
   }
-  return { contractAddress };
+  if (quoteTokenAddress != null && typeof quoteTokenAddress !== 'string') {
+    throw new ApiError(400, 'Quote token address must be a string');
+  }
+  return {
+    baseTokenAddress:
+      typeof baseTokenAddress === 'string' ? baseTokenAddress : (contractAddress as string),
+    quoteTokenAddress: typeof quoteTokenAddress === 'string' ? quoteTokenAddress : undefined,
+  };
 }
 
 export function parseRpcEndpointCreateRequest(

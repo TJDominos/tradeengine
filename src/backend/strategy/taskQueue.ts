@@ -146,7 +146,7 @@ export class StrategyTaskQueue {
       action: task.action,
       accountId: task.accountId,
       walletAddress: task.walletAddress,
-      contractAddress: task.contractAddress,
+      baseTokenAddress: task.baseTokenAddress,
       requestedAmount: task.requestedAmount,
       scheduledAt,
       metadata: task.metadata,

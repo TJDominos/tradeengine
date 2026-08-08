@@ -82,14 +82,14 @@ export default function DashboardPage({
       ? formatNum(totalHolders)
       : 'Unavailable';
   const internalHolderSubtitle = !hasActiveToken
-    ? 'Set an active token to load holder data.'
+    ? 'Set an active pair to load holder data.'
     : tokenHolderAggregateLoading
       ? 'Loading holder counts and token total...'
       : internalAmountHolding != null
         ? `Token total ${formatNum(internalAmountHolding)} ${activeTokenSymbol}`
         : 'Holder aggregate unavailable';
   const outsideHolderSubtitle = !hasActiveToken
-    ? 'Set an active token to load holder data.'
+    ? 'Set an active pair to load holder data.'
     : tokenHolderAggregateLoading
       ? 'Loading holder counts and token total...'
       : outsiderAmountHolding != null
@@ -112,7 +112,7 @@ export default function DashboardPage({
       </DateRangePicker>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard title="Token Contract Address" value={settingsContractAddress || CONTRACT_ADDRESS || 'Not Configured'} isAddress />
+        <StatCard title="Base Token Address" value={settingsContractAddress || CONTRACT_ADDRESS || 'Not Configured'} isAddress />
         <StatCard
           title={`Total ${activeTokenSymbol} Amount (Internal)`}
           value={activeTokenContractAddress ? formatNum(totalInternalTokenAmount) : 'Not Configured'}

@@ -75,8 +75,23 @@ Migrations are located in `migrations/`:
 | `0002_trade_domain.sql` | Trade tables: tradable_tokens (network + contract address), trade_logs, signals, positions, historic_setups |
 | `0003_rpc_endpoints.sql` | User-scoped Solana HTTP RPC failover pool |
 | `0004_token_market_snapshots.sql` | Historical token market snapshots and related indexes |
+| `0009_base_token_address_backfill.sql` | Backfills legacy `contract_address` values into the renamed `base_token_address` columns |
 
-> **Note:** `0002_trade_domain.sql` creates the `tradable_tokens` table. Tokens are added at runtime by providing a network and contract address; no rows are seeded by the migration.
+### Verify the backfill
+
+After applying `0009_base_token_address_backfill.sql`, you can explicitly verify that no legacy rows were missed:
+
+```bash
+# local D1
+npm run check:base-token-backfill:local
+
+# remote D1
+npm run check:base-token-backfill:remote
+```
+
+The query in `scripts/check-base-token-backfill.sql` should return `missing_rows = 0` for every table.
+
+> **Note:** `0002_trade_domain.sql` creates the `tradable_tokens` table. Trading pairs are added at runtime by providing a network, base token address, and quote token address; no rows are seeded by the migration.
 
 ## Cloudflare secrets
 
@@ -206,7 +221,8 @@ Insert a row directly into `tradable_tokens` (a future admin UI form will do thi
 
 ```sql
 INSERT INTO tradable_tokens (network, contract_address, symbol, name, decimals, is_active, created_at)
-VALUES ('solana', '<mint_address>', 'SYM', 'Token Name', 6, 1, unixepoch());
+INSERT INTO tradable_tokens (network, base_token_address, quote_token_address, symbol, name, decimals, is_active, created_at)
+VALUES ('solana', '<base_mint_address>', '<quote_mint_address>', 'SYM', 'Token Name', 6, 1, unixepoch());
 ```
 
 The system will trade this token against USDC (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) on Solana via Jupiter.

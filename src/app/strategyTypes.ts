@@ -31,10 +31,14 @@ export interface StrategyExecutionTactics {
 export type TradableToken = {
   id: number;
   network: string;
-  contractAddress: string;
+  baseTokenAddress: string;
+  quoteTokenAddress: string;
   symbol: string | null;
   name: string | null;
   decimals: number | null;
+  quoteTokenSymbol?: string | null;
+  quoteTokenName?: string | null;
+  quoteTokenDecimals?: number | null;
   isActive: boolean;
 };
 
@@ -47,6 +51,9 @@ export type StrategyExternalSellAction = 'buy_the_dip' | 'pause_strategy';
 
 export interface StrategyParameters {
   contractAddress: string;
+  baseTokenAddress: string;
+  quoteTokenAddress: string;
+  ammPoolAddress: string;
   timeRangeTarget: string;
   maxTransactions: number;
   maxSlippageBps: number;
@@ -158,6 +165,9 @@ export type StrategyFieldType =
 
 export type StrategyFieldPath =
   | 'parameters.contractAddress'
+  | 'parameters.baseTokenAddress'
+  | 'parameters.quoteTokenAddress'
+  | 'parameters.ammPoolAddress'
   | 'parameters.timeRangeTarget'
   | 'parameters.maxTransactions'
   | 'parameters.maxSlippageBps'

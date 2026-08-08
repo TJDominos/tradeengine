@@ -11,6 +11,7 @@ import {
 import { dbAddAuditLog, dbLoadSettings, dbSaveActiveContractAddress, dbSaveSettings } from '../userStore';
 import { fetchSolanaMintDecimals, jsonResponse, normalizePubkey } from '../workerCore';
 import type { Env, SettingsUpdateRequest, TokenMarketSnapshot } from '../workerShared';
+import { SOLANA_USDC_MINT } from '../workerShared';
 import { requireAdmin } from '../services/accessControl';
 import { dbCreateHistoricalSetupSnapshot } from '../services/historyMetricsService';
 import { loadStoredMarketSnapshotByContractAddress } from '../services/tokenMarketService';
@@ -26,8 +27,8 @@ export async function handleSettingsRoutes(
   if (method === 'POST' && pathname === '/api/settings') {
     const user = await requireAdmin(request, env);
     const body = await parseJsonBody<SettingsUpdateRequest>(request);
-    const normalizedContractAddress = body.contractAddress.trim()
-      ? normalizePubkey(body.contractAddress)
+    const normalizedContractAddress = body.baseTokenAddress.trim()
+      ? normalizePubkey(body.baseTokenAddress)
       : '';
     let rpcUrls: string[] | null = null;
     if (normalizedContractAddress) {
@@ -42,13 +43,17 @@ export async function handleSettingsRoutes(
       ).catch(() => null);
       await dbCreateTradableToken(
         env.TRADINGBOT_DB,
-        { network: 'solana', contractAddress: normalizedContractAddress },
+        {
+          network: 'solana',
+          baseTokenAddress: normalizedContractAddress,
+          quoteTokenAddress: SOLANA_USDC_MINT,
+        },
         decimals,
       );
     }
     await dbSaveSettings(env.TRADINGBOT_DB, user.id, {
       ...body,
-      contractAddress: normalizedContractAddress,
+      baseTokenAddress: normalizedContractAddress,
     });
     const updated = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
     await dbCreateHistoricalSetupSnapshot(env.TRADINGBOT_DB, user.id, updated);
@@ -71,8 +76,13 @@ export async function handleSettingsRoutes(
     const normalizedContractAddress = await dbSaveActiveContractAddress(
       env.TRADINGBOT_DB,
       user.id,
-      body.contractAddress,
+      body.baseTokenAddress,
+      body.quoteTokenAddress,
     );
+    const normalizedQuoteTokenAddress =
+      typeof body.quoteTokenAddress === 'string' && body.quoteTokenAddress.trim().length > 0
+        ? normalizePubkey(body.quoteTokenAddress)
+        : SOLANA_USDC_MINT;
 
     let marketSnapshot: TokenMarketSnapshot | null = null;
     if (normalizedContractAddress) {
@@ -85,6 +95,7 @@ export async function handleSettingsRoutes(
       const existingTokenId = await dbResolveTradableTokenId(
         env.TRADINGBOT_DB,
         normalizedContractAddress,
+        normalizedQuoteTokenAddress,
       );
       if (!existingTokenId) {
         try {
@@ -96,13 +107,14 @@ export async function handleSettingsRoutes(
             env.TRADINGBOT_DB,
             {
               network: 'solana',
-              contractAddress: normalizedContractAddress,
+              baseTokenAddress: normalizedContractAddress,
+              quoteTokenAddress: normalizedQuoteTokenAddress,
             },
             decimals,
           );
         } catch (err: unknown) {
           console.warn(
-            `Failed to ensure tracked token metadata for ${normalizedContractAddress}:`,
+            `Failed to ensure tracked pair metadata for ${normalizedContractAddress}:`,
             err,
           );
         }
@@ -110,6 +122,7 @@ export async function handleSettingsRoutes(
       marketSnapshot = await loadStoredMarketSnapshotByContractAddress(
         env.TRADINGBOT_DB,
         normalizedContractAddress,
+        normalizedQuoteTokenAddress,
       );
     }
 
@@ -120,13 +133,14 @@ export async function handleSettingsRoutes(
       normalizedContractAddress || 'none',
       normalizedContractAddress
         ? marketSnapshot
-          ? 'Activated the tracked token and reused the latest stored market data. No strategy version was created automatically.'
-          : 'Activated the tracked token. Market data will refresh only on manual refresh or webhook events. No strategy version was created automatically.'
-        : 'Cleared the active tracked token. No strategy version was created automatically.',
+          ? 'Activated the tracked pair and reused the latest stored market data. No strategy version was created automatically.'
+          : 'Activated the tracked pair. Market data will refresh only on manual refresh or webhook events. No strategy version was created automatically.'
+        : 'Cleared the active tracked pair. No strategy version was created automatically.',
     );
 
     return jsonResponse({
       contractAddress: normalizedContractAddress,
+      quoteTokenAddress: normalizedQuoteTokenAddress,
       marketSnapshot,
     });
   }
@@ -136,7 +150,8 @@ export async function handleSettingsRoutes(
     const body = parseTradableTokenCreateRequest(
       await parseJsonBody<unknown>(request),
     );
-    const normalizedAddress = normalizePubkey(body.contractAddress);
+    const normalizedAddress = normalizePubkey(body.baseTokenAddress);
+    const normalizedQuoteTokenAddress = normalizePubkey(body.quoteTokenAddress);
     const rpcUrls = await dbResolveSolanaRpcUrls(
       env.TRADINGBOT_DB,
       user.id,
@@ -148,7 +163,11 @@ export async function handleSettingsRoutes(
     ).catch(() => null);
     const token = await dbCreateTradableToken(
       env.TRADINGBOT_DB,
-      { network: body.network, contractAddress: normalizedAddress },
+      {
+        network: body.network,
+        baseTokenAddress: normalizedAddress,
+        quoteTokenAddress: normalizedQuoteTokenAddress,
+      },
       decimals,
     );
     const webhookCheck = await checkTradableTokenWebhookSupport(
@@ -163,11 +182,11 @@ export async function handleSettingsRoutes(
       env.TRADINGBOT_DB,
       user.id,
       'token.added',
-      token.contractAddress,
+      token.baseTokenAddress,
       [
         marketSnapshot
-          ? `Added tradable token on ${token.network} and reused the latest stored market snapshot.`
-          : `Added tradable token on ${token.network}. Market data will refresh only on manual refresh or webhook events.`,
+          ? `Added tradable pair on ${token.network} and reused the latest stored market snapshot.`
+          : `Added tradable pair on ${token.network}. Market data will refresh only on manual refresh or webhook events.`,
         webhookCheck.ok
           ? webhookCheck.latestSignature
             ? 'Webhook RPC verification passed.'
@@ -182,24 +201,28 @@ export async function handleSettingsRoutes(
     const user = await requireAdmin(request, env);
     const tokenId = Number.parseInt(url.pathname.split('/').pop() ?? '', 10);
     if (!Number.isInteger(tokenId) || tokenId <= 0) {
-      return jsonResponse({ error: 'Tracked token id is invalid' }, 400);
+      return jsonResponse({ error: 'Tracked pair id is invalid' }, 400);
     }
 
     const token = await dbDeleteTradableToken(env.TRADINGBOT_DB, tokenId);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-    const clearedActiveContractAddress = settings.contractAddress === token.contractAddress;
+    const activeBaseTokenAddress = settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress;
+    const activeQuoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || SOLANA_USDC_MINT;
+    const clearedActiveContractAddress =
+      activeBaseTokenAddress === token.baseTokenAddress &&
+      activeQuoteTokenAddress === token.quoteTokenAddress;
     if (clearedActiveContractAddress) {
-      await dbSaveActiveContractAddress(env.TRADINGBOT_DB, user.id, '');
+      await dbSaveActiveContractAddress(env.TRADINGBOT_DB, user.id, '', '');
     }
 
     await dbAddAuditLog(
       env.TRADINGBOT_DB,
       user.id,
       'token.deleted',
-      token.contractAddress,
+      token.baseTokenAddress,
       clearedActiveContractAddress
-        ? `Removed tracked token on ${token.network} and cleared the active token selection.`
-        : `Removed tracked token on ${token.network}.`,
+        ? `Removed tracked pair on ${token.network} and cleared the active pair selection.`
+        : `Removed tracked pair on ${token.network}.`,
     );
 
     return jsonResponse({

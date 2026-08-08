@@ -118,16 +118,19 @@ export async function handleStateRoutes(
     let marketRefreshStatus: MarketRefreshStatusRecord | null = null;
     const outsideTokenHolders = [];
     let tokenId: number | null = null;
-    if (settings.contractAddress.trim()) {
+    const activeBaseTokenAddress = settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+    const activeQuoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || null;
+    if (activeBaseTokenAddress) {
       try {
         marketRefreshStatus = await dbGetMarketRefreshState(
           env.TRADINGBOT_DB,
           user.id,
-          settings.contractAddress,
+          activeBaseTokenAddress,
         );
         tokenId = await dbResolveTradableTokenId(
           env.TRADINGBOT_DB,
-          settings.contractAddress,
+          activeBaseTokenAddress,
+          activeQuoteTokenAddress ?? undefined,
         );
         if (tokenId) {
           marketSnapshot = await dbGetLatestTokenMarketSnapshot(
@@ -137,7 +140,7 @@ export async function handleStateRoutes(
         }
       } catch (err: unknown) {
         console.warn(
-          `Failed to load token market snapshot for ${settings.contractAddress}:`,
+          `Failed to load token market snapshot for ${activeBaseTokenAddress}:`,
           err,
         );
       }
@@ -181,7 +184,7 @@ export async function handleStateRoutes(
         }
       } catch (err: unknown) {
         console.warn(
-          `Failed to load token holder aggregate for ${settings.contractAddress}:`,
+          `Failed to load token holder aggregate for ${activeBaseTokenAddress}:`,
           err,
         );
       }
@@ -194,11 +197,11 @@ export async function handleStateRoutes(
     strategyVersions = dedupedStrategyDisplay.versions;
     activeStrategyVersion = dedupedStrategyDisplay.activeVersion;
 
-    const profitUsdc = settings.contractAddress.trim()
+    const profitUsdc = activeBaseTokenAddress
       ? await dbComputeManagedProfitUsdc(
           env.TRADINGBOT_DB,
           user.id,
-          settings.contractAddress,
+          activeBaseTokenAddress,
           marketSnapshot?.priceUsd ?? null,
         )
       : 0;
@@ -251,7 +254,7 @@ export async function handleStateRoutes(
   if (method === 'GET' && pathname === '/api/token-holders') {
     const user = await requireUser(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-    const normalizedContractAddress = settings.contractAddress.trim();
+    const normalizedContractAddress = settings.baseTokenAddress.trim();
     if (!normalizedContractAddress) {
       return jsonResponse({ items: [], page: 1, pageSize: 20, totalItems: 0 });
     }

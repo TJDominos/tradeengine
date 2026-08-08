@@ -200,7 +200,7 @@ export default function TransactionLogsCard({
                   <td className="px-4 py-1.5 text-xs text-slate-400">{formatDate(log.createdAt)}</td>
                   <td className="px-4 py-1.5">
                     <div className="text-xs font-semibold text-slate-200">
-                      {log.tokenSymbol ?? (log.kind === 'webhook' ? 'Tracked Activity' : 'Tracked Token')}
+                      {log.tokenSymbol ?? (log.kind === 'webhook' ? 'Tracked Activity' : 'Tracked Pair')}
                     </div>
                     <div className="font-mono text-[11px] text-slate-500">
                       {log.tokenContractAddress ? compactAddress(log.tokenContractAddress) : 'Unknown'}

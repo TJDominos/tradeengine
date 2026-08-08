@@ -144,7 +144,18 @@ async function runManualMarketRefreshWorkflow(
     const strategyResult = await runAndPersistStrategyEvaluation(
       env.TRADINGBOT_DB,
       user.id,
-      settings,
+      {
+        baseTokenAddress: settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress,
+        quoteTokenAddress: settings.activeQuoteTokenAddress?.trim() || '',
+        volatilityTarget: settings.volatilityTarget,
+        pullbackTarget: settings.pullbackTarget,
+        volumeTarget: settings.volumeTarget,
+        netBuyinTarget: settings.netBuyinTarget,
+        timeRangeTarget: settings.timeRangeTarget,
+        maxTransactions: settings.maxTransactions,
+        maxSlippage: settings.maxSlippage,
+        strategyNotes: settings.strategyNotes,
+      },
       buildManualRefreshStrategyTrigger({
         contractAddress,
         externalId: `manual-refresh:${user.id}:${contractAddress}:${nowMs()}`,
@@ -212,7 +223,7 @@ export async function handleMarketSnapshotRoutes(
   if (method === 'GET' && pathname === '/api/market-snapshots') {
     const user = await requireAdmin(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-    const contractAddress = settings.contractAddress.trim();
+    const contractAddress = settings.baseTokenAddress.trim();
 
     if (!contractAddress) {
       return jsonResponse(
@@ -274,7 +285,7 @@ export async function handleMarketSnapshotRoutes(
   if (method === 'POST' && pathname === '/api/market-snapshot/refresh') {
     const user = await requireAdmin(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-    const contractAddress = settings.contractAddress.trim();
+    const contractAddress = settings.baseTokenAddress.trim();
     if (!contractAddress) {
       return jsonResponse(
         { error: 'Set an active trading token before forcing a live market refresh' },
@@ -384,7 +395,7 @@ export async function handleMarketSnapshotRoutes(
   if (method === 'POST' && pathname === '/api/market-snapshot/refresh/cancel') {
     const user = await requireAdmin(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
-    const contractAddress = settings.contractAddress.trim();
+    const contractAddress = settings.baseTokenAddress.trim();
     if (!contractAddress) {
       return jsonResponse({ error: 'No active token configured for refresh cancellation' }, 400);
     }

@@ -198,7 +198,8 @@ export function buildStrategyRecordConfigFromVersion(
     strategyVersionNo: version.versionNo,
     strategyType: version.strategyType,
     document,
-    contractAddress: document.parameters.contractAddress,
+    baseTokenAddress: document.parameters.baseTokenAddress,
+    quoteTokenAddress: document.parameters.quoteTokenAddress,
     macroObjective: document.execution.macroObjective,
     tactics: {
       ...document.execution.tactics,
@@ -469,7 +470,7 @@ function mapTokenMarketSnapshotToStrategySnapshot(
     return null;
   }
   return {
-    contractAddress: snapshot.contractAddress,
+    contractAddress: snapshot.baseTokenAddress,
     priceUsd: snapshot.priceUsd,
     liquidityUsd: snapshot.liquidityUsd,
     fdv: snapshot.fdv,
@@ -731,7 +732,7 @@ export function mapStrategyDocumentToSettingsUpdate(
   document: StrategyVersionDocument,
 ): SettingsUpdateRequest {
   return {
-    contractAddress: document.parameters.contractAddress,
+    baseTokenAddress: document.parameters.baseTokenAddress,
     volatilityTarget: document.targets.volatilityPctMin,
     pullbackTarget: document.targets.pullbackPctMax,
     volumeTarget: document.targets.volumeUsdMin,

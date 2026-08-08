@@ -39,7 +39,7 @@ export type EngineState = StrategyLifecycleState;
 
 export interface StrategyConfig {
   macroObjective: MacroObjective;
-  contractAddress: string;
+  baseTokenAddress: string;
   tactics: Partial<StrategyExecutionTactics>;
   baseOrderCount?: number;
   baseTotalVolumeUsd?: number;
@@ -133,7 +133,7 @@ function buildSchedule(
 export async function assignAccountsToExecutionPlan(
   plan: StrategyExecutionPlan,
   input: {
-    contractAddress?: string;
+    baseTokenAddress?: string;
     allocateAccount: (
       input: StrategyExecutionAccountAllocationInput,
     ) => Promise<StrategyAllocatedAccount | null>;
@@ -155,7 +155,7 @@ export async function assignAccountsToExecutionPlan(
         action: plan.side === 'buy' ? 'BUY' : 'SELL',
         accountId: allocatedAccount?.accountId ?? null,
         walletAddress: allocatedAccount?.walletAddress ?? null,
-        contractAddress: input.contractAddress ?? null,
+        baseTokenAddress: input.baseTokenAddress ?? null,
         requestedAmount: slice.targetVolume,
         scheduledAt: slice.scheduledAt,
       },
@@ -214,7 +214,7 @@ export function buildRandomizedTwapPlan(
         action: input.side === 'buy' ? 'BUY' : 'SELL',
         accountId: null,
         walletAddress: null,
-        contractAddress: input.contractAddress ?? null,
+        baseTokenAddress: input.baseTokenAddress ?? null,
         requestedAmount: targetVolume,
         scheduledAt,
       },
@@ -308,7 +308,7 @@ export class StrategyEngine {
     this.currentState = buildInitialStateForObjective(this.macroObjective);
     this.strategyContext = {
       macroObjective: this.macroObjective,
-      contractAddress: this.config.contractAddress,
+      baseTokenAddress: this.config.baseTokenAddress,
       tactics: this.executionConfig.tactics,
       queue: this.queue,
       now: this.now,
@@ -338,8 +338,8 @@ export class StrategyEngine {
     void this.activeStrategy.onInit();
   }
 
-  public get contractAddress(): string {
-    return this.config.contractAddress;
+  public get baseTokenAddress(): string {
+    return this.config.baseTokenAddress;
   }
 
   public getExecutionConfig(): StrategyExecutionConfig {
@@ -404,11 +404,11 @@ export class StrategyEngine {
       durationMs: Math.max(0, Math.round(input.durationMs)),
       startTime: this.now(),
       random: this.random,
-      contractAddress: this.config.contractAddress,
+      baseTokenAddress: this.config.baseTokenAddress,
     });
     const allocatedPlan = this.config.allocateAccount
       ? await assignAccountsToExecutionPlan(plan, {
-          contractAddress: this.config.contractAddress,
+          baseTokenAddress: this.config.baseTokenAddress,
           allocateAccount: this.config.allocateAccount,
         })
       : plan;
@@ -460,7 +460,7 @@ export class StrategyEngine {
       action: input.action,
       accountId: account.accountId,
       walletAddress: account.walletAddress,
-      contractAddress: this.config.contractAddress,
+      baseTokenAddress: this.config.baseTokenAddress,
       requestedAmount,
       scheduledAt,
       delayMs: input.delayMs,
@@ -534,11 +534,11 @@ export function evaluateStrategy(
   }
 
   const contractMatched =
-    !strategy.parameters.contractAddress ||
-    strategy.parameters.contractAddress === trigger.contractAddress;
+    !strategy.parameters.baseTokenAddress ||
+    strategy.parameters.baseTokenAddress === trigger.contractAddress;
   if (!contractMatched) {
     reasons.push(
-      `Trigger contract ${trigger.contractAddress} does not match active strategy contract ${strategy.parameters.contractAddress}`,
+      `Trigger contract ${trigger.contractAddress} does not match active strategy base token ${strategy.parameters.baseTokenAddress}`,
     );
   }
 

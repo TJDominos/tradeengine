@@ -39,7 +39,9 @@ export const TOKEN_MARKET_CACHE_TTL_MS = 30_000;
 export const BASE58_ALPHABET =
   '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 export interface SettingsState {
-  contractAddress: string;
+  baseTokenAddress: string;
+  activeBaseTokenAddress?: string;
+  activeQuoteTokenAddress?: string;
   volatilityTarget: number;
   pullbackTarget: number;
   volumeTarget: number;
@@ -51,7 +53,7 @@ export interface SettingsState {
   managedKeyCount: number;
 }
 export interface SettingsUpdateRequest {
-  contractAddress: string;
+  baseTokenAddress: string;
   volatilityTarget: number;
   pullbackTarget: number;
   volumeTarget: number;
@@ -62,13 +64,16 @@ export interface SettingsUpdateRequest {
   strategyNotes: string;
 }
 export interface ActiveTokenUpdateRequest {
-  contractAddress: string;
+  baseTokenAddress: string;
+  quoteTokenAddress?: string;
 }
 export interface AccountRecord {
   id: number;
   label: string;
   address: string;
   type: string;
+  capabilityBaseMint?: string | null;
+  capabilityQuoteMint?: string | null;
   createdAt: number;
 }
 export interface AuditLog {
@@ -82,10 +87,14 @@ export interface AuditLog {
 export interface TradableToken {
   id: number;
   network: string;
-  contractAddress: string;
+  baseTokenAddress: string;
+  quoteTokenAddress: string;
   symbol: string | null;
   name: string | null;
   decimals: number | null;
+  quoteTokenSymbol?: string | null;
+  quoteTokenName?: string | null;
+  quoteTokenDecimals?: number | null;
   isActive: boolean;
 }
 export interface TradeLogRecord {
@@ -99,6 +108,7 @@ export interface TradeLogRecord {
   executedAmount: number | null;
   executedPrice: number | null;
   txSignature: string | null;
+  executionTraceJson?: string | null;
   status: 'PENDING' | 'SUCCESS' | 'FAILED';
   errorMessage: string | null;
   createdAt: number;
@@ -220,7 +230,7 @@ export interface RpcEndpoint {
 
 export interface TokenMarketSnapshot {
   network: string;
-  contractAddress: string;
+  baseTokenAddress: string;
   tokenName: string | null;
   tokenSymbol: string | null;
   priceUsd: number | null;
@@ -282,7 +292,7 @@ export interface DerivedChainSignal {
 export interface HistoricalSetupRecord {
   id: number;
   tokenSymbol: string | null;
-  contractAddress: string | null;
+  baseTokenAddress: string | null;
   timeRangeTarget: string;
   maxTransactions: number;
   maxSlippage: number;
@@ -320,7 +330,8 @@ export interface ManagedWalletImportRequest {
 
 export interface TradableTokenCreateRequest {
   network: string;
-  contractAddress: string;
+  baseTokenAddress: string;
+  quoteTokenAddress: string;
 }
 
 export interface RpcEndpointCreateRequest {

@@ -105,7 +105,7 @@ export default function App() {
   const [bootstrap, setBootstrap] = React.useState({ username: '', password: '' });
 
   const [settings, setSettings] = React.useState<SettingsState>({
-    contractAddress: '',
+    baseTokenAddress: '',
     volatilityTarget: 4.5,
     pullbackTarget: 2,
     volumeTarget: 0,
@@ -119,6 +119,7 @@ export default function App() {
   const [tradableTokenForm, setTradableTokenForm] = React.useState({
     network: 'solana',
     contractAddress: '',
+    quoteTokenAddress: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
   });
   const [rpcEndpointForm, setRpcEndpointForm] = React.useState({ url: '' });
   const [strategyDraft, setStrategyDraft] = React.useState<StrategyVersionDocument | null>(null);
@@ -225,7 +226,7 @@ export default function App() {
   }, [syncSettingsFromServer, syncStrategyDraftFromServer]);
 
   const loadOutsideHolderPage = React.useCallback(async () => {
-    if (!auth?.authenticated || !settings.contractAddress.trim()) {
+    if (!auth?.authenticated || !settings.baseTokenAddress.trim()) {
       setOutsideHolderPage({
         items: [],
         page: 1,
@@ -259,7 +260,7 @@ export default function App() {
     } finally {
       setOutsideHolderPageLoading(false);
     }
-  }, [accountSearchTerm, auth?.authenticated, outsideHolderSort, outsiderPage, settings.contractAddress]);
+  }, [accountSearchTerm, auth?.authenticated, outsideHolderSort, outsiderPage, settings.baseTokenAddress]);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -457,7 +458,7 @@ export default function App() {
     });
 
   const loadMarketSnapshotHistory = React.useCallback(async () => {
-    if (!auth?.authenticated || !settings.contractAddress.trim()) {
+    if (!auth?.authenticated || !settings.baseTokenAddress.trim()) {
       return;
     }
     if (!dateRange.from || !dateRange.to) {
@@ -498,11 +499,11 @@ export default function App() {
     } finally {
       setLoadingMarketSnapshots(false);
     }
-  }, [auth?.authenticated, dateRange.from, dateRange.to, settings.contractAddress]);
+  }, [auth?.authenticated, dateRange.from, dateRange.to, settings.baseTokenAddress]);
 
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
-      if (auth?.authenticated && settings.contractAddress.trim()) {
+      if (auth?.authenticated && settings.baseTokenAddress.trim()) {
         setNotice('Refresh started. Fetching market data and syncing token holders...');
         const refreshQuery = hasDateRange
           ? `?startTime=${toRangeStartMs(dateRange.from)}&endTime=${toRangeEndMs(dateRange.to)}`
@@ -539,14 +540,14 @@ export default function App() {
 
   useEffect(() => {
     if (!auth?.authenticated || activeTab !== 'dashboard') return;
-    if (!settings.contractAddress.trim() || !hasDateRange) return;
+    if (!settings.baseTokenAddress.trim() || !hasDateRange) return;
     void loadMarketSnapshotHistory();
   }, [
     activeTab,
     auth?.authenticated,
     hasDateRange,
     loadMarketSnapshotHistory,
-    settings.contractAddress,
+    settings.baseTokenAddress,
   ]);
 
   useEffect(() => {
@@ -669,14 +670,26 @@ export default function App() {
       await refresh();
     });
 
-  const handleUseToken = (contractAddress: string) =>
+  const handleUseToken = (contractAddress: string, quoteTokenAddress: string) =>
     submitWithFeedback('use-token', async () => {
-      const result = await api<{ contractAddress: string; marketSnapshot: TokenMarketSnapshot | null }>(
+      const result = await api<{
+        contractAddress: string;
+        quoteTokenAddress: string;
+        marketSnapshot: TokenMarketSnapshot | null;
+      }>(
         '/api/settings/active-token',
-        { method: 'POST', body: JSON.stringify({ contractAddress }) },
+        {
+          method: 'POST',
+          body: JSON.stringify({ contractAddress, quoteTokenAddress }),
+        },
       );
       const activated = result.contractAddress || contractAddress;
-      setSettings((current) => ({ ...current, contractAddress: activated }));
+      setSettings((current) => ({
+        ...current,
+        contractAddress: activated,
+        activeBaseTokenAddress: activated,
+        activeQuoteTokenAddress: result.quoteTokenAddress || quoteTokenAddress,
+      }));
       if (result.marketSnapshot) {
         setEngineState((current) =>
           current ? { ...current, marketSnapshot: result.marketSnapshot } : current,
@@ -684,8 +697,8 @@ export default function App() {
       }
       setNotice(
         result.marketSnapshot
-          ? 'Token activated with stored market data.'
-          : 'Token activated. Market data refresh now runs only on manual refresh or webhook events.',
+          ? 'Trading pair activated with stored market data.'
+          : 'Trading pair activated. Market data refresh now runs only on manual refresh or webhook events.',
       );
       await refresh();
     });
@@ -723,7 +736,7 @@ export default function App() {
         method: 'DELETE',
       });
 
-      const clearedDraftTarget = strategyDraft?.parameters.contractAddress === response.token.contractAddress;
+      const clearedDraftTarget = strategyDraft?.parameters.contractAddress === response.token.baseTokenAddress;
       if (clearedDraftTarget) {
         strategyDraftDirtyRef.current = true;
         setStrategyDraft((current) =>
@@ -743,6 +756,8 @@ export default function App() {
         setSettings((current) => ({
           ...current,
           contractAddress: '',
+          activeBaseTokenAddress: '',
+          activeQuoteTokenAddress: '',
         }));
       }
 
@@ -759,18 +774,18 @@ export default function App() {
       setNotice(
         response.clearedActiveContractAddress
           ? clearedDraftTarget
-            ? 'Tracked token removed. Active token and draft target were cleared.'
-            : 'Tracked token removed and active token was cleared.'
+            ? 'Tracked pair removed. Active pair and draft target were cleared.'
+            : 'Tracked pair removed and active pair was cleared.'
           : clearedDraftTarget
-            ? 'Tracked token removed and draft target was cleared.'
-            : 'Tracked token removed.',
+            ? 'Tracked pair removed and draft target was cleared.'
+            : 'Tracked pair removed.',
       );
       await refresh();
     });
 
   const handleAddTrackedToken = () =>
     submitWithFeedback('token', async () => {
-      const hadActiveContract = settings.contractAddress.trim().length > 0;
+      const hadActiveContract = settings.baseTokenAddress.trim().length > 0;
       const response = await api<{
         token: TradableToken;
         marketSnapshot: TokenMarketSnapshot | null;
@@ -779,7 +794,8 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify({
           network: tradableTokenForm.network,
-          contractAddress: tradableTokenForm.contractAddress,
+          baseTokenAddress: tradableTokenForm.contractAddress,
+          quoteTokenAddress: tradableTokenForm.quoteTokenAddress,
         }),
       });
 
@@ -795,16 +811,25 @@ export default function App() {
       let activeMarketSnapshot: TokenMarketSnapshot | null = null;
 
       if (!hadActiveContract) {
-        const activeResult = await api<{ contractAddress: string; marketSnapshot: TokenMarketSnapshot | null }>(
+        const activeResult = await api<{
+          contractAddress: string;
+          quoteTokenAddress: string;
+          marketSnapshot: TokenMarketSnapshot | null;
+        }>(
           '/api/settings/active-token',
           {
             method: 'POST',
-            body: JSON.stringify({ contractAddress: response.token.contractAddress }),
+            body: JSON.stringify({
+              baseTokenAddress: response.token.baseTokenAddress,
+              quoteTokenAddress: response.token.quoteTokenAddress,
+            }),
           },
         );
         setSettings((current) => ({
           ...current,
-          contractAddress: response.token.contractAddress,
+          baseTokenAddress: response.token.baseTokenAddress,
+          activeBaseTokenAddress: response.token.baseTokenAddress,
+          activeQuoteTokenAddress: response.token.quoteTokenAddress,
         }));
         activeMarketSnapshot = activeResult.marketSnapshot ?? response.marketSnapshot;
       }
@@ -815,7 +840,10 @@ export default function App() {
         );
       }
 
-      setTradableTokenForm((current) => ({ ...current, contractAddress: '' }));
+      setTradableTokenForm((current) => ({
+        ...current,
+        contractAddress: '',
+      }));
       const webhookNotice = response.webhookCheck.ok
         ? response.webhookCheck.latestSignature
           ? 'Webhook RPC check passed.'
@@ -823,10 +851,10 @@ export default function App() {
         : `Webhook RPC check failed: ${response.webhookCheck.errorMessage ?? 'unknown RPC error'}`;
       setNotice(
         hadActiveContract
-          ? `Tracked token added. ${webhookNotice}`
+          ? `Tracked pair added. ${webhookNotice}`
           : activeMarketSnapshot
-            ? `Token saved as active with stored market data. ${webhookNotice}`
-            : `Token saved as active. Market data refresh now runs only on manual refresh or webhook events. ${webhookNotice}`,
+            ? `Pair saved as active with stored market data. ${webhookNotice}`
+            : `Pair saved as active. Market data refresh now runs only on manual refresh or webhook events. ${webhookNotice}`,
       );
       await refresh();
     });
@@ -1196,9 +1224,9 @@ export default function App() {
     activityLogPage * ITEMS_PER_PAGE,
   );
 
-  const activeTokenContractAddress = settings.contractAddress.trim();
+  const activeTokenContractAddress = settings.baseTokenAddress.trim();
   const activeTrackedToken = engineState.tradableTokens.find(
-    (token) => token.contractAddress === activeTokenContractAddress,
+    (token) => token.baseTokenAddress === activeTokenContractAddress,
   );
   const activeTokenSymbol =
     activeTrackedToken?.symbol ?? dashboardSnapshot?.tokenSymbol ?? engineState.marketSnapshot?.tokenSymbol ?? 'WLT';
@@ -1296,7 +1324,7 @@ export default function App() {
       }}
       hasDateRange={hasDateRange}
       marketSnapshotSubtitle={marketSnapshotSubtitle}
-      settingsContractAddress={settings.contractAddress}
+      settingsContractAddress={settings.baseTokenAddress}
       activeTokenSymbol={activeTokenSymbol}
       activeTokenName={activeTokenName}
       activeTokenContractAddress={activeTokenContractAddress}
@@ -1365,7 +1393,7 @@ export default function App() {
   const renderSetup = () => (
     <TradingSetupPage
       engineState={engineState}
-      activeContractAddress={settings.contractAddress}
+      activeContractAddress={settings.baseTokenAddress}
       strategyDraft={strategyDraft}
       tradableTokenForm={tradableTokenForm}
       setTradableTokenForm={setTradableTokenForm}
@@ -1391,7 +1419,7 @@ export default function App() {
   return (
     <div className="flex min-h-screen flex-col bg-slate-950 p-4 font-sans text-slate-200 md:p-6">
       <AppHeader
-        contractAddress={settings.contractAddress || CONTRACT_ADDRESS}
+        contractAddress={settings.baseTokenAddress || CONTRACT_ADDRESS}
         lastUpdated={lastUpdated}
         isTradingActive={isTradingActive}
         isRefreshing={isRefreshPending}

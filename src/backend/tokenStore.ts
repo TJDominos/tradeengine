@@ -15,6 +15,7 @@ import type {
   TradableToken,
   TradableTokenCreateRequest,
 } from './workerShared';
+import { SOLANA_USDC_MINT } from './workerShared';
 
 function sortRpcEndpointsByPreference(endpoints: RpcEndpoint[]): RpcEndpoint[] {
   return [...endpoints].sort((left, right) => {
@@ -152,24 +153,46 @@ export async function dbDeleteRpcEndpoint(
 export async function dbListTradableTokens(db: D1Database): Promise<TradableToken[]> {
   const rows = await db
     .prepare(
-      'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens WHERE is_active = 1 ORDER BY id ASC',
+      `SELECT
+         id,
+         network,
+        base_token_address,
+         quote_token_address,
+         symbol,
+         name,
+         decimals,
+         quote_token_symbol,
+         quote_token_name,
+         quote_token_decimals,
+         is_active
+       FROM tradable_tokens
+       WHERE is_active = 1
+       ORDER BY id ASC`,
     )
     .all<{
       id: number;
       network: string;
-      contract_address: string;
+      base_token_address: string;
+      quote_token_address: string;
       symbol: string | null;
       name: string | null;
       decimals: number | null;
+      quote_token_symbol: string | null;
+      quote_token_name: string | null;
+      quote_token_decimals: number | null;
       is_active: number;
     }>();
   return rows.results.map((row) => ({
     id: row.id,
     network: row.network,
-    contractAddress: row.contract_address,
+    baseTokenAddress: row.base_token_address,
+    quoteTokenAddress: row.quote_token_address,
     symbol: row.symbol,
     name: row.name,
     decimals: row.decimals,
+    quoteTokenSymbol: row.quote_token_symbol,
+    quoteTokenName: row.quote_token_name,
+    quoteTokenDecimals: row.quote_token_decimals,
     isActive: row.is_active === 1,
   }));
 }
@@ -183,13 +206,20 @@ export async function dbCreateTradableToken(
   if (network !== 'solana') {
     throw new ApiError(400, 'Only the solana network is supported right now');
   }
-  const contractAddress = normalizePubkey(input.contractAddress);
+  const contractAddress = normalizePubkey(input.baseTokenAddress);
+  const quoteTokenAddress = normalizePubkey(input.quoteTokenAddress);
+  if (contractAddress === quoteTokenAddress) {
+    throw new ApiError(400, 'Base and quote token addresses must be different');
+  }
   const createdAt = nowTs();
 
   // Enrich with Jupiter token metadata (name, symbol, decimals)
   let jupiterName: string | null = null;
   let jupiterSymbol: string | null = null;
   let resolvedDecimals = decimals;
+  let quoteTokenName: string | null = null;
+  let quoteTokenSymbol: string | null = null;
+  let quoteTokenDecimals: number | null = null;
   try {
     const jupiterMeta = await fetchJupiterTokenMetadata(contractAddress);
     if (jupiterMeta) {
@@ -203,47 +233,87 @@ export async function dbCreateTradableToken(
     // non-fatal: token may not be in Jupiter's verified list yet
   }
 
+  try {
+    const quoteTokenMeta = await fetchJupiterTokenMetadata(quoteTokenAddress);
+    if (quoteTokenMeta) {
+      quoteTokenName = quoteTokenMeta.name;
+      quoteTokenSymbol = quoteTokenMeta.symbol;
+      quoteTokenDecimals = quoteTokenMeta.decimals;
+    }
+  } catch {
+    // non-fatal
+  }
+
   await db
     .prepare(
       `INSERT INTO tradable_tokens (
          network,
-         contract_address,
+         base_token_address,
+         quote_token_address,
          symbol,
          name,
          decimals,
+         quote_token_symbol,
+         quote_token_name,
+         quote_token_decimals,
          is_active,
          created_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
-       ON CONFLICT(network, contract_address) DO UPDATE SET
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)
+      ON CONFLICT(network, base_token_address, quote_token_address) DO UPDATE SET
          is_active = 1,
-         symbol = COALESCE(?3, tradable_tokens.symbol),
-         name = COALESCE(?4, tradable_tokens.name),
-         decimals = COALESCE(?5, tradable_tokens.decimals)`,
+         symbol = COALESCE(?4, tradable_tokens.symbol),
+         name = COALESCE(?5, tradable_tokens.name),
+         decimals = COALESCE(?6, tradable_tokens.decimals),
+         quote_token_symbol = COALESCE(?7, tradable_tokens.quote_token_symbol),
+         quote_token_name = COALESCE(?8, tradable_tokens.quote_token_name),
+         quote_token_decimals = COALESCE(?9, tradable_tokens.quote_token_decimals)`,
     )
-    .bind(network, contractAddress, jupiterSymbol, jupiterName, resolvedDecimals, createdAt)
+    .bind(
+      network,
+      contractAddress,
+      quoteTokenAddress,
+      jupiterSymbol,
+      jupiterName,
+      resolvedDecimals,
+      quoteTokenSymbol,
+      quoteTokenName,
+      quoteTokenDecimals,
+      createdAt,
+    )
     .run();
   const row = await db
     .prepare(
-      'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2',
+      `SELECT id, network, base_token_address, quote_token_address, symbol, name, decimals,
+              quote_token_symbol, quote_token_name, quote_token_decimals, is_active
+       FROM tradable_tokens
+       WHERE network = ?1 AND base_token_address = ?2 AND quote_token_address = ?3`,
     )
-    .bind(network, contractAddress)
+    .bind(network, contractAddress, quoteTokenAddress)
     .first<{
       id: number;
       network: string;
-      contract_address: string;
+      base_token_address: string;
+      quote_token_address: string;
       symbol: string | null;
       name: string | null;
       decimals: number | null;
+      quote_token_symbol: string | null;
+      quote_token_name: string | null;
+      quote_token_decimals: number | null;
       is_active: number;
     }>();
   if (!row) throw new ApiError(500, 'Failed to load the saved token');
   return {
     id: row.id,
     network: row.network,
-    contractAddress: row.contract_address,
+    baseTokenAddress: row.base_token_address,
+    quoteTokenAddress: row.quote_token_address,
     symbol: row.symbol,
     name: row.name,
     decimals: row.decimals,
+    quoteTokenSymbol: row.quote_token_symbol,
+    quoteTokenName: row.quote_token_name,
+    quoteTokenDecimals: row.quote_token_decimals,
     isActive: row.is_active === 1,
   };
 }
@@ -254,20 +324,26 @@ export async function dbDeleteTradableToken(
 ): Promise<TradableToken> {
   const row = await db
     .prepare(
-      'SELECT id, network, contract_address, symbol, name, decimals, is_active FROM tradable_tokens WHERE id = ?1 LIMIT 1',
+      `SELECT id, network, base_token_address, quote_token_address, symbol, name, decimals,
+              quote_token_symbol, quote_token_name, quote_token_decimals, is_active
+       FROM tradable_tokens WHERE id = ?1 LIMIT 1`,
     )
     .bind(tokenId)
     .first<{
       id: number;
       network: string;
-      contract_address: string;
+      base_token_address: string;
+      quote_token_address: string;
       symbol: string | null;
       name: string | null;
       decimals: number | null;
+      quote_token_symbol: string | null;
+      quote_token_name: string | null;
+      quote_token_decimals: number | null;
       is_active: number;
     }>();
   if (!row || row.is_active === 0) {
-    throw new ApiError(404, 'Tracked token not found');
+    throw new ApiError(404, 'Tracked pair not found');
   }
 
   await db
@@ -282,10 +358,14 @@ export async function dbDeleteTradableToken(
   return {
     id: row.id,
     network: row.network,
-    contractAddress: row.contract_address,
+    baseTokenAddress: row.base_token_address,
+    quoteTokenAddress: row.quote_token_address,
     symbol: row.symbol,
     name: row.name,
     decimals: row.decimals,
+    quoteTokenSymbol: row.quote_token_symbol,
+    quoteTokenName: row.quote_token_name,
+    quoteTokenDecimals: row.quote_token_decimals,
     isActive: false,
   };
 }
@@ -343,14 +423,80 @@ export async function dbUpdateTradableTokenMetadata(
 export async function dbResolveTradableTokenId(
   db: D1Database,
   contractAddress: string,
+  quoteTokenAddress?: string,
 ): Promise<number | null> {
+  const normalizedContractAddress = normalizePubkey(contractAddress);
+  const normalizedQuoteTokenAddress = quoteTokenAddress?.trim()
+    ? normalizePubkey(quoteTokenAddress)
+    : null;
+  const row = normalizedQuoteTokenAddress
+    ? await db
+        .prepare(
+          `SELECT id
+           FROM tradable_tokens
+           WHERE network = ?1 AND base_token_address = ?2 AND quote_token_address = ?3
+           LIMIT 1`,
+        )
+        .bind('solana', normalizedContractAddress, normalizedQuoteTokenAddress)
+        .first<{ id: number }>()
+    : await db
+        .prepare(
+          `SELECT id
+           FROM tradable_tokens
+           WHERE network = ?1 AND base_token_address = ?2
+           ORDER BY CASE WHEN quote_token_address = ?3 THEN 0 ELSE 1 END, id ASC
+           LIMIT 1`,
+        )
+        .bind('solana', normalizedContractAddress, SOLANA_USDC_MINT)
+        .first<{ id: number }>();
+  return row?.id ?? null;
+}
+
+export async function dbFindTradableTokenByPair(
+  db: D1Database,
+  contractAddress: string,
+  quoteTokenAddress: string,
+): Promise<TradableToken | null> {
+  const normalizedContractAddress = normalizePubkey(contractAddress);
+  const normalizedQuoteTokenAddress = normalizePubkey(quoteTokenAddress);
   const row = await db
     .prepare(
-      'SELECT id FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2 LIMIT 1',
+      `SELECT id, network, base_token_address, quote_token_address, symbol, name, decimals,
+              quote_token_symbol, quote_token_name, quote_token_decimals, is_active
+       FROM tradable_tokens
+       WHERE network = ?1 AND base_token_address = ?2 AND quote_token_address = ?3 AND is_active = 1
+       LIMIT 1`,
     )
-    .bind('solana', normalizePubkey(contractAddress))
-    .first<{ id: number }>();
-  return row?.id ?? null;
+    .bind('solana', normalizedContractAddress, normalizedQuoteTokenAddress)
+    .first<{
+      id: number;
+      network: string;
+      base_token_address: string;
+      quote_token_address: string;
+      symbol: string | null;
+      name: string | null;
+      decimals: number | null;
+      quote_token_symbol: string | null;
+      quote_token_name: string | null;
+      quote_token_decimals: number | null;
+      is_active: number;
+    }>();
+  if (!row) {
+    return null;
+  }
+  return {
+    id: row.id,
+    network: row.network,
+    baseTokenAddress: row.base_token_address,
+    quoteTokenAddress: row.quote_token_address,
+    symbol: row.symbol,
+    name: row.name,
+    decimals: row.decimals,
+    quoteTokenSymbol: row.quote_token_symbol,
+    quoteTokenName: row.quote_token_name,
+    quoteTokenDecimals: row.quote_token_decimals,
+    isActive: row.is_active === 1,
+  };
 }
 
 export async function dbGetLatestTokenMarketSnapshot(
@@ -361,7 +507,7 @@ export async function dbGetLatestTokenMarketSnapshot(
     .prepare(
       `SELECT
          network,
-         contract_address,
+         base_token_address,
          token_name,
          token_symbol,
          price_usd,
@@ -385,7 +531,7 @@ export async function dbGetLatestTokenMarketSnapshot(
     .bind(tokenId)
     .first<{
       network: string;
-      contract_address: string;
+      base_token_address: string;
       token_name: string | null;
       token_symbol: string | null;
       price_usd: number | null;
@@ -404,7 +550,7 @@ export async function dbGetLatestTokenMarketSnapshot(
   }
   return {
     network: row.network,
-    contractAddress: row.contract_address,
+    baseTokenAddress: row.base_token_address,
     tokenName: row.token_name,
     tokenSymbol: row.token_symbol,
     priceUsd: row.price_usd,
@@ -430,7 +576,7 @@ export async function dbInsertTokenMarketSnapshot(
       `INSERT INTO token_market_snapshots (
         token_id,
         network,
-        contract_address,
+        base_token_address,
         token_name,
         token_symbol,
         price_usd,
@@ -448,7 +594,7 @@ export async function dbInsertTokenMarketSnapshot(
     .bind(
       tokenId,
       snapshot.network,
-      snapshot.contractAddress,
+      snapshot.baseTokenAddress,
       snapshot.tokenName,
       snapshot.tokenSymbol,
       snapshot.priceUsd,
@@ -509,7 +655,7 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
     .bind(tokenId, startTime, endTime, limit)
     .all<{
       network: string;
-      contract_address: string;
+      base_token_address: string;
       token_name: string | null;
       token_symbol: string | null;
       price_usd: number | null;
@@ -526,7 +672,7 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
 
   return rows.results.map((row) => ({
     network: row.network,
-    contractAddress: row.contract_address,
+    baseTokenAddress: row.base_token_address,
     tokenName: row.token_name,
     tokenSymbol: row.token_symbol,
     priceUsd: row.price_usd,

@@ -6,6 +6,7 @@ import {
   STRATEGY_ENGINE_VERSION,
   STRATEGY_SCHEMA_VERSION,
 } from './config';
+import { SOLANA_USDC_MINT } from '../workerShared';
 import type {
   StrategyExecutionConfig,
   StrategyExecutionTactics,
@@ -46,8 +47,14 @@ function readRecord(value: unknown): Record<string, unknown> {
 
 function normalizeParameters(value: unknown): StrategyParameters {
   const raw = readRecord(value);
+  const legacyContractAddress = readString(raw.contractAddress);
+  const baseTokenAddress = readString(raw.baseTokenAddress).trim() || legacyContractAddress;
+  const quoteTokenAddress = readString(raw.quoteTokenAddress).trim() || SOLANA_USDC_MINT;
+  const ammPoolAddress = readString(raw.ammPoolAddress).trim();
   return {
-    contractAddress: readString(raw.contractAddress),
+    baseTokenAddress,
+    quoteTokenAddress,
+    ammPoolAddress,
     timeRangeTarget: readString(raw.timeRangeTarget, '24h'),
     maxTransactions: readNumber(raw.maxTransactions, 100),
     maxSlippageBps: readNumber(raw.maxSlippageBps, 100),

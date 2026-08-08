@@ -135,24 +135,23 @@ async function fetchSwapTransactionBase64(
 
 export async function executeSwap(
   env: Env,
-  side: 'buy' | 'sell',
+  keypair: JupiterSwapSigner,
   amount: string | number | bigint,
-  inputMint: string,
-  outputMint: string,
+  side: 'buy' | 'sell',
+  baseToken: string,
+  quoteToken: string,
   options?: {
     slippageBps?: number;
     commitment?: Commitment;
-    signer: JupiterSwapSigner;
   },
 ): Promise<JupiterSwapExecutionResult> {
-  if (!options?.signer) {
-    throw new ApiError(500, 'A signer is required for Jupiter swap execution');
-  }
-  const signer = decodeSignerKeypair(options.signer.privateKey);
+  const signer = decodeSignerKeypair(keypair.privateKey);
   const rpcUrl = resolveRpcUrl(env);
   const commitment = options?.commitment ?? 'confirmed';
   const slippageBps = Math.max(1, Math.round(options?.slippageBps ?? DEFAULT_JUPITER_SLIPPAGE_BPS));
   const normalizedAmount = normalizeAtomicAmount(amount);
+  const inputMint = side === 'buy' ? quoteToken : baseToken;
+  const outputMint = side === 'buy' ? baseToken : quoteToken;
 
   const quoteResponse = await fetchJupiterSwapQuote(
     inputMint,
@@ -163,7 +162,7 @@ export async function executeSwap(
 
   const swapTransactionBase64 = await fetchSwapTransactionBase64(
     quoteResponse,
-    options.signer.publicKey,
+    keypair.publicKey,
   );
   const transaction = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swapTransactionBase64, 'base64')),

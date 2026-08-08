@@ -16,6 +16,7 @@ import type {
   Env,
   TokenMarketSnapshot,
 } from '../workerShared';
+import { SOLANA_USDC_MINT } from '../workerShared';
 import {
   extractWebhookTransactionDetailsFromPayload,
   isRecord,
@@ -38,7 +39,7 @@ import {
   fetchSolanaWebhookTransactionDetailsFromRpc,
 } from '../services/signalStore';
 import { StrategyAutomationService } from '../services/strategyAutomationService';
-import { runAndPersistStrategyEvaluation } from '../services/strategyStore';
+import { getActiveStrategy, runAndPersistStrategyEvaluation } from '../services/strategyStore';
 import { syncTokenMarketSnapshotForUser } from '../services/tokenMarketService';
 
 const strategyAutomationService = new StrategyAutomationService();
@@ -113,6 +114,7 @@ function parseRustNodeWebhookPayload(body: unknown): ExternalTradeEvent {
     txHash,
     wallet_address: normalizePubkey(walletAddressRaw),
     is_loss_cut: isLossCutValue,
+    payloadJson: JSON.stringify(body),
   };
 }
 
@@ -165,15 +167,26 @@ async function handleRustNodeWebhook(
 async function dbListUserIdsByActiveContractAddress(
   db: D1Database,
   contractAddress: string,
+  quoteTokenAddress?: string,
 ): Promise<number[]> {
+  const normalizedContractAddress = normalizePubkey(contractAddress);
+  const normalizedQuoteTokenAddress =
+    typeof quoteTokenAddress === 'string' && quoteTokenAddress.trim().length > 0
+      ? normalizePubkey(quoteTokenAddress)
+      : null;
   const rows = await db
     .prepare(
-      `SELECT DISTINCT user_id
-       FROM settings
-       WHERE key = ?1 AND value = ?2
-       ORDER BY user_id ASC`,
+      `SELECT DISTINCT s_base.user_id
+       FROM settings s_base
+       LEFT JOIN settings s_quote
+         ON s_quote.user_id = s_base.user_id
+        AND s_quote.key = 'activeQuoteTokenAddress'
+       WHERE s_base.key IN ('activeBaseTokenAddress', 'contractAddress')
+         AND s_base.value = ?1
+         AND (?2 IS NULL OR COALESCE(NULLIF(s_quote.value, ''), ?3) = ?2)
+       ORDER BY s_base.user_id ASC`,
     )
-    .bind('contractAddress', normalizePubkey(contractAddress))
+    .bind(normalizedContractAddress, normalizedQuoteTokenAddress, SOLANA_USDC_MINT)
     .all<{ user_id: number }>();
   return rows.results.map((row) => row.user_id);
 }
@@ -294,6 +307,21 @@ function buildCompactAlchemyActivityPayload(
 ): Record<string, unknown> {
   const rawContract = isRecord(activityValue.rawContract) ? activityValue.rawContract : null;
   const log = isRecord(activityValue.log) ? activityValue.log : null;
+  const tokenTransfers = Array.isArray(activityValue.tokenTransfers)
+    ? activityValue.tokenTransfers.filter((item) => isRecord(item)).map((item) => {
+        const record = item as Record<string, unknown>;
+        return compactDefinedRecord([
+          ['mint', readNonEmptyString(record.mint)],
+          ['tokenAddress', readNonEmptyString(record.tokenAddress)],
+          ['sender', readNonEmptyString(record.sender)],
+          ['receiver', readNonEmptyString(record.receiver)],
+          ['sourceOwner', readNonEmptyString(record.sourceOwner)],
+          ['destinationOwner', readNonEmptyString(record.destinationOwner)],
+          ['fromAddress', readNonEmptyString(record.fromAddress)],
+          ['toAddress', readNonEmptyString(record.toAddress)],
+        ]);
+      })
+    : null;
   return compactDefinedRecord([
     ['hash', readNonEmptyString(activityValue.hash)],
     ['type', readNonEmptyString(activityValue.type)],
@@ -312,6 +340,7 @@ function buildCompactAlchemyActivityPayload(
     ['fee', activityValue.fee],
     ['feeUsd', activityValue.feeUsd],
     ['feeUSD', activityValue.feeUSD],
+    ['tokenTransfers', tokenTransfers],
     [
       'rawContract',
       compactDefinedRecord([
@@ -617,14 +646,25 @@ async function processTokenActivitySignal(
       const strategyResult = await runAndPersistStrategyEvaluation(
         env.TRADINGBOT_DB,
         input.userId,
-        settings,
+        {
+          baseTokenAddress: settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress,
+          quoteTokenAddress: settings.activeQuoteTokenAddress?.trim() || '',
+          volatilityTarget: settings.volatilityTarget,
+          pullbackTarget: settings.pullbackTarget,
+          volumeTarget: settings.volumeTarget,
+          netBuyinTarget: settings.netBuyinTarget,
+          timeRangeTarget: settings.timeRangeTarget,
+          maxTransactions: settings.maxTransactions,
+          maxSlippage: settings.maxSlippage,
+          strategyNotes: settings.strategyNotes,
+        },
         buildWebhookStrategyTrigger({
           eventType: input.eventType,
           externalId: input.externalId,
           contractAddress: normalizedContractAddress,
           walletAddress: input.walletAddress,
           txSignature: input.txSignature,
-          payloadJson: null,
+          payloadJson: input.payload,
         }),
         marketSnapshot,
         {
@@ -632,6 +672,43 @@ async function processTokenActivitySignal(
           origin: 'settings-sync',
         },
       );
+
+      const activeStrategy = await getActiveStrategy(env);
+      if (
+        strategyResult &&
+        activeStrategy &&
+        activeStrategy.config.baseTokenAddress === normalizedContractAddress &&
+        activeStrategy.config.strategyVersionId === strategyResult.version.id
+      ) {
+        const stubId = env.STRATEGY_ENGINE_DO.idFromName(
+          `${input.userId}:${normalizedContractAddress}`,
+        );
+        const stub = env.STRATEGY_ENGINE_DO.get(stubId);
+        const eventType = input.eventType.toLowerCase().includes('sell')
+          ? 'whale_sell'
+          : 'whale_buy';
+        const forwardRequest: StrategyEngineDurableObjectEventRequest = {
+          userId: input.userId,
+          versionId: strategyResult.version.id,
+          strategyDocument: strategyResult.version.document,
+          event: {
+            type: eventType,
+            amount: Math.max(0, payloadDetails.usdcAmount ?? payloadDetails.tokenAmount ?? 0),
+            contractAddress: normalizedContractAddress,
+            txHash: input.txSignature ?? input.externalId,
+            wallet_address: input.walletAddress ?? normalizedContractAddress,
+            is_loss_cut: false,
+            payloadJson: input.payload,
+          },
+        };
+        await stub.fetch('https://strategy-engine/webhook', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(forwardRequest),
+        });
+      }
       strategySummary = strategyResult
         ? `Strategy v${strategyResult.version.versionNo}: ${summarizeStrategyRuntime(strategyResult.runtime)}`
         : 'No manual strategy version is active, so the webhook did not create an evaluation.';

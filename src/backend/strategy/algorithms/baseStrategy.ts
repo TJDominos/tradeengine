@@ -31,7 +31,7 @@ export interface TradingStrategyImmediateTaskInput {
 
 export interface TradingStrategyContext {
   readonly macroObjective: StrategyMacroObjective;
-  readonly contractAddress: string;
+  readonly baseTokenAddress: string;
   readonly tactics: StrategyExecutionTactics;
   readonly queue: StrategyTaskQueue;
   readonly now: () => number;

@@ -8,10 +8,13 @@ import { parseJsonBody } from '../workerSchema';
 import { dbCreateTradableToken, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
 import { dbAddAuditLog, dbLoadSettings, dbSaveSettings } from '../userStore';
 import { fetchSolanaMintDecimals, jsonResponse, normalizePubkey, parseJsonText } from '../workerCore';
-import type { Env, TokenMarketSnapshot } from '../workerShared';
+import { SOLANA_USDC_MINT, type Env, type TokenMarketSnapshot } from '../workerShared';
 import { requireAdmin } from '../services/accessControl';
 import { dbCreateHistoricalSetupSnapshot } from '../services/historyMetricsService';
-import { StrategyAutomationService } from '../services/strategyAutomationService';
+import {
+  buildStrategyTaskExecutionContext,
+  StrategyAutomationService,
+} from '../services/strategyAutomationService';
 import {
   dbDeletePreviousStrategyVersions,
   dbGetActiveStrategyVersion,
@@ -22,6 +25,58 @@ import {
 import { loadStoredMarketSnapshotByContractAddress } from '../services/tokenMarketService';
 
 const strategyAutomationService = new StrategyAutomationService();
+
+type StrategyExecutionConsumeRequest = {
+  action: 'BUY' | 'SELL';
+  requestedAmount: number;
+  accountId: number | null;
+  walletAddress: string | null;
+};
+
+function parseStrategyExecutionConsumeRequest(
+  body: unknown,
+): StrategyExecutionConsumeRequest {
+  if (body == null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new ApiError(400, 'Strategy execution consume request must be a JSON object');
+  }
+
+  const raw = body as Record<string, unknown>;
+  const actionText = typeof raw.action === 'string' ? raw.action.trim().toUpperCase() : '';
+  if (actionText !== 'BUY' && actionText !== 'SELL') {
+    throw new ApiError(400, 'action must be BUY or SELL');
+  }
+
+  const requestedAmount = raw.requestedAmount;
+  if (
+    typeof requestedAmount !== 'number' ||
+    !Number.isFinite(requestedAmount) ||
+    requestedAmount <= 0
+  ) {
+    throw new ApiError(400, 'requestedAmount must be a positive number');
+  }
+
+  const accountId =
+    typeof raw.accountId === 'number' && Number.isInteger(raw.accountId) && raw.accountId > 0
+      ? raw.accountId
+      : null;
+  const walletAddress =
+    typeof raw.walletAddress === 'string' && raw.walletAddress.trim().length > 0
+      ? normalizePubkey(raw.walletAddress)
+      : null;
+  if ((accountId == null && walletAddress == null) || (accountId != null && walletAddress != null)) {
+    throw new ApiError(
+      400,
+      'Exactly one of accountId or walletAddress is required for controlled strategy execution',
+    );
+  }
+
+  return {
+    action: actionText,
+    requestedAmount,
+    accountId,
+    walletAddress,
+  };
+}
 
 function parseAbortRequestBody(body: unknown): { reason: string } {
   if (body == null) {
@@ -59,6 +114,54 @@ export async function handleStrategyRoutes(
   const { method } = request;
   const { pathname } = url;
 
+  if (method === 'POST' && pathname === '/api/strategy/execution/consume') {
+    const user = await requireAdmin(request, env);
+    const body = parseStrategyExecutionConsumeRequest(
+      await parseJsonBody<unknown>(request),
+    );
+    const activeStrategyVersion = await dbGetActiveStrategyVersion(
+      env.TRADINGBOT_DB,
+      user.id,
+    );
+    if (!activeStrategyVersion) {
+      throw new ApiError(409, 'No active strategy is configured for controlled execution');
+    }
+
+    const strategyBaseMint = activeStrategyVersion.document.parameters.baseTokenAddress.trim()
+      ? normalizePubkey(activeStrategyVersion.document.parameters.baseTokenAddress)
+      : '';
+    const strategyQuoteMint = activeStrategyVersion.document.parameters.quoteTokenAddress.trim()
+      ? normalizePubkey(activeStrategyVersion.document.parameters.quoteTokenAddress)
+      : SOLANA_USDC_MINT;
+
+    if (!strategyBaseMint) {
+      throw new ApiError(409, 'Active strategy base token is not configured');
+    }
+    if (strategyBaseMint === strategyQuoteMint) {
+      throw new ApiError(
+        409,
+        'Active strategy base and quote token addresses must be different',
+      );
+    }
+
+    const result = await strategyAutomationService.consumeExecutionTask(
+      {
+        action: body.action,
+        accountId: body.accountId,
+        walletAddress: body.walletAddress,
+        baseTokenAddress: strategyBaseMint,
+        baseMint: strategyBaseMint,
+        quoteMint: strategyQuoteMint,
+        requireExplicitAccount: true,
+        executionMode: 'controlled_jupiter_acceptance',
+        requestedAmount: body.requestedAmount,
+        scheduledAt: Date.now(),
+      },
+      buildStrategyTaskExecutionContext(env, user.id, user.username),
+    );
+    return jsonResponse(result);
+  }
+
   if (method === 'POST' && pathname === '/api/strategy/active') {
     const user = await requireAdmin(request, env);
     const previousActiveStrategyVersion = await dbGetActiveStrategyVersion(
@@ -69,14 +172,18 @@ export async function handleStrategyRoutes(
       await parseJsonBody<unknown>(request),
     );
 
-    const normalizedContractAddress = document.parameters.contractAddress.trim()
-      ? normalizePubkey(document.parameters.contractAddress)
+    const normalizedBaseTokenAddress = document.parameters.baseTokenAddress.trim()
+      ? normalizePubkey(document.parameters.baseTokenAddress)
       : '';
+    const normalizedQuoteTokenAddress = document.parameters.quoteTokenAddress.trim()
+      ? normalizePubkey(document.parameters.quoteTokenAddress)
+      : SOLANA_USDC_MINT;
     const normalizedDocument = normalizeStrategyDocument({
       ...document,
       parameters: {
         ...document.parameters,
-        contractAddress: normalizedContractAddress,
+        baseTokenAddress: normalizedBaseTokenAddress,
+        quoteTokenAddress: normalizedQuoteTokenAddress,
       },
       metadata: {
         ...document.metadata,
@@ -110,13 +217,13 @@ export async function handleStrategyRoutes(
       updatedSettings,
     );
 
-    const previousContractAddress = previousActiveStrategyVersion?.document.parameters.contractAddress.trim()
-      ? normalizePubkey(previousActiveStrategyVersion.document.parameters.contractAddress)
+    const previousContractAddress = previousActiveStrategyVersion?.document.parameters.baseTokenAddress.trim()
+      ? normalizePubkey(previousActiveStrategyVersion.document.parameters.baseTokenAddress)
       : null;
 
-    if (normalizedContractAddress) {
+    if (normalizedBaseTokenAddress) {
       const stubId = env.STRATEGY_ENGINE_DO.idFromName(
-        strategyEngineDurableObjectNameFor(user.id, normalizedContractAddress),
+        strategyEngineDurableObjectNameFor(user.id, normalizedBaseTokenAddress),
       );
       const stub = env.STRATEGY_ENGINE_DO.get(stubId);
       const doRequest: StrategyEngineDurableObjectConfigureRequest = {
@@ -135,7 +242,7 @@ export async function handleStrategyRoutes(
 
     if (
       previousContractAddress &&
-      previousContractAddress !== normalizedContractAddress
+      previousContractAddress !== normalizedBaseTokenAddress
     ) {
       const previousStubId = env.STRATEGY_ENGINE_DO.idFromName(
         strategyEngineDurableObjectNameFor(user.id, previousContractAddress),
@@ -147,7 +254,7 @@ export async function handleStrategyRoutes(
     }
 
     let marketSnapshot: TokenMarketSnapshot | null = null;
-    if (normalizedContractAddress) {
+    if (normalizedBaseTokenAddress) {
       const rpcUrls = await dbResolveSolanaRpcUrls(
         env.TRADINGBOT_DB,
         user.id,
@@ -156,32 +263,35 @@ export async function handleStrategyRoutes(
 
       const existingTokenId = await dbResolveTradableTokenId(
         env.TRADINGBOT_DB,
-        normalizedContractAddress,
+        normalizedBaseTokenAddress,
+        normalizedQuoteTokenAddress,
       );
       if (!existingTokenId) {
         try {
           const decimals = await fetchSolanaMintDecimals(
             rpcUrls,
-            normalizedContractAddress,
+            normalizedBaseTokenAddress,
           ).catch(() => null);
           await dbCreateTradableToken(
             env.TRADINGBOT_DB,
             {
               network: 'solana',
-              contractAddress: normalizedContractAddress,
+              baseTokenAddress: normalizedBaseTokenAddress,
+              quoteTokenAddress: normalizedQuoteTokenAddress,
             },
             decimals,
           );
         } catch (err: unknown) {
           console.warn(
-            `Failed to ensure tracked token metadata for strategy contract ${normalizedContractAddress}:`,
+            `Failed to ensure tracked token metadata for strategy base token ${normalizedBaseTokenAddress}:`,
             err,
           );
         }
       }
       marketSnapshot = await loadStoredMarketSnapshotByContractAddress(
         env.TRADINGBOT_DB,
-        normalizedContractAddress,
+        normalizedBaseTokenAddress,
+        normalizedQuoteTokenAddress,
       );
     }
 
@@ -189,7 +299,7 @@ export async function handleStrategyRoutes(
       env.TRADINGBOT_DB,
       user.id,
       'strategy.version_activated',
-      normalizedContractAddress || 'none',
+      normalizedBaseTokenAddress || 'none',
       strategySave.created
         ? `Activated strategy version v${strategySave.version.versionNo}.`
         : `Strategy version v${strategySave.version.versionNo} remains active.`,
@@ -309,7 +419,7 @@ export async function handleStrategyRoutes(
       env.TRADINGBOT_DB,
       user.id,
       'strategy.versions_cleaned',
-      cleanup.keptVersion?.document.parameters.contractAddress || 'strategy',
+      cleanup.keptVersion?.document.parameters.baseTokenAddress || 'strategy',
       cleanup.keptVersion
         ? `Deleted ${cleanup.deletedVersions} automatic strategy version(s) and ${cleanup.deletedEvaluations} related evaluation(s). Kept manual v${cleanup.keptVersion.versionNo} active.`
         : `Deleted ${cleanup.deletedVersions} automatic strategy version(s) and ${cleanup.deletedEvaluations} related evaluation(s). No manual strategy version remains active.`,

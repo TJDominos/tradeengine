@@ -79,7 +79,8 @@ export function buildStrategyDocumentFromSettings(
     engineVersion: STRATEGY_ENGINE_VERSION,
     strategyType: DEFAULT_STRATEGY_TYPE,
     parameters: {
-      contractAddress: settings.contractAddress,
+      baseTokenAddress: settings.baseTokenAddress,
+      quoteTokenAddress: settings.quoteTokenAddress,
       timeRangeTarget: settings.timeRangeTarget,
       maxTransactions: settings.maxTransactions,
       maxSlippageBps: Math.max(0, Math.round(settings.maxSlippage * 100)),
@@ -126,7 +127,8 @@ export function buildStrategyDocumentFromSettings(
       changeNote: options?.changeNote ?? settings.strategyNotes.trim(),
       origin: options?.origin ?? 'settings-sync',
       legacySettingsSnapshot: {
-        contractAddress: settings.contractAddress,
+        baseTokenAddress: settings.baseTokenAddress,
+        quoteTokenAddress: settings.quoteTokenAddress,
         volatilityTarget: settings.volatilityTarget,
         pullbackTarget: settings.pullbackTarget,
         volumeTarget: settings.volumeTarget,
@@ -196,6 +198,8 @@ export function runStrategyRuntime(input: {
       triggerSource: input.trigger.source,
       triggerEventType: input.trigger.eventType,
       contractAddress: input.trigger.contractAddress,
+      baseTokenAddress: strategy.parameters.baseTokenAddress,
+      quoteTokenAddress: strategy.parameters.quoteTokenAddress,
       evaluatedAt,
       snapshotFetchedAt: input.marketSnapshot?.fetchedAt ?? null,
       qualified: evaluation.qualified,

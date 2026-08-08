@@ -234,7 +234,7 @@ export async function syncTokenMarketSnapshotForUser(
     if (jupiterPrice != null || jupiterMeta != null) {
       liveSnapshot = {
         network: normalizedNetwork,
-        contractAddress: normalizedAddress,
+        baseTokenAddress: normalizedAddress,
         tokenName: jupiterMeta?.name ?? latestStoredSnapshot?.tokenName ?? null,
         tokenSymbol: jupiterMeta?.symbol ?? latestStoredSnapshot?.tokenSymbol ?? null,
         priceUsd: jupiterPrice,
@@ -306,8 +306,9 @@ export async function syncTokenMarketSnapshotForUser(
 export async function loadStoredMarketSnapshotByContractAddress(
   db: D1Database,
   contractAddress: string,
+  quoteTokenAddress?: string,
 ): Promise<TokenMarketSnapshot | null> {
-  const tokenId = await dbResolveTradableTokenId(db, contractAddress);
+  const tokenId = await dbResolveTradableTokenId(db, contractAddress, quoteTokenAddress);
   if (!tokenId) {
     return null;
   }

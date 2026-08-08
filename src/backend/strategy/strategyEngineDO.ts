@@ -26,6 +26,7 @@ import { executeSwap } from '../services/jupiterSwapService';
 import { SOLANA_USDC_MINT } from '../workerShared';
 import { getActiveAccounts } from '../services/accountPoolService';
 import { distributeVolumeAcrossAccounts } from '../services/tradeMath';
+import { analyzeTradeDirection } from '../services/webhookParser';
 
 const STORAGE_KEY = 'strategy-engine-state';
 const MAX_DEDUPED_TX_HASHES = 256;
@@ -50,7 +51,7 @@ export interface StrategyEngineDurableObjectMetrics {
 export interface StrategyEngineDurableObjectConfig {
   userId: number;
   versionId: number;
-  contractAddress: string;
+  baseTokenAddress: string;
   macroObjective: MacroObjective;
   targetTotalVolumeUsd: number;
   baseOrderCount: number;
@@ -92,8 +93,8 @@ export interface PersistedStrategyEngineState {
   updatedAt: number;
 }
 
-function buildDurableObjectName(userId: number, contractAddress: string): string {
-  return `${userId}:${contractAddress}`;
+function buildDurableObjectName(userId: number, baseTokenAddress: string): string {
+  return `${userId}:${baseTokenAddress}`;
 }
 
 function buildInitialStateForObjective(objective: MacroObjective): EngineState {
@@ -178,9 +179,9 @@ function buildExecutionReportFromMetrics(
 
 export function strategyEngineDurableObjectNameFor(
   userId: number,
-  contractAddress: string,
+  baseTokenAddress: string,
 ): string {
-  return buildDurableObjectName(userId, contractAddress);
+  return buildDurableObjectName(userId, baseTokenAddress);
 }
 
 export class StrategyEngineDurableObject {
@@ -295,7 +296,7 @@ export class StrategyEngineDurableObject {
         return;
       }
       console.error(
-        `[StrategyEngineDO] Swap execution failed for ${nextTask.side} ${nextTask.amountUsd} on ${config.contractAddress}:`,
+        `[StrategyEngineDO] Swap execution failed for ${nextTask.side} ${nextTask.amountUsd} on ${config.baseTokenAddress}:`,
         error,
       );
       this.scheduleTaskRetry(nextTask, now);
@@ -352,11 +353,11 @@ export class StrategyEngineDurableObject {
     input: StrategyEngineDurableObjectConfigureRequest,
   ): Promise<void> {
     const normalizedDocument = normalizeStrategyDocument(input.strategyDocument);
-    const contractAddress = normalizePubkey(normalizedDocument.parameters.contractAddress);
+    const baseTokenAddress = normalizePubkey(normalizedDocument.parameters.baseTokenAddress);
     const nextConfig: StrategyEngineDurableObjectConfig = {
       userId: input.userId,
       versionId: input.versionId,
-      contractAddress,
+      baseTokenAddress,
       macroObjective: normalizedDocument.execution.macroObjective,
       targetTotalVolumeUsd: clampPositiveNumber(
         normalizedDocument.riskControls.maxPositionUsd ?? normalizedDocument.targets.volumeUsdMin,
@@ -380,7 +381,7 @@ export class StrategyEngineDurableObject {
     const configChanged =
       !previousConfig ||
       previousConfig.versionId !== nextConfig.versionId ||
-      previousConfig.contractAddress !== nextConfig.contractAddress ||
+      previousConfig.baseTokenAddress !== nextConfig.baseTokenAddress ||
       previousConfig.macroObjective !== nextConfig.macroObjective;
 
     this.persistedState.config = nextConfig;
@@ -402,7 +403,7 @@ export class StrategyEngineDurableObject {
     }
 
     const normalizedContractAddress = normalizePubkey(event.contractAddress);
-    if (normalizedContractAddress !== config.contractAddress) {
+    if (normalizedContractAddress !== config.baseTokenAddress) {
       return false;
     }
 
@@ -420,9 +421,32 @@ export class StrategyEngineDurableObject {
       return false;
     }
 
+    let payloadDirection: 'BUY' | 'SELL' | 'UNKNOWN' = 'UNKNOWN';
+    if (event.payloadJson) {
+      try {
+        payloadDirection = analyzeTradeDirection(
+          JSON.parse(event.payloadJson),
+          config.strategyDocument.parameters,
+        );
+      } catch {
+        payloadDirection = 'UNKNOWN';
+      }
+    }
+
+    if (event.payloadJson && payloadDirection === 'UNKNOWN') {
+      await this.persistState();
+      return false;
+    }
+
+    const normalizedDirection = payloadDirection !== 'UNKNOWN'
+      ? payloadDirection
+      : event.type === 'whale_buy'
+        ? 'BUY'
+        : 'SELL';
+
     let triggered = false;
     const now = Date.now();
-    if (event.type === 'whale_buy') {
+    if (normalizedDirection === 'BUY') {
       if (config.macroObjective === 'shakeout') {
         this.persistedState.currentEngineState = 'WAITING_FOR_LOSS_CUT';
         this.enqueueTask({
@@ -456,7 +480,7 @@ export class StrategyEngineDurableObject {
       }
     }
 
-    if (event.type === 'whale_sell' && config.macroObjective === 'accumulation') {
+    if (normalizedDirection === 'SELL' && config.macroObjective === 'accumulation') {
       this.persistedState.currentEngineState = 'ACCUMULATING';
       this.enqueueTask({
         side: 'buy',
@@ -528,7 +552,10 @@ export class StrategyEngineDurableObject {
       throw new ApiError(409, 'Strategy engine durable object is not configured');
     }
 
-    const activeAccounts = await getActiveAccounts(this.env, config.userId);
+    const activeAccounts = await getActiveAccounts(this.env, config.userId, {
+      baseMint: config.strategyDocument.parameters.baseTokenAddress.trim(),
+      quoteMint: config.strategyDocument.parameters.quoteTokenAddress.trim(),
+    });
     if (activeAccounts.length === 0) {
       throw new ApiError(
         409,
@@ -554,24 +581,24 @@ export class StrategyEngineDurableObject {
         const swapInput = await this.resolveSwapInput(task.side, sliceVolumeUsd);
         const swap = await executeSwap(
           this.env,
-          task.side,
+          {
+            publicKey: account.publicKey,
+            privateKey: account.privateKeyBytes,
+          },
           swapInput.amountAtomic,
-          swapInput.inputMint,
-          swapInput.outputMint,
+          task.side,
+          swapInput.baseToken,
+          swapInput.quoteToken,
           {
             slippageBps: Math.max(1, config.strategyDocument.parameters.maxSlippageBps),
             commitment: config.execution.commitment,
-            signer: {
-              publicKey: account.publicKey,
-              privateKey: account.privateKeyBytes,
-            },
           },
         );
         executedVolumeUsd += swap.executedVolumeUsd;
       } catch (error: unknown) {
         retryVolumeUsd += sliceVolumeUsd;
         console.error(
-          `[StrategyEngineDO] Account ${account.publicKey} failed ${task.side} slice ${sliceVolumeUsd} on ${config.contractAddress}:`,
+          `[StrategyEngineDO] Account ${account.publicKey} failed ${task.side} slice ${sliceVolumeUsd} on ${config.baseTokenAddress}:`,
           error,
         );
       }
@@ -588,19 +615,26 @@ export class StrategyEngineDurableObject {
     volumeUsd: number,
   ): Promise<{
     amountAtomic: string;
-    inputMint: string;
-    outputMint: string;
+    baseToken: string;
+    quoteToken: string;
   }> {
     const config = this.persistedState.config;
     if (!config) {
       throw new ApiError(409, 'Strategy engine durable object is not configured');
     }
 
+    const baseToken = config.strategyDocument.parameters.baseTokenAddress.trim();
+    const quoteToken = config.strategyDocument.parameters.quoteTokenAddress.trim();
+
+    if (!baseToken || !quoteToken) {
+      throw new ApiError(409, 'Strategy trading pair is not fully configured');
+    }
+
     if (side === 'buy') {
       return {
         amountAtomic: String(Math.max(1, Math.round(volumeUsd * 1_000_000))),
-        inputMint: SOLANA_USDC_MINT,
-        outputMint: config.contractAddress,
+        baseToken,
+        quoteToken,
       };
     }
 
@@ -608,27 +642,27 @@ export class StrategyEngineDurableObject {
       .prepare(
         'SELECT decimals FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2 LIMIT 1',
       )
-      .bind('solana', config.contractAddress)
+      .bind('solana', baseToken)
       .first<{ decimals: number | null }>();
 
     const tokenId = await dbResolveTradableTokenId(
       this.env.TRADINGBOT_DB,
-      config.contractAddress,
+      baseToken,
     );
     const marketSnapshot = tokenId
       ? await dbGetLatestTokenMarketSnapshot(this.env.TRADINGBOT_DB, tokenId)
       : null;
-    const jupiterMeta = await fetchJupiterTokenMetadata(config.contractAddress);
+    const jupiterMeta = await fetchJupiterTokenMetadata(baseToken);
     const tokenPriceUsd =
       marketSnapshot?.priceUsd ??
       jupiterMeta?.usdPrice ??
-      (await fetchJupiterTokenPrice(config.contractAddress));
+      (await fetchJupiterTokenPrice(baseToken));
     const tokenDecimals =
       tokenRow?.decimals ??
       jupiterMeta?.decimals ??
       (await fetchSolanaMintDecimals(
         this.env.RPC_URL?.trim() || this.env.SOLANA_RPC_URL?.trim() || '',
-        config.contractAddress,
+        baseToken,
       ));
 
     if (
@@ -638,13 +672,13 @@ export class StrategyEngineDurableObject {
     ) {
       throw new ApiError(
         503,
-        `Cannot resolve a positive USD price for ${config.contractAddress}`,
+        `Cannot resolve a positive USD price for ${baseToken}`,
       );
     }
     if (tokenDecimals == null || !Number.isFinite(tokenDecimals) || tokenDecimals < 0) {
       throw new ApiError(
         503,
-        `Cannot resolve token decimals for ${config.contractAddress}`,
+        `Cannot resolve token decimals for ${baseToken}`,
       );
     }
 
@@ -652,8 +686,8 @@ export class StrategyEngineDurableObject {
     const amountAtomic = Math.max(1, Math.round(tokenAmount * 10 ** tokenDecimals));
     return {
       amountAtomic: String(amountAtomic),
-      inputMint: config.contractAddress,
-      outputMint: SOLANA_USDC_MINT,
+      baseToken,
+      quoteToken,
     };
   }
 
@@ -774,7 +808,7 @@ export class StrategyEngineDurableObject {
       orderCount: Math.max(1, Math.floor(orderCount)),
       durationMs: Math.max(1_000, Math.round(durationMs)),
       startTime,
-      contractAddress: config.contractAddress,
+      baseTokenAddress: config.baseTokenAddress,
     });
 
     for (const slice of plan.slices) {

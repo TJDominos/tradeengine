@@ -1,3 +1,7 @@
+mod planner;
+mod executor;
+mod strategy;
+
 use aes_gcm::aead::{Aead, OsRng};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -39,6 +43,15 @@ struct Config {
     session_ttl_hours: u64,
     cookie_secure: bool,
     private_key_encryption_key: Option<[u8; 32]>,
+    solana_rpc_url: Option<String>,
+}
+
+struct ResolvedExecutionSettings {
+    base_mint: String,
+    quote_mint: String,
+    base_decimals: u8,
+    quote_decimals: u8,
+    slippage_bps: u64,
 }
 
 struct Database {
@@ -239,10 +252,135 @@ struct StatusResponse {
     ok: bool,
 }
 
+#[derive(Clone, Serialize)]
+struct StrategyExecutionRunRecord {
+    id: i64,
+    #[serde(rename = "baseSymbol")]
+    base_symbol: String,
+    #[serde(rename = "baseMint")]
+    base_mint: String,
+    #[serde(rename = "baseDecimals")]
+    base_decimals: u8,
+    #[serde(rename = "quoteSymbol")]
+    quote_symbol: String,
+    #[serde(rename = "quoteMint")]
+    quote_mint: String,
+    #[serde(rename = "quoteDecimals")]
+    quote_decimals: u8,
+    #[serde(rename = "targetBuyVolume")]
+    target_buy_volume: f64,
+    #[serde(rename = "targetSellVolume")]
+    target_sell_volume: f64,
+    #[serde(rename = "targetTotalVolume")]
+    target_total_volume: f64,
+    #[serde(rename = "microTaskSizeHint")]
+    micro_task_size_hint: f64,
+    status: String,
+    #[serde(rename = "latestPlanVersion")]
+    latest_plan_version: i64,
+    #[serde(rename = "createdAt")]
+    created_at: u64,
+    #[serde(rename = "updatedAt")]
+    updated_at: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct StrategyExecutionTaskRecord {
+    id: i64,
+    #[serde(rename = "runId")]
+    run_id: i64,
+    #[serde(rename = "planVersion")]
+    plan_version: i64,
+    #[serde(rename = "intentId")]
+    intent_id: String,
+    #[serde(rename = "intentType")]
+    intent_type: String,
+    side: String,
+    amount: f64,
+    #[serde(rename = "accountId")]
+    account_id: String,
+    #[serde(rename = "pairedAccountId")]
+    paired_account_id: Option<String>,
+    notes: String,
+    status: String,
+    #[serde(rename = "createdAt")]
+    created_at: u64,
+}
+
+#[derive(Serialize)]
+struct StrategyExecutionQueueResponse {
+    #[serde(rename = "activeRun")]
+    active_run: Option<StrategyExecutionRunRecord>,
+    tasks: Vec<StrategyExecutionTaskRecord>,
+}
+
+#[derive(Clone, Serialize)]
+struct StrategyExecutionTaskAttemptRecord {
+    id: i64,
+    #[serde(rename = "taskId")]
+    task_id: i64,
+    #[serde(rename = "runId")]
+    run_id: i64,
+    #[serde(rename = "planVersion")]
+    plan_version: i64,
+    status: String,
+    #[serde(rename = "txSignature")]
+    tx_signature: Option<String>,
+    #[serde(rename = "errorMessage")]
+    error_message: Option<String>,
+    #[serde(rename = "startedAt")]
+    started_at: u64,
+    #[serde(rename = "finishedAt")]
+    finished_at: u64,
+}
+
+#[derive(Deserialize)]
+struct StrategyExecutionConsumeRequest {
+    #[serde(rename = "runId")]
+    run_id: Option<i64>,
+    #[serde(rename = "maxTasks")]
+    max_tasks: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct StrategyExecutionConsumeResponse {
+    #[serde(rename = "activeRun")]
+    active_run: Option<StrategyExecutionRunRecord>,
+    results: Vec<StrategyExecutionTaskAttemptRecord>,
+    #[serde(rename = "executedCount")]
+    executed_count: usize,
+    #[serde(rename = "failedCount")]
+    failed_count: usize,
+}
+
 #[derive(Deserialize)]
 struct TradeRequest {
-    symbol: Option<String>,
-    action: Option<String>,
+    #[serde(rename = "baseSymbol")]
+    base_symbol: String,
+    #[serde(rename = "baseMint")]
+    base_mint: String,
+    #[serde(rename = "baseDecimals")]
+    base_decimals: u8,
+    #[serde(rename = "quoteSymbol")]
+    quote_symbol: String,
+    #[serde(rename = "quoteMint")]
+    quote_mint: String,
+    #[serde(rename = "quoteDecimals")]
+    quote_decimals: u8,
+    #[serde(rename = "targetBuyVolume")]
+    target_buy_volume: f64,
+    #[serde(rename = "targetSellVolume")]
+    target_sell_volume: f64,
+    #[serde(rename = "targetTotalVolume")]
+    target_total_volume: f64,
+    #[serde(rename = "microTaskSizeHint")]
+    micro_task_size_hint: Option<f64>,
+    #[serde(rename = "confirmStrategy")]
+    confirm_strategy: bool,
+    #[serde(rename = "confirmPlan")]
+    confirm_plan: bool,
+    #[serde(rename = "externalDelayMs")]
+    external_delay_ms: Option<u64>,
 }
 
 
@@ -286,7 +424,10 @@ impl Config {
         let private_key_encryption_key = env::var("PRIVATE_KEY_ENCRYPTION_KEY")
             .ok()
             .and_then(|value| parse_encryption_key(&value).ok());
-
+        let solana_rpc_url = env::var("SOLANA_RPC_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         Self {
             bind_addr,
             database_path,
@@ -294,11 +435,541 @@ impl Config {
             session_ttl_hours,
             cookie_secure,
             private_key_encryption_key,
+            solana_rpc_url,
         }
     }
 }
 
 impl Database {
+    fn planner_account_provider(&self, user_id: i64) -> planner::SqliteAccountProvider<'_> {
+        planner::SqliteAccountProvider::new(&self.conn, user_id)
+    }
+
+    fn generate_trade_plan(
+        &self,
+        user_id: i64,
+        input: &planner::TradePlanningInput,
+    ) -> Result<Vec<planner::OrderIntent>, ApiError> {
+        let provider = self.planner_account_provider(user_id);
+        let trade_planner = planner::TradePlanner::default();
+        trade_planner
+            .generate_plan(&provider, input)
+            .map_err(|error| bad_request(error.to_string()))
+    }
+
+    fn add_strategy_log(&mut self, user_id: i64, stage: &str, details: &str) -> Result<(), ApiError> {
+        self.add_audit_log(user_id, "strategy.planner", stage, details)
+    }
+
+    fn get_latest_strategy_execution_run(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<StrategyExecutionRunRecord>, ApiError> {
+        self.conn
+            .query_row(
+                "
+                SELECT
+                  id,
+                  base_symbol,
+                                    base_mint,
+                                    base_decimals,
+                  quote_symbol,
+                                    quote_mint,
+                                    quote_decimals,
+                  target_buy_volume,
+                  target_sell_volume,
+                  target_total_volume,
+                  micro_task_size_hint,
+                  status,
+                  latest_plan_version,
+                  created_at,
+                  updated_at
+                FROM strategy_execution_runs
+                WHERE user_id = ?1
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                ",
+                params![user_id],
+                |row| {
+                    Ok(StrategyExecutionRunRecord {
+                        id: row.get(0)?,
+                        base_symbol: row.get(1)?,
+                        base_mint: row.get(2)?,
+                        base_decimals: row.get(3)?,
+                        quote_symbol: row.get(4)?,
+                        quote_mint: row.get(5)?,
+                        quote_decimals: row.get(6)?,
+                        target_buy_volume: row.get(7)?,
+                        target_sell_volume: row.get(8)?,
+                        target_total_volume: row.get(9)?,
+                        micro_task_size_hint: row.get(10)?,
+                        status: row.get(11)?,
+                        latest_plan_version: row.get(12)?,
+                        created_at: row.get(13)?,
+                        updated_at: row.get(14)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(internal_error)
+    }
+
+    fn list_strategy_execution_tasks(
+        &self,
+        run_id: i64,
+    ) -> Result<Vec<StrategyExecutionTaskRecord>, ApiError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "
+                SELECT
+                  id,
+                  run_id,
+                  plan_version,
+                  intent_id,
+                  intent_type,
+                  side,
+                  amount,
+                  account_id,
+                  paired_account_id,
+                  notes,
+                  status,
+                  created_at
+                FROM strategy_execution_tasks
+                WHERE run_id = ?1
+                ORDER BY plan_version DESC, created_at ASC, id ASC
+                ",
+            )
+            .map_err(internal_error)?;
+
+        let rows = stmt
+            .query_map(params![run_id], |row| {
+                Ok(StrategyExecutionTaskRecord {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    plan_version: row.get(2)?,
+                    intent_id: row.get(3)?,
+                    intent_type: row.get(4)?,
+                    side: row.get(5)?,
+                    amount: row.get(6)?,
+                    account_id: row.get(7)?,
+                    paired_account_id: row.get(8)?,
+                    notes: row.get(9)?,
+                    status: row.get(10)?,
+                    created_at: row.get(11)?,
+                })
+            })
+            .map_err(internal_error)?;
+
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(internal_error)?);
+        }
+        Ok(tasks)
+    }
+
+    fn create_strategy_execution_run(
+        &mut self,
+        user_id: i64,
+        input: &planner::TradePlanningInput,
+    ) -> Result<i64, ApiError> {
+        let base_symbol = normalize_asset_symbol(&input.base_asset.symbol)?;
+        let quote_symbol = normalize_asset_symbol(&input.quote_asset.symbol)?;
+        let now = now_ts();
+
+        self.conn
+            .execute(
+                "
+                INSERT INTO strategy_execution_runs (
+                  user_id,
+                  base_symbol,
+                  base_mint,
+                  base_decimals,
+                  quote_symbol,
+                  quote_mint,
+                  quote_decimals,
+                  target_buy_volume,
+                  target_sell_volume,
+                  target_total_volume,
+                  micro_task_size_hint,
+                  status,
+                  latest_plan_version,
+                  created_at,
+                  updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'planned', 1, ?12, ?12)
+                ",
+                params![
+                    user_id,
+                    base_symbol,
+                    input.base_asset.mint,
+                    i64::from(input.base_asset.decimals),
+                    quote_symbol,
+                    input.quote_asset.mint,
+                    i64::from(input.quote_asset.decimals),
+                    input.target_buy_volume,
+                    input.target_sell_volume,
+                    input.target_total_volume,
+                    input.micro_task_size_hint,
+                    now,
+                ],
+            )
+            .map_err(internal_error)?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    fn replace_strategy_execution_tasks(
+        &mut self,
+        run_id: i64,
+        plan_version: i64,
+        intents: &[planner::OrderIntent],
+        status: &str,
+    ) -> Result<(), ApiError> {
+        let now = now_ts();
+        let tx = self.conn.transaction().map_err(internal_error)?;
+        tx.execute(
+            "DELETE FROM strategy_execution_tasks WHERE run_id = ?1 AND plan_version = ?2",
+            params![run_id, plan_version],
+        )
+        .map_err(internal_error)?;
+
+        for intent in intents {
+            tx.execute(
+                "
+                INSERT INTO strategy_execution_tasks (
+                  run_id,
+                  plan_version,
+                  intent_id,
+                  intent_type,
+                  side,
+                  amount,
+                  account_id,
+                  paired_account_id,
+                  notes,
+                  status,
+                  created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ",
+                params![
+                    run_id,
+                    plan_version,
+                    intent.intent_id,
+                    format!("{:?}", intent.intent_type),
+                    format!("{:?}", intent.side),
+                    intent.amount,
+                    intent.account_id,
+                    intent.paired_account_id,
+                    intent.notes,
+                    status,
+                    now,
+                ],
+            )
+            .map_err(internal_error)?;
+        }
+
+        tx.commit().map_err(internal_error)?;
+        Ok(())
+    }
+
+    fn update_strategy_execution_run_status(
+        &mut self,
+        run_id: i64,
+        latest_plan_version: i64,
+        status: &str,
+    ) -> Result<(), ApiError> {
+        self.conn
+            .execute(
+                "
+                UPDATE strategy_execution_runs
+                SET latest_plan_version = ?2,
+                    status = ?3,
+                    updated_at = ?4
+                WHERE id = ?1
+                ",
+                params![run_id, latest_plan_version, status, now_ts()],
+            )
+            .map_err(internal_error)?;
+        Ok(())
+    }
+
+    fn insert_strategy_execution_task_attempt(
+        &mut self,
+        task_id: i64,
+        run_id: i64,
+        plan_version: i64,
+        status: &str,
+        tx_signature: Option<&str>,
+        error_message: Option<&str>,
+        started_at: u64,
+        finished_at: u64,
+    ) -> Result<i64, ApiError> {
+        self.conn
+            .execute(
+                "
+                INSERT INTO strategy_execution_task_attempts (
+                  task_id,
+                  run_id,
+                  plan_version,
+                  status,
+                  tx_signature,
+                  error_message,
+                  started_at,
+                  finished_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ",
+                params![
+                    task_id,
+                    run_id,
+                    plan_version,
+                    status,
+                    tx_signature,
+                    error_message,
+                    started_at,
+                    finished_at,
+                ],
+            )
+            .map_err(internal_error)?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    fn load_managed_wallet_material(
+        &self,
+        account_id: &str,
+        encryption_key: [u8; 32],
+    ) -> Result<(String, Vec<u8>), ApiError> {
+        let parsed_account_id = account_id
+            .parse::<i64>()
+            .map_err(|_| bad_request("Planner account id must be a numeric managed account id"))?;
+
+        self.conn
+            .query_row(
+                "SELECT wallet_address, encrypted_private_key FROM accounts WHERE id = ?1 AND type = 'managed' LIMIT 1",
+                params![parsed_account_id],
+                |row| {
+                    let wallet_address: String = row.get(0)?;
+                    let encrypted_private_key: String = row.get(1)?;
+                    Ok((wallet_address, encrypted_private_key))
+                },
+            )
+            .map_err(internal_error)
+            .and_then(|(wallet_address, encrypted_private_key)| {
+                let decrypted_private_key = decrypt_private_key(&encrypted_private_key, encryption_key)?;
+                Ok((wallet_address, decrypted_private_key))
+            })
+    }
+
+    fn load_execution_settings_for_run(
+        &self,
+        run_id: i64,
+    ) -> Result<ResolvedExecutionSettings, ApiError> {
+        let (base_mint, base_decimals, quote_mint, quote_decimals, user_id): (String, i64, String, i64, i64) = self
+            .conn
+            .query_row(
+                "SELECT base_mint, base_decimals, quote_mint, quote_decimals, user_id FROM strategy_execution_runs WHERE id = ?1 LIMIT 1",
+                params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .map_err(internal_error)?;
+
+        let settings = self.load_settings(user_id)?;
+
+        Ok(ResolvedExecutionSettings {
+            base_mint,
+            quote_mint,
+            base_decimals: u8::try_from(base_decimals).map_err(|_| bad_request("base decimals out of range"))?,
+            quote_decimals: u8::try_from(quote_decimals).map_err(|_| bad_request("quote decimals out of range"))?,
+            slippage_bps: (settings.max_slippage * 100.0).round().max(1.0) as u64,
+        })
+    }
+
+    fn consume_strategy_execution_tasks(
+        &mut self,
+        run_id: i64,
+        max_tasks: usize,
+        config: &Config,
+    ) -> Result<Vec<StrategyExecutionTaskAttemptRecord>, ApiError> {
+        if max_tasks == 0 {
+            return Ok(Vec::new());
+        }
+
+        let latest_plan_version: i64 = self
+            .conn
+            .query_row(
+                "SELECT latest_plan_version FROM strategy_execution_runs WHERE id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(internal_error)?;
+
+        let pending_rows = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "
+                    SELECT id, intent_id, side, amount, account_id, paired_account_id, notes
+                    FROM strategy_execution_tasks
+                    WHERE run_id = ?1 AND plan_version = ?2 AND status = 'pending'
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT ?3
+                    ",
+                )
+                .map_err(internal_error)?;
+            let rows = stmt
+                .query_map(params![run_id, latest_plan_version, max_tasks as i64], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })
+                .map_err(internal_error)?;
+
+            let mut values = Vec::new();
+            for row in rows {
+                values.push(row.map_err(internal_error)?);
+            }
+            values
+        };
+
+        let executor: Box<dyn executor::TaskExecutor> = Box::new(executor::MainnetExecutor {
+            rpc_url: config
+                .solana_rpc_url
+                .clone()
+                .ok_or_else(|| bad_request("SOLANA_RPC_URL is required for Jupiter execution"))?,
+        });
+        let encryption_key = config
+            .private_key_encryption_key
+            .ok_or_else(|| service_unavailable("PRIVATE_KEY_ENCRYPTION_KEY is required for task execution"))?;
+        let execution_settings = self.load_execution_settings_for_run(run_id)?;
+
+        let mut attempts = Vec::new();
+        for (task_id, intent_id, side_text, amount, account_id, paired_account_id, notes) in pending_rows {
+            let side = match side_text.as_str() {
+                "Buy" => planner::OrderSide::Buy,
+                "Sell" => planner::OrderSide::Sell,
+                _ => return Err(bad_request(format!("Unsupported task side '{side_text}'"))),
+            };
+
+            let (wallet_address, decrypted_private_key) =
+                self.load_managed_wallet_material(&account_id, encryption_key)?;
+            let started_at = now_ts();
+            let result = executor.execute(&executor::ExecutionTaskInput {
+                task_id,
+                run_id,
+                plan_version: latest_plan_version,
+                intent_id,
+                side,
+                amount,
+                quote_decimals: execution_settings.quote_decimals,
+                base_decimals: execution_settings.base_decimals,
+                slippage_bps: execution_settings.slippage_bps,
+                base_mint: execution_settings.base_mint.clone(),
+                quote_mint: execution_settings.quote_mint.clone(),
+                account_id,
+                paired_account_id,
+                notes,
+                wallet_address,
+                decrypted_private_key,
+            });
+            let finished_at = now_ts();
+
+            match result {
+                Ok(outcome) => {
+                    self.conn
+                        .execute(
+                            "UPDATE strategy_execution_tasks SET status = ?2 WHERE id = ?1",
+                            params![task_id, outcome.status],
+                        )
+                        .map_err(internal_error)?;
+                    let attempt_id = self.insert_strategy_execution_task_attempt(
+                        task_id,
+                        run_id,
+                        latest_plan_version,
+                        &outcome.status,
+                        outcome.tx_signature.as_deref(),
+                        outcome.error_message.as_deref(),
+                        started_at,
+                        finished_at,
+                    )?;
+                    attempts.push(StrategyExecutionTaskAttemptRecord {
+                        id: attempt_id,
+                        task_id,
+                        run_id,
+                        plan_version: latest_plan_version,
+                        status: outcome.status,
+                        tx_signature: outcome.tx_signature,
+                        error_message: outcome.error_message,
+                        started_at,
+                        finished_at,
+                    });
+                }
+                Err(error) => {
+                    self.conn
+                        .execute(
+                            "UPDATE strategy_execution_tasks SET status = 'failed' WHERE id = ?1",
+                            params![task_id],
+                        )
+                        .map_err(internal_error)?;
+                    let attempt_id = self.insert_strategy_execution_task_attempt(
+                        task_id,
+                        run_id,
+                        latest_plan_version,
+                        "failed",
+                        None,
+                        Some(error.message.as_str()),
+                        started_at,
+                        finished_at,
+                    )?;
+                    attempts.push(StrategyExecutionTaskAttemptRecord {
+                        id: attempt_id,
+                        task_id,
+                        run_id,
+                        plan_version: latest_plan_version,
+                        status: "failed".to_string(),
+                        tx_signature: None,
+                        error_message: Some(error.message),
+                        started_at,
+                        finished_at,
+                    });
+                }
+            }
+        }
+
+        let remaining_pending: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM strategy_execution_tasks WHERE run_id = ?1 AND plan_version = ?2 AND status = 'pending'",
+                params![run_id, latest_plan_version],
+                |row| row.get(0),
+            )
+            .map_err(internal_error)?;
+        let failed_count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM strategy_execution_tasks WHERE run_id = ?1 AND plan_version = ?2 AND status = 'failed'",
+                params![run_id, latest_plan_version],
+                |row| row.get(0),
+            )
+            .map_err(internal_error)?;
+        self.update_strategy_execution_run_status(
+            run_id,
+            latest_plan_version,
+            if remaining_pending == 0 && failed_count == 0 {
+                "completed"
+            } else if failed_count > 0 {
+                "failed"
+            } else {
+                "executing"
+            },
+        )?;
+
+        Ok(attempts)
+    }
+
     fn open(path: &str) -> Result<Self, ApiError> {
         if let Some(parent) = Path::new(path).parent() {
             fs::create_dir_all(parent).map_err(internal_error)?;
@@ -340,6 +1011,73 @@ impl Database {
               UNIQUE(user_id, type, wallet_address),
               FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+                        CREATE TABLE IF NOT EXISTS account_balance_snapshots (
+                            account_id INTEGER NOT NULL,
+                            asset_mint TEXT NOT NULL,
+                            free_amount REAL NOT NULL DEFAULT 0,
+                            locked_amount REAL NOT NULL DEFAULT 0,
+                            updated_at INTEGER NOT NULL,
+                            PRIMARY KEY (account_id, asset_mint),
+                            FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                        );
+                        CREATE TABLE IF NOT EXISTS account_pair_capabilities (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            account_id INTEGER NOT NULL,
+                            base_mint TEXT NOT NULL,
+                            quote_mint TEXT NOT NULL,
+                            is_enabled INTEGER NOT NULL DEFAULT 1,
+                            created_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            UNIQUE(account_id, base_mint, quote_mint),
+                            FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                        );
+                        CREATE TABLE IF NOT EXISTS strategy_execution_runs (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id INTEGER NOT NULL,
+                            base_symbol TEXT NOT NULL,
+                            base_mint TEXT NOT NULL,
+                            base_decimals INTEGER NOT NULL,
+                            quote_symbol TEXT NOT NULL,
+                            quote_mint TEXT NOT NULL,
+                            quote_decimals INTEGER NOT NULL,
+                            target_buy_volume REAL NOT NULL,
+                            target_sell_volume REAL NOT NULL,
+                            target_total_volume REAL NOT NULL,
+                            micro_task_size_hint REAL NOT NULL,
+                            status TEXT NOT NULL,
+                            latest_plan_version INTEGER NOT NULL DEFAULT 1,
+                            created_at INTEGER NOT NULL,
+                            updated_at INTEGER NOT NULL,
+                            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                        );
+                        CREATE TABLE IF NOT EXISTS strategy_execution_tasks (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            run_id INTEGER NOT NULL,
+                            plan_version INTEGER NOT NULL,
+                            intent_id TEXT NOT NULL,
+                            intent_type TEXT NOT NULL,
+                            side TEXT NOT NULL,
+                            amount REAL NOT NULL,
+                            account_id TEXT NOT NULL,
+                            paired_account_id TEXT,
+                            notes TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            created_at INTEGER NOT NULL,
+                            FOREIGN KEY(run_id) REFERENCES strategy_execution_runs(id) ON DELETE CASCADE
+                        );
+                        CREATE TABLE IF NOT EXISTS strategy_execution_task_attempts (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            task_id INTEGER NOT NULL,
+                            run_id INTEGER NOT NULL,
+                            plan_version INTEGER NOT NULL,
+                            status TEXT NOT NULL,
+                            tx_signature TEXT,
+                            error_message TEXT,
+                            started_at INTEGER NOT NULL,
+                            finished_at INTEGER NOT NULL,
+                            FOREIGN KEY(task_id) REFERENCES strategy_execution_tasks(id) ON DELETE CASCADE,
+                            FOREIGN KEY(run_id) REFERENCES strategy_execution_runs(id) ON DELETE CASCADE
+                        );
             CREATE TABLE IF NOT EXISTS audit_logs (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               user_id INTEGER NOT NULL,
@@ -351,6 +1089,11 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
             CREATE INDEX IF NOT EXISTS idx_accounts_user_type ON accounts(user_id, type);
+            CREATE INDEX IF NOT EXISTS idx_account_balance_snapshots_account_asset ON account_balance_snapshots(account_id, asset_mint);
+            CREATE INDEX IF NOT EXISTS idx_account_pair_capabilities_account_enabled ON account_pair_capabilities(account_id, is_enabled);
+            CREATE INDEX IF NOT EXISTS idx_strategy_execution_runs_user_status ON strategy_execution_runs(user_id, status, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_strategy_execution_tasks_run_version ON strategy_execution_tasks(run_id, plan_version, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_strategy_execution_task_attempts_task_started ON strategy_execution_task_attempts(task_id, started_at DESC);
             CREATE INDEX IF NOT EXISTS idx_audit_logs_user_created_at ON audit_logs(user_id, created_at DESC);
             ",
         )
@@ -594,6 +1337,80 @@ impl Database {
         Ok(accounts)
     }
 
+    fn upsert_account_balance_snapshot(
+        &mut self,
+        account_id: i64,
+        asset_mint: &str,
+        free_amount: f64,
+        locked_amount: f64,
+    ) -> Result<(), ApiError> {
+        if account_id <= 0 {
+            return Err(bad_request("Account id must be positive"));
+        }
+        let normalized_asset_mint = normalize_pubkey(asset_mint)?;
+        if free_amount < 0.0 || locked_amount < 0.0 {
+            return Err(bad_request("Account balances must be non-negative"));
+        }
+
+        let updated_at = now_ts();
+        self.conn
+            .execute(
+                "
+                INSERT INTO account_balance_snapshots (account_id, asset_mint, free_amount, locked_amount, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(account_id, asset_mint) DO UPDATE SET
+                  free_amount = excluded.free_amount,
+                  locked_amount = excluded.locked_amount,
+                  updated_at = excluded.updated_at
+                ",
+                params![account_id, normalized_asset_mint, free_amount, locked_amount, updated_at],
+            )
+            .map_err(internal_error)?;
+        Ok(())
+    }
+
+    fn upsert_account_pair_capability(
+        &mut self,
+        account_id: i64,
+        base_mint: &str,
+        quote_mint: &str,
+        is_enabled: bool,
+    ) -> Result<(), ApiError> {
+        if account_id <= 0 {
+            return Err(bad_request("Account id must be positive"));
+        }
+
+        let normalized_base_mint = normalize_pubkey(base_mint)?;
+        let normalized_quote_mint = normalize_pubkey(quote_mint)?;
+        let now = now_ts();
+
+        self.conn
+            .execute(
+                "
+                INSERT INTO account_pair_capabilities (
+                  account_id,
+                  base_mint,
+                  quote_mint,
+                  is_enabled,
+                  created_at,
+                  updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                ON CONFLICT(account_id, base_mint, quote_mint) DO UPDATE SET
+                  is_enabled = excluded.is_enabled,
+                  updated_at = excluded.updated_at
+                ",
+                params![
+                    account_id,
+                    normalized_base_mint,
+                    normalized_quote_mint,
+                    if is_enabled { 1_i64 } else { 0_i64 },
+                    now,
+                ],
+            )
+            .map_err(internal_error)?;
+        Ok(())
+    }
+
     fn import_watch_account(&mut self, user_id: i64, request: ImportAccountRequest) -> Result<AccountRecord, ApiError> {
         validate_label(&request.label)?;
         let address = normalize_pubkey(&request.address)?;
@@ -645,6 +1462,14 @@ impl Database {
             "private_key.imported",
             &address,
             &format!("Imported managed key '{}'. Private key material was encrypted at rest and is never returned by the API.", request.label.trim()),
+        )?;
+        self.upsert_account_balance_snapshot(id, "So11111111111111111111111111111111111111112", 0.0, 0.0)?;
+        self.upsert_account_balance_snapshot(id, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 0.0, 0.0)?;
+        self.upsert_account_pair_capability(
+            id,
+            "So11111111111111111111111111111111111111112",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            true,
         )?;
         Ok(AccountRecord {
             id,
@@ -757,6 +1582,20 @@ fn api_routes(context: AppContext) -> impl Filter<Extract = impl Reply, Error = 
         .and(warp::header::optional::<String>("cookie"))
         .and_then(handle_get_state);
 
+    let get_strategy_execution = warp::path!("api" / "strategy" / "execution")
+        .and(warp::get())
+        .and(with_context(context.clone()))
+        .and(warp::header::optional::<String>("cookie"))
+        .and(warp::query::<std::collections::HashMap<String, String>>())
+        .and_then(handle_get_strategy_execution);
+
+    let consume_strategy_execution = warp::path!("api" / "strategy" / "execution" / "consume")
+        .and(warp::post())
+        .and(with_context(context.clone()))
+        .and(warp::header::optional::<String>("cookie"))
+        .and(json_body::<StrategyExecutionConsumeRequest>())
+        .and_then(handle_consume_strategy_execution);
+
     let save_settings = warp::path!("api" / "settings")
         .and(warp::post())
         .and(with_context(context.clone()))
@@ -791,6 +1630,8 @@ fn api_routes(context: AppContext) -> impl Filter<Extract = impl Reply, Error = 
         .or(login)
         .or(logout)
         .or(get_state)
+        .or(get_strategy_execution)
+        .or(consume_strategy_execution)
         .or(save_settings)
         .or(import_private_key)
         .or(import_account)
@@ -871,6 +1712,107 @@ async fn handle_get_state(context: AppContext, cookie_header: Option<String>) ->
     Ok(response)
 }
 
+async fn handle_get_strategy_execution(
+    context: AppContext,
+    cookie_header: Option<String>,
+    query: std::collections::HashMap<String, String>,
+) -> Result<impl Reply, Infallible> {
+    let response = match require_admin(&context, cookie_header) {
+        Ok(user) => {
+            let mut db = context.db.lock().expect("database mutex poisoned");
+            match db.get_latest_strategy_execution_run(user.id) {
+                Ok(active_run) => {
+                    let execute_requested = query
+                        .get("execute")
+                        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+                        .unwrap_or(false);
+
+                    if execute_requested {
+                        if let Some(run) = &active_run {
+                            if let Err(error) = db.consume_strategy_execution_tasks(run.id, 100, &context.config) {
+                                return Ok(error_response(error));
+                            }
+                        }
+                    }
+
+                    let refreshed_run = match db.get_latest_strategy_execution_run(user.id) {
+                        Ok(run) => run,
+                        Err(error) => return Ok(error_response(error)),
+                    };
+                    let tasks = match &active_run {
+                        Some(run) => db.list_strategy_execution_tasks(run.id),
+                        None => Ok(Vec::new()),
+                    };
+
+                    match tasks {
+                        Ok(tasks) => json_response(
+                            StatusCode::OK,
+                            &StrategyExecutionQueueResponse { active_run: refreshed_run, tasks },
+                        ),
+                        Err(error) => error_response(error),
+                    }
+                }
+                Err(error) => error_response(error),
+            }
+        }
+        Err(error) => error_response(error),
+    };
+    Ok(response)
+}
+
+async fn handle_consume_strategy_execution(
+    context: AppContext,
+    cookie_header: Option<String>,
+    request: StrategyExecutionConsumeRequest,
+) -> Result<impl Reply, Infallible> {
+    let response = match require_admin(&context, cookie_header) {
+        Ok(user) => {
+            let mut db = context.db.lock().expect("database mutex poisoned");
+            let run = match request.run_id {
+                Some(run_id) => db
+                    .get_latest_strategy_execution_run(user.id)
+                    .and_then(|latest| match latest {
+                        Some(active) if active.id == run_id => Ok(Some(active)),
+                        Some(_) => Err(bad_request("Requested runId is not the latest execution run for this user")),
+                        None => Err(bad_request("No strategy execution run found for this user")),
+                    }),
+                None => db.get_latest_strategy_execution_run(user.id),
+            };
+
+            match run {
+                Ok(Some(active_run)) => match db.consume_strategy_execution_tasks(
+                    active_run.id,
+                    request.max_tasks.unwrap_or(100),
+                    &context.config,
+                ) {
+                    Ok(results) => {
+                        let refreshed_run = match db.get_latest_strategy_execution_run(user.id) {
+                            Ok(run) => run,
+                            Err(error) => return Ok(error_response(error)),
+                        };
+                        let executed_count = results.iter().filter(|item| item.status == "executed").count();
+                        let failed_count = results.iter().filter(|item| item.status == "failed").count();
+                        json_response(
+                            StatusCode::OK,
+                            &StrategyExecutionConsumeResponse {
+                                active_run: refreshed_run,
+                                results,
+                                executed_count,
+                                failed_count,
+                            },
+                        )
+                    }
+                    Err(error) => error_response(error),
+                },
+                Ok(None) => error_response(bad_request("No strategy execution run found for this user")),
+                Err(error) => error_response(error),
+            }
+        }
+        Err(error) => error_response(error),
+    };
+    Ok(response)
+}
+
 async fn handle_save_settings(
     context: AppContext,
     cookie_header: Option<String>,
@@ -938,21 +1880,10 @@ async fn handle_trade(
     let response = match require_admin(&context, cookie_header) {
         Ok(user) => {
             let mut db = context.db.lock().expect("database mutex poisoned");
-            let symbol = request.symbol.unwrap_or_else(|| "unknown".to_string());
-            let action = request.action.unwrap_or_else(|| "unspecified".to_string());
-            let _ = db.add_audit_log(
-                user.id,
-                "trade.execution_blocked",
-                &symbol,
-                &format!(
-                    "Received blocked trade execution request for action '{}'. Real trade execution is not implemented in the Rust backend yet.",
-                    action
-                ),
-            );
-            error_response(ApiError {
-                status: StatusCode::NOT_IMPLEMENTED,
-                message: "Trade execution is intentionally not implemented in this Rust backend yet.".to_string(),
-            })
+            match strategy::orchestrate_trade(&mut db, user.id, request) {
+                Ok(result) => json_response(StatusCode::OK, &result),
+                Err(error) => error_response(error),
+            }
         }
         Err(error) => error_response(error),
     };
@@ -1132,6 +2063,21 @@ fn encrypt_private_key(secret_bytes: &[u8], encryption_key: [u8; 32]) -> Result<
     Ok(BASE64_STANDARD.encode(payload))
 }
 
+fn decrypt_private_key(payload: &str, encryption_key: [u8; 32]) -> Result<Vec<u8>, ApiError> {
+    let bytes = BASE64_STANDARD
+        .decode(payload.trim())
+        .map_err(|_| bad_request("Encrypted private key payload is not valid base64"))?;
+    if bytes.len() <= 12 {
+        return Err(bad_request("Encrypted private key payload is too short"));
+    }
+
+    let (nonce_bytes, ciphertext) = bytes.split_at(12);
+    let cipher = Aes256Gcm::new_from_slice(&encryption_key).map_err(internal_error)?;
+    cipher
+        .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+        .map_err(|_| internal_error("Failed to decrypt private key material"))
+}
+
 fn parse_encryption_key(value: &str) -> Result<[u8; 32], ApiError> {
     let trimmed = value.trim();
     let decoded = BASE64_STANDARD
@@ -1164,6 +2110,14 @@ fn validate_contract_address(value: &str) -> Result<(), ApiError> {
     }
     let _ = normalize_pubkey(value)?;
     Ok(())
+}
+
+fn normalize_asset_symbol(value: &str) -> Result<String, ApiError> {
+    let normalized = value.trim().to_uppercase();
+    if normalized.is_empty() {
+        return Err(bad_request("Asset symbol is required"));
+    }
+    Ok(normalized)
 }
 
 fn validate_label(label: &str) -> Result<(), ApiError> {
@@ -1299,5 +2253,377 @@ mod tests {
     fn encryption_key_parsing_accepts_hex_encoded_32_bytes() {
         let key = parse_encryption_key("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f").unwrap();
         assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn generate_trade_plan_uses_sqlite_balances_and_pair_capabilities() {
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("tradeengine-planner-test-{}.db", now_ts()));
+
+        let mut db = Database::open(db_path.to_str().expect("db path to str")).expect("open db");
+        let user = db.create_user("planner_admin", "averysecurepassword").expect("create user");
+
+        let encryption_key = [7_u8; 32];
+        let generated_keypair = Keypair::new();
+        let private_key = bs58::encode(generated_keypair.to_bytes()).into_string();
+        let imported = db
+            .import_private_key(
+                user.id,
+                ImportPrivateKeyRequest {
+                    label: "Planner Wallet".to_string(),
+                    private_key,
+                },
+                encryption_key,
+            )
+            .expect("import managed key");
+
+        db.upsert_account_balance_snapshot(imported.id, "So11111111111111111111111111111111111111112", 150.0, 0.0)
+            .expect("seed base balance");
+        db.upsert_account_balance_snapshot(imported.id, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 275.0, 0.0)
+            .expect("seed quote balance");
+        db.upsert_account_pair_capability(
+            imported.id,
+            "So11111111111111111111111111111111111111112",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            true,
+        )
+            .expect("seed pair capability");
+
+        let plan = db
+            .generate_trade_plan(
+                user.id,
+                &planner::TradePlanningInput {
+                    target_buy_volume: 50.0,
+                    target_sell_volume: 25.0,
+                    target_total_volume: 75.0,
+                    micro_task_size_hint: 25.0,
+                    base_asset: planner::AssetDefinition {
+                        symbol: "SOL".to_string(),
+                        mint: "So11111111111111111111111111111111111111112".to_string(),
+                        decimals: 9,
+                    },
+                    quote_asset: planner::AssetDefinition {
+                        symbol: "USDC".to_string(),
+                        mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                        decimals: 6,
+                    },
+                },
+            )
+            .expect("generate trade plan");
+
+        assert_eq!(plan.len(), 3);
+        assert!(plan.iter().filter(|intent| intent.side == planner::OrderSide::Buy).count() >= 2);
+        assert!(plan.iter().any(|intent| intent.side == planner::OrderSide::Sell));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn trade_orchestration_requires_two_confirmations_before_execution() {
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("tradeengine-strategy-confirm-{}.db", now_ts()));
+
+        let mut db = Database::open(db_path.to_str().expect("db path to str")).expect("open db");
+        let user = db.create_user("strategy_admin", "averysecurepassword").expect("create user");
+
+        let request = TradeRequest {
+            base_symbol: "SOL".to_string(),
+            base_mint: "So11111111111111111111111111111111111111112".to_string(),
+            base_decimals: 9,
+            quote_symbol: "USDC".to_string(),
+            quote_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+            quote_decimals: 6,
+            target_buy_volume: 10.0,
+            target_sell_volume: 0.0,
+            target_total_volume: 10.0,
+            micro_task_size_hint: Some(5.0),
+            confirm_strategy: false,
+            confirm_plan: false,
+            external_delay_ms: None,
+        };
+
+        let preview_only = strategy::orchestrate_trade(&mut db, user.id, request).expect("preview only");
+        assert!(!preview_only.strategy_confirmed);
+        assert_eq!(preview_only.requires_confirmation_step, 1);
+        assert!(preview_only.planned_intents.is_empty());
+
+        let encryption_key = [9_u8; 32];
+        let generated_keypair = Keypair::new();
+        let private_key = bs58::encode(generated_keypair.to_bytes()).into_string();
+        let imported = db
+            .import_private_key(
+                user.id,
+                ImportPrivateKeyRequest {
+                    label: "Strategy Wallet".to_string(),
+                    private_key,
+                },
+                encryption_key,
+            )
+            .expect("import managed key");
+        db.upsert_account_balance_snapshot(imported.id, "So11111111111111111111111111111111111111112", 50.0, 0.0)
+            .expect("seed base balance");
+        db.upsert_account_balance_snapshot(imported.id, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 50.0, 0.0)
+            .expect("seed quote balance");
+
+        let strategy_confirmed = strategy::orchestrate_trade(
+            &mut db,
+            user.id,
+            TradeRequest {
+                base_symbol: "SOL".to_string(),
+                base_mint: "So11111111111111111111111111111111111111112".to_string(),
+                base_decimals: 9,
+                quote_symbol: "USDC".to_string(),
+                quote_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                quote_decimals: 6,
+                target_buy_volume: 10.0,
+                target_sell_volume: 0.0,
+                target_total_volume: 10.0,
+                micro_task_size_hint: Some(5.0),
+                confirm_strategy: true,
+                confirm_plan: false,
+                external_delay_ms: None,
+            },
+        )
+        .expect("strategy confirmed");
+
+        assert!(strategy_confirmed.strategy_confirmed);
+        assert!(!strategy_confirmed.plan_confirmed);
+        assert_eq!(strategy_confirmed.requires_confirmation_step, 2);
+        assert!(strategy_confirmed.execution_run_id.is_none());
+        assert!(!strategy_confirmed.planned_intents.is_empty());
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn trade_orchestration_logs_replan_when_external_delay_is_present() {
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("tradeengine-strategy-replan-{}.db", now_ts()));
+
+        let mut db = Database::open(db_path.to_str().expect("db path to str")).expect("open db");
+        let user = db.create_user("replan_admin", "averysecurepassword").expect("create user");
+
+        let encryption_key = [11_u8; 32];
+        let generated_keypair = Keypair::new();
+        let private_key = bs58::encode(generated_keypair.to_bytes()).into_string();
+        let imported = db
+            .import_private_key(
+                user.id,
+                ImportPrivateKeyRequest {
+                    label: "Replan Wallet".to_string(),
+                    private_key,
+                },
+                encryption_key,
+            )
+            .expect("import managed key");
+        db.upsert_account_balance_snapshot(imported.id, "So11111111111111111111111111111111111111112", 60.0, 0.0)
+            .expect("seed base balance");
+        db.upsert_account_balance_snapshot(imported.id, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 120.0, 0.0)
+            .expect("seed quote balance");
+
+        let execution_started = strategy::orchestrate_trade(
+            &mut db,
+            user.id,
+            TradeRequest {
+                base_symbol: "SOL".to_string(),
+                base_mint: "So11111111111111111111111111111111111111112".to_string(),
+                base_decimals: 9,
+                quote_symbol: "USDC".to_string(),
+                quote_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                quote_decimals: 6,
+                target_buy_volume: 20.0,
+                target_sell_volume: 10.0,
+                target_total_volume: 30.0,
+                micro_task_size_hint: Some(10.0),
+                confirm_strategy: true,
+                confirm_plan: true,
+                external_delay_ms: Some(1500),
+            },
+        )
+        .expect("execution started");
+
+        assert!(execution_started.execution_started);
+        assert_eq!(execution_started.plan_version, 2);
+        let run_id = execution_started.execution_run_id.expect("execution run id");
+        assert!(execution_started
+            .execution_log
+            .iter()
+            .any(|entry| entry.stage == "replan_due_to_external_timing"));
+
+        let persisted_run = db
+            .conn
+            .query_row(
+                "SELECT status, latest_plan_version FROM strategy_execution_runs WHERE id = ?1",
+                params![run_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("load execution run");
+        assert_eq!(persisted_run.0, "replanned");
+        assert_eq!(persisted_run.1, 2);
+
+        let task_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM strategy_execution_tasks WHERE run_id = ?1 AND plan_version = 2",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .expect("count execution tasks");
+        assert!(task_count > 0);
+
+        let logs = db.list_audit_logs(user.id, &user.username).expect("load audit logs");
+        assert!(logs.iter().any(|entry| entry.target == "replan_due_to_external_timing"));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn strategy_execution_query_contract_returns_active_run_and_tasks() {
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("tradeengine-execution-query-{}.db", now_ts()));
+
+        let mut db = Database::open(db_path.to_str().expect("db path to str")).expect("open db");
+        let user = db.create_user("query_admin", "averysecurepassword").expect("create user");
+
+        let encryption_key = [13_u8; 32];
+        let generated_keypair = Keypair::new();
+        let private_key = bs58::encode(generated_keypair.to_bytes()).into_string();
+        let imported = db
+            .import_private_key(
+                user.id,
+                ImportPrivateKeyRequest {
+                    label: "Query Wallet".to_string(),
+                    private_key,
+                },
+                encryption_key,
+            )
+            .expect("import managed key");
+        db.upsert_account_balance_snapshot(imported.id, "So11111111111111111111111111111111111111112", 40.0, 0.0)
+            .expect("seed base balance");
+        db.upsert_account_balance_snapshot(imported.id, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 80.0, 0.0)
+            .expect("seed quote balance");
+
+        let execution_started = strategy::orchestrate_trade(
+            &mut db,
+            user.id,
+            TradeRequest {
+                base_symbol: "SOL".to_string(),
+                base_mint: "So11111111111111111111111111111111111111112".to_string(),
+                base_decimals: 9,
+                quote_symbol: "USDC".to_string(),
+                quote_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                quote_decimals: 6,
+                target_buy_volume: 20.0,
+                target_sell_volume: 10.0,
+                target_total_volume: 30.0,
+                micro_task_size_hint: Some(10.0),
+                confirm_strategy: true,
+                confirm_plan: true,
+                external_delay_ms: None,
+            },
+        )
+        .expect("start execution");
+
+        let active_run = db
+            .get_latest_strategy_execution_run(user.id)
+            .expect("load latest run")
+            .expect("active run present");
+        let tasks = db
+            .list_strategy_execution_tasks(active_run.id)
+            .expect("load tasks");
+
+        assert_eq!(active_run.id, execution_started.execution_run_id.expect("run id"));
+        assert_eq!(active_run.base_symbol, "SOL");
+        assert_eq!(active_run.base_mint, "So11111111111111111111111111111111111111112");
+        assert_eq!(active_run.base_decimals, 9);
+        assert_eq!(active_run.quote_symbol, "USDC");
+        assert_eq!(active_run.quote_mint, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+        assert_eq!(active_run.quote_decimals, 6);
+        assert_eq!(active_run.latest_plan_version, 1);
+        assert_eq!(active_run.status, "executing");
+        assert!(!tasks.is_empty());
+        assert!(tasks.iter().all(|task| task.run_id == active_run.id));
+        assert!(tasks.iter().all(|task| task.plan_version == 1));
+        assert!(tasks.iter().all(|task| task.status == "pending"));
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    #[ignore = "requires live Jupiter and Solana RPC execution"]
+    fn task_consumer_advances_pending_tasks_to_executed() {
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("tradeengine-task-consumer-{}.db", now_ts()));
+
+        let mut db = Database::open(db_path.to_str().expect("db path to str")).expect("open db");
+        let user = db.create_user("consumer_admin", "averysecurepassword").expect("create user");
+
+        let encryption_key = [17_u8; 32];
+        let generated_keypair = Keypair::new();
+        let private_key = bs58::encode(generated_keypair.to_bytes()).into_string();
+        let imported = db
+            .import_private_key(
+                user.id,
+                ImportPrivateKeyRequest {
+                    label: "Consumer Wallet".to_string(),
+                    private_key,
+                },
+                encryption_key,
+            )
+            .expect("import managed key");
+        db.upsert_account_balance_snapshot(imported.id, "So11111111111111111111111111111111111111112", 40.0, 0.0)
+            .expect("seed base balance");
+        db.upsert_account_balance_snapshot(imported.id, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 90.0, 0.0)
+            .expect("seed quote balance");
+
+        let execution_started = strategy::orchestrate_trade(
+            &mut db,
+            user.id,
+            TradeRequest {
+                base_symbol: "SOL".to_string(),
+                base_mint: "So11111111111111111111111111111111111111112".to_string(),
+                base_decimals: 9,
+                quote_symbol: "USDC".to_string(),
+                quote_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+                quote_decimals: 6,
+                target_buy_volume: 20.0,
+                target_sell_volume: 10.0,
+                target_total_volume: 30.0,
+                micro_task_size_hint: Some(10.0),
+                confirm_strategy: true,
+                confirm_plan: true,
+                external_delay_ms: None,
+            },
+        )
+        .expect("start execution");
+
+        let run_id = execution_started.execution_run_id.expect("run id");
+        let config = Config {
+            bind_addr: "127.0.0.1:3000".to_string(),
+            database_path: db_path.to_str().expect("db path to str").to_string(),
+            static_dir: "../dist".to_string(),
+            session_ttl_hours: 12,
+            cookie_secure: false,
+            private_key_encryption_key: Some(encryption_key),
+            solana_rpc_url: Some("https://api.mainnet-beta.solana.com".to_string()),
+        };
+        let consumed = match db.consume_strategy_execution_tasks(run_id, 100, &config) {
+            Ok(consumed) => consumed,
+            Err(error) => panic!("consume tasks failed: {}", error.message),
+        };
+        assert!(!consumed.is_empty());
+
+        let persisted_run = db
+            .get_latest_strategy_execution_run(user.id)
+            .expect("load latest run")
+            .expect("active run present");
+        assert_eq!(persisted_run.status, "completed");
+
+        let tasks = db
+            .list_strategy_execution_tasks(run_id)
+            .expect("load tasks");
+        assert!(tasks.iter().all(|task| task.status == "executed"));
+
+        let _ = std::fs::remove_file(db_path);
     }
 }

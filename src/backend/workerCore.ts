@@ -845,22 +845,22 @@ export function buildTrackedTokens(
 
   for (const token of tradableTokens) {
     if (!token.isActive || token.network !== 'solana') continue;
-    if (token.contractAddress === SOLANA_USDC_MINT) continue;
-    tracked.set(token.contractAddress, {
-      mint: token.contractAddress,
+    if (token.baseTokenAddress === SOLANA_USDC_MINT) continue;
+    tracked.set(token.baseTokenAddress, {
+      mint: token.baseTokenAddress,
       symbol:
         token.symbol ??
-        `${token.contractAddress.slice(0, 4)}...${token.contractAddress.slice(-4)}`,
+        `${token.baseTokenAddress.slice(0, 4)}...${token.baseTokenAddress.slice(-4)}`,
       network: token.network,
       decimals: token.decimals,
     });
   }
 
   if (
-    settings.contractAddress.trim() &&
-    settings.contractAddress !== SOLANA_USDC_MINT
+    settings.baseTokenAddress.trim() &&
+    settings.baseTokenAddress !== SOLANA_USDC_MINT
   ) {
-    const mint = normalizePubkey(settings.contractAddress);
+    const mint = normalizePubkey(settings.baseTokenAddress);
     if (!tracked.has(mint)) {
       tracked.set(mint, {
         mint,

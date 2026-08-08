@@ -43,6 +43,41 @@ export interface AvailableAccountRecord extends AccountRecord {
   walletBalance: WalletBalanceResponse;
 }
 
+function mapAccountRow(
+  row: {
+    id: number;
+    label: string;
+    wallet_address: string;
+    type: string;
+    capability_base_mint?: string | null;
+    capability_quote_mint?: string | null;
+    created_at: number;
+  },
+): AccountRecord {
+  return {
+    id: row.id,
+    label: row.label,
+    address: row.wallet_address,
+    type: row.type,
+    capabilityBaseMint: row.capability_base_mint ?? null,
+    capabilityQuoteMint: row.capability_quote_mint ?? null,
+    createdAt: row.created_at,
+  };
+}
+
+export function accountCapabilityMatchesMintPair(
+  account: Pick<AccountRecord, 'capabilityBaseMint' | 'capabilityQuoteMint'>,
+  baseMint: string,
+  quoteMint: string,
+): boolean {
+  const capabilityBaseMint = account.capabilityBaseMint?.trim() ?? '';
+  const capabilityQuoteMint = account.capabilityQuoteMint?.trim() ?? '';
+  if (!capabilityBaseMint && !capabilityQuoteMint) {
+    return true;
+  }
+  return capabilityBaseMint === baseMint && capabilityQuoteMint === quoteMint;
+}
+
 function compareLeastRecentlyUsed(
   left: { lastTradedAt: number | null; createdAt: number; id: number },
   right: { lastTradedAt: number | null; createdAt: number; id: number },
@@ -65,7 +100,10 @@ function compareLeastRecentlyUsed(
 function hasSufficientBalance(
   action: 'buy' | 'sell',
   estimatedAmount: number,
-  contractAddress: string,
+  pair: {
+    baseMint: string;
+    quoteMint: string;
+  },
   walletBalance: WalletBalanceResponse,
 ): boolean {
   const solBalance = toFiniteNumber(walletBalance.sol) ?? 0;
@@ -74,15 +112,39 @@ function hasSufficientBalance(
   }
 
   if (action === 'buy') {
-    const usdcBalance = toFiniteNumber(walletBalance.usdc) ?? 0;
-    return usdcBalance >= estimatedAmount;
+    if (pair.quoteMint === SOLANA_USDC_MINT) {
+      const usdcBalance = toFiniteNumber(walletBalance.usdc) ?? 0;
+      return usdcBalance >= estimatedAmount;
+    }
+    const quoteBalance = walletBalance.tokens.find(
+      (token) => token.mint === pair.quoteMint,
+    );
+    return (toFiniteNumber(quoteBalance?.amount) ?? 0) > 0;
   }
 
   const targetBalance = walletBalance.tokens.find(
-    (token) => token.mint === contractAddress,
+    (token) => token.mint === pair.baseMint,
   );
   const tokenBalance = toFiniteNumber(targetBalance?.amount) ?? 0;
   return tokenBalance >= estimatedAmount;
+}
+
+function hasAnyPairTokenBalance(
+  walletBalance: WalletBalanceResponse,
+  pair: {
+    baseMint: string;
+    quoteMint: string;
+  },
+): boolean {
+  const baseBalance = walletBalance.tokens.find((token) => token.mint === pair.baseMint);
+  if ((toFiniteNumber(baseBalance?.amount) ?? 0) > 0) {
+    return true;
+  }
+  if (pair.quoteMint === SOLANA_USDC_MINT) {
+    return (toFiniteNumber(walletBalance.usdc) ?? 0) > 0;
+  }
+  const quoteBalance = walletBalance.tokens.find((token) => token.mint === pair.quoteMint);
+  return (toFiniteNumber(quoteBalance?.amount) ?? 0) > 0;
 }
 
 /**
@@ -233,9 +295,9 @@ export async function dbSaveSettings(
   userId: number,
   update: SettingsUpdateRequest,
 ): Promise<void> {
-  validateContractAddress(update.contractAddress);
-  const normalizedContractAddress = update.contractAddress.trim()
-    ? normalizePubkey(update.contractAddress)
+  validateContractAddress(update.baseTokenAddress);
+  const normalizedContractAddress = update.baseTokenAddress.trim()
+    ? normalizePubkey(update.baseTokenAddress)
     : '';
   if (update.volatilityTarget < 0 || update.volatilityTarget > 100) {
     throw new ApiError(400, 'Volatility target must be between 0 and 100');
@@ -280,17 +342,33 @@ export async function dbSaveActiveContractAddress(
   db: D1Database,
   userId: number,
   contractAddress: string,
+  quoteTokenAddress?: string,
 ): Promise<string> {
   validateContractAddress(contractAddress);
   const normalizedContractAddress = contractAddress.trim()
     ? normalizePubkey(contractAddress)
     : '';
-  await db
-    .prepare(
-      'INSERT INTO settings (user_id, key, value) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value',
-    )
-    .bind(userId, 'contractAddress', normalizedContractAddress)
-    .run();
+  const normalizedQuoteTokenAddress =
+    typeof quoteTokenAddress === 'string' && quoteTokenAddress.trim().length > 0
+      ? normalizePubkey(quoteTokenAddress)
+      : '';
+  await db.batch([
+    db
+      .prepare(
+        'INSERT INTO settings (user_id, key, value) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value',
+      )
+      .bind(userId, 'contractAddress', normalizedContractAddress),
+    db
+      .prepare(
+        'INSERT INTO settings (user_id, key, value) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value',
+      )
+      .bind(userId, 'activeBaseTokenAddress', normalizedContractAddress),
+    db
+      .prepare(
+        'INSERT INTO settings (user_id, key, value) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value',
+      )
+      .bind(userId, 'activeQuoteTokenAddress', normalizedQuoteTokenAddress),
+  ]);
   return normalizedContractAddress;
 }
 
@@ -299,7 +377,9 @@ export async function dbLoadSettings(
   userId: number,
 ): Promise<SettingsState> {
   const settings: SettingsState = {
-    contractAddress: '',
+    baseTokenAddress: '',
+    activeBaseTokenAddress: '',
+    activeQuoteTokenAddress: '',
     volatilityTarget: 4.5,
     pullbackTarget: 2,
     volumeTarget: 0,
@@ -328,7 +408,13 @@ export async function dbLoadSettings(
   for (const row of rows.results) {
     switch (row.key) {
       case 'contractAddress':
-        settings.contractAddress = row.value;
+        settings.baseTokenAddress = row.value;
+        break;
+      case 'activeBaseTokenAddress':
+        settings.activeBaseTokenAddress = row.value;
+        break;
+      case 'activeQuoteTokenAddress':
+        settings.activeQuoteTokenAddress = row.value;
         break;
       case 'volatilityTarget':
         settings.volatilityTarget =
@@ -359,6 +445,8 @@ export async function dbLoadSettings(
         break;
     }
   }
+  settings.activeBaseTokenAddress =
+    settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress;
   return settings;
 }
 
@@ -369,7 +457,10 @@ export async function dbListAccounts(
 ): Promise<AccountRecord[]> {
   const rows = await db
     .prepare(
-      'SELECT id, label, wallet_address, type, created_at FROM accounts WHERE user_id = ?1 AND type = ?2 ORDER BY created_at DESC, id DESC',
+      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at
+       FROM accounts
+       WHERE user_id = ?1 AND type = ?2
+       ORDER BY created_at DESC, id DESC`,
     )
     .bind(userId, type)
     .all<{
@@ -377,15 +468,11 @@ export async function dbListAccounts(
       label: string;
       wallet_address: string;
       type: string;
+      capability_base_mint: string | null;
+      capability_quote_mint: string | null;
       created_at: number;
     }>();
-  return rows.results.map((row) => ({
-    id: row.id,
-    label: row.label,
-    address: row.wallet_address,
-    type: row.type,
-    createdAt: row.created_at,
-  }));
+  return rows.results.map((row) => mapAccountRow(row));
 }
 
 export async function dbListManagedAccountAddresses(
@@ -408,7 +495,7 @@ export async function dbGetManagedAccountById(
 ): Promise<AccountRecord> {
   const row = await db
     .prepare(
-      `SELECT id, label, wallet_address, type, created_at
+      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at
        FROM accounts
        WHERE user_id = ?1 AND id = ?2 AND type = 'managed' AND COALESCE(is_active, 1) = 1
        LIMIT 1`,
@@ -419,18 +506,43 @@ export async function dbGetManagedAccountById(
       label: string;
       wallet_address: string;
       type: string;
+      capability_base_mint: string | null;
+      capability_quote_mint: string | null;
       created_at: number;
     }>();
   if (!row) {
     throw new ApiError(404, `Managed account ${accountId} was not found for the current user`);
   }
-  return {
-    id: row.id,
-    label: row.label,
-    address: row.wallet_address,
-    type: row.type,
-    createdAt: row.created_at,
-  };
+  return mapAccountRow(row);
+}
+
+export async function dbGetManagedAccountByAddress(
+  db: D1Database,
+  userId: number,
+  walletAddress: string,
+): Promise<AccountRecord> {
+  const normalizedAddress = normalizePubkey(walletAddress);
+  const row = await db
+    .prepare(
+      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at
+       FROM accounts
+       WHERE user_id = ?1 AND wallet_address = ?2 AND type = 'managed' AND COALESCE(is_active, 1) = 1
+       LIMIT 1`,
+    )
+    .bind(userId, normalizedAddress)
+    .first<{
+      id: number;
+      label: string;
+      wallet_address: string;
+      type: string;
+      capability_base_mint: string | null;
+      capability_quote_mint: string | null;
+      created_at: number;
+    }>();
+  if (!row) {
+    throw new ApiError(404, `Managed wallet ${normalizedAddress} was not found for the current user`);
+  }
+  return mapAccountRow(row);
 }
 
 export async function dbLoadManagedKeypairBytesByAccountId(
@@ -451,6 +563,10 @@ export async function getAvailableAccount(
   options?: {
     envRpcUrl?: string;
     cooldownMs?: number;
+    pair?: {
+      baseMint: string;
+      quoteMint: string;
+    };
   },
 ): Promise<AvailableAccountRecord | null> {
   const normalizedEstimatedAmount =
@@ -460,10 +576,13 @@ export async function getAvailableAccount(
   }
 
   const settings = await dbLoadSettings(db, userId);
-  const contractAddress = settings.contractAddress.trim()
-    ? normalizePubkey(settings.contractAddress)
-    : '';
-  if (action === 'sell' && (!contractAddress || contractAddress === SOLANA_USDC_MINT)) {
+  const pair = options?.pair ?? {
+    baseMint: settings.baseTokenAddress.trim()
+      ? normalizePubkey(settings.baseTokenAddress)
+      : '',
+    quoteMint: SOLANA_USDC_MINT,
+  };
+  if (action === 'sell' && (!pair.baseMint || pair.baseMint === pair.quoteMint)) {
     return null;
   }
 
@@ -474,6 +593,8 @@ export async function getAvailableAccount(
          a.label,
          a.wallet_address,
          a.type,
+        a.capability_base_mint,
+        a.capability_quote_mint,
          a.created_at,
          COALESCE(a.is_active, 1) AS is_active,
          (
@@ -492,6 +613,8 @@ export async function getAvailableAccount(
       label: string;
       wallet_address: string;
       type: string;
+      capability_base_mint: string | null;
+      capability_quote_mint: string | null;
       created_at: number;
       is_active: number;
       last_traded_at: number | null;
@@ -532,16 +655,15 @@ export async function getAvailableAccount(
       tradableTokens,
       rpcUrls,
     );
-    if (!hasSufficientBalance(action, normalizedEstimatedAmount, contractAddress, walletBalance)) {
+    if (!hasAnyPairTokenBalance(walletBalance, pair)) {
+      continue;
+    }
+    if (!hasSufficientBalance(action, normalizedEstimatedAmount, pair, walletBalance)) {
       continue;
     }
 
     return {
-      id: candidate.id,
-      label: candidate.label,
-      address: candidate.wallet_address,
-      type: candidate.type,
-      createdAt: candidate.created_at,
+      ...mapAccountRow(candidate),
       isActive: candidate.is_active !== 0,
       lastTradedAt: lastTradedAtMs,
       walletBalance,
@@ -742,6 +864,7 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
          tl.executed_amount,
          tl.executed_price,
          tl.tx_signature,
+        tl.execution_trace_json,
          tl.status,
          tl.error_message,
          tl.created_at,
@@ -762,6 +885,7 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
       executed_amount: number | null;
       executed_price: number | null;
       tx_signature: string | null;
+      execution_trace_json: string | null;
       status: 'PENDING' | 'SUCCESS' | 'FAILED';
       error_message: string | null;
       created_at: number;
@@ -780,6 +904,7 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
     executedAmount: row.executed_amount,
     executedPrice: row.executed_price,
     txSignature: row.tx_signature,
+    executionTraceJson: row.execution_trace_json,
     status: row.status,
     errorMessage: row.error_message,
     createdAt: row.created_at,

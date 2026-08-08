@@ -8,13 +8,13 @@ type TradingSetupPageProps = {
   engineState: EngineState;
   activeContractAddress: string;
   strategyDraft: StrategyVersionDocument | null;
-  tradableTokenForm: { network: string; contractAddress: string };
-  setTradableTokenForm: React.Dispatch<React.SetStateAction<{ network: string; contractAddress: string }>>;
+  tradableTokenForm: { network: string; contractAddress: string; quoteTokenAddress: string };
+  setTradableTokenForm: React.Dispatch<React.SetStateAction<{ network: string; contractAddress: string; quoteTokenAddress: string }>>;
   rpcEndpointForm: { url: string };
   setRpcEndpointForm: React.Dispatch<React.SetStateAction<{ url: string }>>;
   submitting: string | null;
   handleAddTrackedToken: () => void;
-  handleUseToken: (contractAddress: string) => void;
+  handleUseToken: (contractAddress: string, quoteTokenAddress: string) => void;
   handleDeleteTrackedToken: (tokenId: number) => void;
   handleAddRpcEndpoint: () => void;
   handleDeleteRpcEndpoint: (endpointId: number) => void;
@@ -52,7 +52,7 @@ export default function TradingSetupPage({
               <Settings size={20} /> Trading Setup
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-400">
-              Manage tracked trading contracts, configure RPC failover, and deploy macro-objective strategy drafts from a single dark-theme workspace.
+              Manage tracked trading pairs, configure RPC failover, and deploy macro-objective strategy drafts from a single dark-theme workspace.
             </p>
           </div>
           <div className="grid grid-cols-2 gap-3 lg:min-w-[320px]">
@@ -70,21 +70,21 @@ export default function TradingSetupPage({
         </div>
 
         <p className="mt-5 rounded-xl border border-slate-700 bg-slate-800/70 px-4 py-3 text-sm leading-relaxed text-slate-300">
-          Activate tracked tokens from the registry to swap the live contract without losing historical logs. Saving or deploying the strategy only affects the current strategy draft.
+          Activate tracked pairs from the registry to swap the live market pair without losing historical logs. Saving or deploying the strategy only affects the current strategy draft.
         </p>
 
         <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
           <div className="rounded-2xl border border-slate-700 bg-slate-800/70 p-5">
             <div>
               <label className="mb-1.5 block text-xs font-medium uppercase tracking-[0.18em] text-slate-400">
-                Add Trading Token
+                Add Trading Pair
               </label>
               <p className="text-sm text-slate-500">
-                Add tracked tokens explicitly with separate network and contract address fields.
+                Add tracked pairs explicitly with base and quote mint addresses.
               </p>
             </div>
 
-            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[150px_minmax(0,1fr)_auto]">
+            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[150px_minmax(0,1fr)_minmax(0,1fr)_auto]">
               <select
                 value={tradableTokenForm.network}
                 onChange={(event) =>
@@ -106,7 +106,19 @@ export default function TradingSetupPage({
                     contractAddress: event.target.value,
                   }))
                 }
-                placeholder="Token contract address"
+                placeholder="Base token mint address"
+                className="h-11 rounded-xl border border-slate-700 bg-slate-900 px-3 font-mono text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30"
+              />
+              <input
+                type="text"
+                value={tradableTokenForm.quoteTokenAddress}
+                onChange={(event) =>
+                  setTradableTokenForm((current) => ({
+                    ...current,
+                    quoteTokenAddress: event.target.value,
+                  }))
+                }
+                placeholder="Quote token mint address"
                 className="h-11 rounded-xl border border-slate-700 bg-slate-900 px-3 font-mono text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30"
               />
               <button
@@ -121,10 +133,10 @@ export default function TradingSetupPage({
             <div className="mt-5 flex items-start justify-between gap-3">
               <div>
                 <label className="mb-1.5 block text-xs font-medium uppercase tracking-[0.18em] text-slate-400">
-                  Tracked Token Registry
+                  Tracked Pair Registry
                 </label>
                 <p className="text-sm text-slate-500">
-                  Activating a tracked token saves it immediately and starts loading market data. Strategy deployment does not overwrite the registry.
+                  Activating a tracked pair saves its base token as the live market context. Strategy deployment does not overwrite the registry.
                 </p>
               </div>
               <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-emerald-300">
@@ -139,33 +151,36 @@ export default function TradingSetupPage({
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm font-semibold text-slate-100">
-                          {token.symbol ?? token.name ?? 'Tracked Token'}
+                          {token.symbol ?? token.name ?? 'Tracked Pair'}
+                        </span>
+                        <span className="rounded-full bg-slate-700 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+                          / {token.quoteTokenSymbol ?? token.quoteTokenName ?? token.quoteTokenAddress}
                         </span>
                         <span className="rounded-full bg-slate-700 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">
                           {token.network}
                         </span>
-                        {activeContractAddress === token.contractAddress ? (
+                        {activeContractAddress === token.baseTokenAddress ? (
                           <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-blue-300">
                             active
                           </span>
                         ) : null}
-                        {strategyDraft?.parameters.contractAddress === token.contractAddress ? (
+                        {strategyDraft?.parameters.contractAddress === token.baseTokenAddress ? (
                           <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-emerald-300">
                             draft target
                           </span>
                         ) : null}
                       </div>
                       <div className="mt-1 truncate font-mono text-xs text-slate-500">
-                        {token.contractAddress}
+                        {token.baseTokenAddress} / {token.quoteTokenAddress}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => void handleUseToken(token.contractAddress)}
-                        disabled={submitting === 'use-token' || activeContractAddress === token.contractAddress}
+                        onClick={() => void handleUseToken(token.baseTokenAddress, token.quoteTokenAddress)}
+                        disabled={submitting === 'use-token' || activeContractAddress === token.baseTokenAddress}
                         className="rounded-xl border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-medium text-white transition hover:bg-slate-700 disabled:opacity-60"
                       >
-                        {activeContractAddress === token.contractAddress
+                        {activeContractAddress === token.baseTokenAddress
                           ? 'Active'
                           : submitting === 'use-token'
                             ? 'Activating...'
@@ -175,7 +190,7 @@ export default function TradingSetupPage({
                         onClick={() => void handleDeleteTrackedToken(token.id)}
                         disabled={submitting === `token-delete-${token.id}`}
                         className="rounded-xl border border-rose-500/20 bg-rose-500/10 p-2 text-rose-400 transition hover:bg-rose-500/20 disabled:opacity-60"
-                        title="Remove tracked token"
+                        title="Remove tracked pair"
                       >
                         <Trash2 size={14} />
                       </button>
@@ -184,7 +199,7 @@ export default function TradingSetupPage({
                 ))
               ) : (
                 <div className="rounded-xl border border-dashed border-slate-700 px-4 py-4 text-sm text-slate-500">
-                  Add your first tracked token to save it as the active token automatically.
+                  Add your first tracked pair to save it as the active pair automatically.
                 </div>
               )}
             </div>

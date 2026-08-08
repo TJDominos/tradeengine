@@ -7,8 +7,8 @@ export async function dbCreateHistoricalSetupSnapshot(
   userId: number,
   settings: SettingsState,
 ): Promise<void> {
-  const tokenId = settings.contractAddress.trim()
-    ? await dbResolveTradableTokenId(db, settings.contractAddress)
+  const tokenId = settings.baseTokenAddress.trim()
+    ? await dbResolveTradableTokenId(db, settings.baseTokenAddress)
     : null;
   await db
     .prepare(
@@ -37,7 +37,7 @@ export async function dbCreateHistoricalSetupSnapshot(
       settings.netBuyinTarget,
       settings.volatilityTarget,
       settings.pullbackTarget,
-      settings.contractAddress.trim() || null,
+      settings.baseTokenAddress.trim() || null,
       JSON.stringify({ managedKeyCount: settings.managedKeyCount }),
       nowTs(),
     )
@@ -60,10 +60,10 @@ export async function dbGetLatestHistoricalSetupId(
 export async function dbComputeManagedProfitUsdc(
   db: D1Database,
   userId: number,
-  contractAddress: string,
+  baseTokenAddress: string,
   currentPriceUsd: number | null,
 ): Promise<number> {
-  const tokenId = await dbResolveTradableTokenId(db, contractAddress);
+  const tokenId = await dbResolveTradableTokenId(db, baseTokenAddress);
   if (!tokenId) {
     return 0;
   }
@@ -133,7 +133,7 @@ export async function dbListHistoricalSetups(
   return rows.results.map((row) => ({
     id: row.id,
     tokenSymbol: row.token_symbol,
-    contractAddress: row.contract_address,
+    baseTokenAddress: row.contract_address,
     timeRangeTarget: row.time_range_target,
     maxTransactions: row.max_transactions,
     maxSlippage: row.max_slippage,

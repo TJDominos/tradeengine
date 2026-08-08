@@ -272,7 +272,7 @@ export async function handleAdminWalletRoutes(
           typeof body.walletAddress === 'string' && body.walletAddress.trim().length > 0
             ? body.walletAddress
             : null,
-        contractAddress:
+        baseTokenAddress:
           typeof body.contractAddress === 'string' && body.contractAddress.trim().length > 0
             ? body.contractAddress
             : null,

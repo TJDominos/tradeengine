@@ -11,6 +11,8 @@ export interface ActiveSigningAccount {
   id: number;
   label: string;
   publicKey: string;
+  capabilityBaseMint?: string | null;
+  capabilityQuoteMint?: string | null;
   privateKeyBytes: Uint8Array;
   privateKeyBase58: string;
   createdAt: number;
@@ -19,6 +21,10 @@ export interface ActiveSigningAccount {
 export async function getActiveAccounts(
   env: Env,
   userId: number,
+  pair?: {
+    baseMint: string;
+    quoteMint: string;
+  },
 ): Promise<ActiveSigningAccount[]> {
   if (!env.PRIVATE_KEY_ENCRYPTION_KEY) {
     throw new ApiError(
@@ -33,6 +39,8 @@ export async function getActiveAccounts(
          id,
          label,
          wallet_address,
+         capability_base_mint,
+         capability_quote_mint,
          created_at
        FROM accounts
        WHERE user_id = ?1
@@ -46,11 +54,28 @@ export async function getActiveAccounts(
       id: number;
       label: string;
       wallet_address: string;
+      capability_base_mint: string | null;
+      capability_quote_mint: string | null;
       created_at: number;
     }>();
 
   return Promise.all(
-    rows.results.map(async (row) => {
+    rows.results
+      .filter((row) => {
+        if (!pair) {
+          return true;
+        }
+        const capabilityBaseMint = row.capability_base_mint?.trim() ?? '';
+        const capabilityQuoteMint = row.capability_quote_mint?.trim() ?? '';
+        if (!capabilityBaseMint && !capabilityQuoteMint) {
+          return true;
+        }
+        return (
+          capabilityBaseMint === pair.baseMint &&
+          capabilityQuoteMint === pair.quoteMint
+        );
+      })
+      .map(async (row) => {
       const privateKeyBytes = await dbLoadManagedKeypairBytesByAccountId(
         env.TRADINGBOT_DB,
         userId,
@@ -61,10 +86,12 @@ export async function getActiveAccounts(
         id: row.id,
         label: row.label,
         publicKey: row.wallet_address,
+          capabilityBaseMint: row.capability_base_mint ?? null,
+          capabilityQuoteMint: row.capability_quote_mint ?? null,
         privateKeyBytes,
         privateKeyBase58: base58Encode(privateKeyBytes),
         createdAt: row.created_at,
       };
-    }),
+      }),
   );
 }

@@ -44,7 +44,7 @@ export default function SimulationModal({
 
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <SimulationCard label="Tracked Wallets" value={String(managedAccountsCount)} />
-            <SimulationCard label="Tracked Tokens" value={String(tradableTokensCount)} />
+            <SimulationCard label="Tracked Pairs" value={String(tradableTokensCount)} />
             <SimulationCard label="Target Range" value={settings.timeRangeTarget} accent="emerald" />
             <SimulationCard label="Max Slippage" value={`${settings.maxSlippage}%`} accent="rose" />
           </div>

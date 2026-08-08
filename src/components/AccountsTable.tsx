@@ -56,7 +56,7 @@ export default function AccountsTable({
               <th className="px-4 py-3 text-right font-medium text-blue-400">USDC Bal</th>
               <th className="px-4 py-3 text-right font-medium text-amber-400">SOL Bal</th>
               <th className="px-4 py-3 text-right font-medium text-emerald-400">{trackedTokenSymbol} Amount</th>
-              <th className="px-4 py-3 font-medium">Tracked Tokens</th>
+              <th className="px-4 py-3 font-medium">Tracked Pairs</th>
               <th className="px-4 py-3 text-right font-medium">Imported</th>
             </tr>
           </thead>

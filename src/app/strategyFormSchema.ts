@@ -1,6 +1,7 @@
 import type {
   SettingsState,
 } from './types';
+import { SOLANA_USDC_MINT } from '../backend/workerShared';
 import type {
   StrategyFieldPath,
   StrategyFieldSchema,
@@ -57,7 +58,7 @@ export const STRATEGY_FIELD_SCHEMAS: StrategyFieldSchema[] = [
     path: 'parameters.contractAddress',
     section: 'basic',
     label: 'Target Contract',
-    description: 'Selected from the tracked token registry. Saving the strategy persists the chosen token as the active contract.',
+    description: 'Selected from the tracked pair registry. Saving the strategy persists the chosen pair as the active market pair.',
     fieldType: 'select',
     capability: 'supported',
     editable: true,
@@ -71,6 +72,39 @@ export const STRATEGY_FIELD_SCHEMAS: StrategyFieldSchema[] = [
     fieldType: 'textarea',
     capability: 'supported',
     editable: true,
+  },
+  {
+    id: 'baseTokenAddress',
+    path: 'parameters.baseTokenAddress',
+    section: 'basic',
+    label: 'Base Token Mint',
+    description: 'The token you are accumulating or distributing. For most strategies this should match the target contract mint.',
+    fieldType: 'text',
+    capability: 'supported',
+    editable: true,
+    placeholder: 'Base token mint address',
+  },
+  {
+    id: 'quoteTokenAddress',
+    path: 'parameters.quoteTokenAddress',
+    section: 'basic',
+    label: 'Quote Token Mint',
+    description: 'The token used to price and fund the pair, such as USDC.',
+    fieldType: 'text',
+    capability: 'supported',
+    editable: true,
+    placeholder: 'Quote token mint address',
+  },
+  {
+    id: 'ammPoolAddress',
+    path: 'parameters.ammPoolAddress',
+    section: 'basic',
+    label: 'Main AMM Pool Address',
+    description: 'Pool address used to infer buy or sell direction from webhook token flows.',
+    fieldType: 'text',
+    capability: 'supported',
+    editable: true,
+    placeholder: 'Raydium or AMM pool address',
   },
   {
     id: 'timeRangeTarget',
@@ -354,12 +388,17 @@ export const STRATEGY_FIELD_SCHEMAS: StrategyFieldSchema[] = [
 export function createStrategyDraftFromSettings(
   settings: SettingsState,
 ): StrategyVersionDocument {
+  const activeBaseTokenAddress = settings.activeBaseTokenAddress ?? settings.baseTokenAddress;
+  const activeQuoteTokenAddress = settings.activeQuoteTokenAddress ?? SOLANA_USDC_MINT;
   return {
     schemaVersion: 1,
     engineVersion: '1.0.0',
     strategyType: 'solana-auto-trade',
     parameters: {
-      contractAddress: settings.contractAddress,
+      contractAddress: activeBaseTokenAddress,
+      baseTokenAddress: activeBaseTokenAddress,
+      quoteTokenAddress: activeQuoteTokenAddress,
+      ammPoolAddress: '',
       timeRangeTarget: settings.timeRangeTarget,
       maxTransactions: settings.maxTransactions,
       maxSlippageBps: Math.round(settings.maxSlippage * 100),
