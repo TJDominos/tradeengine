@@ -126,14 +126,6 @@ export async function handleAdminWalletRoutes(
       return jsonResponse({ account, accounts: [account], importedCount: 1 }, 201);
     }
 
-    const baseDerivationPath = body.derivationPath ?? DEFAULT_SOLANA_DERIVATION_PATH;
-    const derivedAccountCount = clampDerivedAccountCount(body.derivedAccountCount);
-    const derivedAccounts = await deriveRecoveryPhraseAccounts(
-      body.recoveryPhrase ?? '',
-      baseDerivationPath,
-      derivedAccountCount,
-    );
-
     const existingAddresses = new Set(
       (
         await env.TRADINGBOT_DB
@@ -145,6 +137,17 @@ export async function handleAdminWalletRoutes(
       ).results.map((row) => row.wallet_address),
     );
 
+    const baseDerivationPath = body.derivationPath ?? DEFAULT_SOLANA_DERIVATION_PATH;
+    const derivedAccountCount = clampDerivedAccountCount(body.derivedAccountCount);
+    const scanAccountCount = clampDerivedAccountCount(
+      existingAddresses.size + derivedAccountCount,
+    );
+    const derivedAccounts = await deriveRecoveryPhraseAccounts(
+      body.recoveryPhrase ?? '',
+      baseDerivationPath,
+      scanAccountCount,
+    );
+
     const missingDerivedAccounts = derivedAccounts.filter(
       (derivedAccount) => !existingAddresses.has(derivedAccount.address),
     );
@@ -154,7 +157,7 @@ export async function handleAdminWalletRoutes(
     }
 
     const importedAccounts = [];
-    for (const derivedAccount of missingDerivedAccounts) {
+    for (const derivedAccount of missingDerivedAccounts.slice(0, derivedAccountCount)) {
       const account = await dbImportManagedKeyBytes(
         env.TRADINGBOT_DB,
         user.id,
@@ -178,6 +181,7 @@ export async function handleAdminWalletRoutes(
         accounts: importedAccounts,
         importedCount: importedAccounts.length,
         requestedDerivedAccountCount: derivedAccountCount,
+        scannedDerivedAccountCount: scanAccountCount,
       },
       201,
     );
@@ -202,13 +206,6 @@ export async function handleAdminWalletRoutes(
       }
     }
 
-    const baseDerivationPath = body.derivationPath ?? DEFAULT_SOLANA_DERIVATION_PATH;
-    const derivedAccountCount = clampDerivedAccountCount(body.derivedAccountCount);
-    const derivedAccounts = await deriveRecoveryPhraseAccounts(
-      body.recoveryPhrase,
-      baseDerivationPath,
-      derivedAccountCount,
-    );
     const existingAddresses = new Set(
       (
         await env.TRADINGBOT_DB
@@ -219,6 +216,16 @@ export async function handleAdminWalletRoutes(
           .all<{ wallet_address: string }>()
       ).results.map((row) => row.wallet_address),
     );
+    const baseDerivationPath = body.derivationPath ?? DEFAULT_SOLANA_DERIVATION_PATH;
+    const derivedAccountCount = clampDerivedAccountCount(body.derivedAccountCount);
+    const scanAccountCount = clampDerivedAccountCount(
+      existingAddresses.size + derivedAccountCount,
+    );
+    const derivedAccounts = await deriveRecoveryPhraseAccounts(
+      body.recoveryPhrase,
+      baseDerivationPath,
+      scanAccountCount,
+    );
 
     return jsonResponse({
       accounts: derivedAccounts.map((account) => ({
@@ -228,6 +235,7 @@ export async function handleAdminWalletRoutes(
         alreadyImported: existingAddresses.has(account.address),
       })),
       derivedAccountCount,
+      scannedDerivedAccountCount: scanAccountCount,
     });
   }
 

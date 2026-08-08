@@ -147,7 +147,7 @@ export default function AdminModal({
                       <div>
                         <div className="text-sm font-semibold text-amber-300">How Many Derived Accounts To Import</div>
                         <div className="mt-1 text-xs text-amber-100">Currently imported internal wallets: {managedAccountCount}</div>
-                        <div className="mt-1 text-xs text-amber-100">This import will preview and import the first {adminImportForm.derivedAccountCount} derived accounts from the phrase.</div>
+                        <div className="mt-1 text-xs text-amber-100">This import will add {adminImportForm.derivedAccountCount} more derived accounts beyond the currently imported set.</div>
                       </div>
                     </div>
                     <div className="mt-3 grid grid-cols-4 gap-2">
@@ -158,7 +158,7 @@ export default function AdminModal({
                           onClick={() => setAdminImportForm({ ...adminImportForm, derivedAccountCount: count })}
                           className={`rounded border px-2 py-2 text-xs font-semibold ${adminImportForm.derivedAccountCount === count ? 'border-amber-500 bg-amber-600 text-white' : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-500/50 hover:text-white'}`}
                         >
-                          First {count}
+                          Add {count}
                         </button>
                       ))}
                     </div>
@@ -180,7 +180,7 @@ export default function AdminModal({
                         className="w-full rounded border-2 border-amber-500/40 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-amber-500"
                       />
                       <p className="text-[10px] leading-tight text-slate-400">
-                        Increase this number above your current imported wallet count to continue importing more derived accounts.
+                        This adds the next N derived accounts after the ones you already imported.
                       </p>
                     </label>
                   </div>

@@ -125,15 +125,31 @@ export default function TransactionLogsCard({
           <tbody className="divide-y divide-slate-800">
             {currentTransactionLogs.map((log) => {
               const walletOwnershipMeta = resolveWalletOwnershipMeta(log.walletAddress, walletOwnershipLookup);
+              const webhookFromOwnership =
+                log.kind === 'webhook'
+                  ? resolveWalletOwnershipMeta(log.fromWalletAddress, walletOwnershipLookup)
+                  : null;
+              const webhookToOwnership =
+                log.kind === 'webhook'
+                  ? resolveWalletOwnershipMeta(log.toWalletAddress, walletOwnershipLookup)
+                  : null;
+              const normalizedWebhookAction =
+                log.kind === 'webhook'
+                  ? webhookFromOwnership?.ownership === 'internal' && webhookToOwnership?.ownership !== 'internal'
+                    ? 'SELL'
+                    : webhookToOwnership?.ownership === 'internal' && webhookFromOwnership?.ownership !== 'internal'
+                      ? 'BUY'
+                      : log.action
+                  : null;
               const actionLabel =
                 log.kind === 'webhook'
-                  ? log.action ?? formatWebhookEventLabel(log.eventType)
+                  ? normalizedWebhookAction ?? formatWebhookEventLabel(log.eventType)
                   : log.action;
               const actionClass =
                 log.kind === 'webhook'
-                  ? log.action === 'BUY'
+                  ? normalizedWebhookAction === 'BUY'
                     ? 'text-emerald-400'
-                    : log.action === 'SELL'
+                    : normalizedWebhookAction === 'SELL'
                       ? 'text-amber-300'
                       : 'text-sky-300'
                   : log.action === 'BUY'
