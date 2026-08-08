@@ -75,7 +75,7 @@ export default function AdminModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <div className="flex w-full max-w-md flex-col overflow-hidden rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
         <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/80 p-4">
           <h3 className="flex items-center gap-2 text-lg font-semibold">
             <Shield size={18} className="text-amber-500" />
@@ -92,7 +92,7 @@ export default function AdminModal({
           <button onClick={() => { setAdminTab('list'); setAdminMsg({ type: '', text: '' }); }} className={`flex-1 py-3 text-sm font-medium ${adminTab === 'list' ? 'border-b-2 border-amber-500 text-amber-400' : 'text-slate-400 hover:text-slate-200'}`}>Manage</button>
         </div>
 
-        <div className="space-y-4 p-6">
+        <div className="space-y-4 overflow-y-auto p-6">
           {adminMsg.text ? (
             <div className={`rounded p-3 text-sm ${adminMsg.type === 'error' ? 'border border-rose-500/20 bg-rose-500/10 text-rose-400' : 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-400'}`}>
               {adminMsg.text}
@@ -212,7 +212,10 @@ export default function AdminModal({
                     </p>
                   </label>
                   <div className="space-y-1.5">
-                    <span className="text-xs font-semibold uppercase text-slate-400">Derived Account Preview</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold uppercase text-slate-400">Derived Account Preview</span>
+                      <span className="text-[10px] text-slate-500">Updates automatically from the entered phrase</span>
+                    </div>
                     <div className="max-h-40 overflow-y-auto rounded border border-slate-800 bg-slate-950/60 p-2">
                       {loadingDerivedAccountPreview ? (
                         <div className="text-xs text-slate-400">Loading derived accounts...</div>

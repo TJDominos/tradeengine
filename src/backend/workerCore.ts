@@ -451,15 +451,17 @@ export function normalizeRecoveryPhrase(raw: string): string {
   return normalized;
 }
 
-export function deriveSolanaKeypairFromRecoveryPhrase(
-  recoveryPhraseRaw: string,
-  derivationPath = DEFAULT_SOLANA_DERIVATION_PATH,
-): Uint8Array {
-  const recoveryPhrase = normalizeRecoveryPhrase(recoveryPhraseRaw);
+function assertSolanaDerivationPath(derivationPath: string): void {
   if (!/^m(\/[0-9]+'?)+$/.test(derivationPath)) {
     throw new ApiError(400, 'Invalid derivation path');
   }
-  const seed = mnemonicToSeedSync(recoveryPhrase);
+}
+
+function deriveSolanaKeypairFromSeed(
+  seed: Uint8Array,
+  derivationPath: string,
+): Uint8Array {
+  assertSolanaDerivationPath(derivationPath);
   const derived = HDKey.fromMasterSeed(seed).derive(derivationPath);
   if (!derived.privateKey || derived.privateKey.length !== 32) {
     throw new ApiError(
@@ -468,6 +470,48 @@ export function deriveSolanaKeypairFromRecoveryPhrase(
     );
   }
   return nacl.sign.keyPair.fromSeed(derived.privateKey).secretKey;
+}
+
+export function buildSolanaAccountDerivationPath(
+  accountIndex: number,
+  baseDerivationPath = DEFAULT_SOLANA_DERIVATION_PATH,
+): string {
+  if (!Number.isInteger(accountIndex) || accountIndex < 0) {
+    throw new ApiError(400, 'Account index must be a non-negative integer');
+  }
+  assertSolanaDerivationPath(baseDerivationPath);
+  const parts = baseDerivationPath.split('/');
+  if (parts.length < 4 || parts[0] !== 'm' || parts[1] !== "44'" || parts[2] !== "501'") {
+    throw new ApiError(
+      400,
+      'Derivation path must follow the Solana format m/44\'/501\'/<account>\'/... for bulk recovery imports',
+    );
+  }
+  parts[3] = `${accountIndex}'`;
+  return parts.join('/');
+}
+
+export function deriveSolanaKeypairFromRecoveryPhrase(
+  recoveryPhraseRaw: string,
+  derivationPath = DEFAULT_SOLANA_DERIVATION_PATH,
+): Uint8Array {
+  const recoveryPhrase = normalizeRecoveryPhrase(recoveryPhraseRaw);
+  const seed = mnemonicToSeedSync(recoveryPhrase);
+  return deriveSolanaKeypairFromSeed(seed, derivationPath);
+}
+
+export function deriveSolanaKeypairsFromRecoveryPhrase(
+  recoveryPhraseRaw: string,
+  derivationPaths: string[],
+): Uint8Array[] {
+  if (derivationPaths.length === 0) {
+    return [];
+  }
+  const recoveryPhrase = normalizeRecoveryPhrase(recoveryPhraseRaw);
+  const seed = mnemonicToSeedSync(recoveryPhrase);
+  return derivationPaths.map((derivationPath) =>
+    deriveSolanaKeypairFromSeed(seed, derivationPath),
+  );
 }
 
 /** Extract the base58-encoded public key from a 64-byte Solana keypair. */

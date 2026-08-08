@@ -41,7 +41,7 @@ export default function ActivityLogsCard({
         </div>
       </div>
       <div className="overflow-x-auto">
-        <table className="min-h-[400px] w-full whitespace-nowrap text-left text-sm">
+        <table className="w-full whitespace-nowrap text-left text-sm">
           <thead className="border-b border-slate-800 bg-slate-950/50 text-slate-400">
             <tr>
               <th className="px-4 py-2 font-medium">Time</th>
@@ -67,7 +67,7 @@ export default function ActivityLogsCard({
             ))}
             {currentActivityLogs.length === 0 ? (
               <tr>
-                <td colSpan={5} className="py-8 text-center text-sm text-slate-500">
+                <td colSpan={5} className="h-[400px] py-8 align-top text-center text-sm text-slate-500">
                   No activity recorded yet.
                 </td>
               </tr>
