@@ -877,6 +877,16 @@ export async function dbListWebhookTransactionLogs(
       : hasPending || mergedDetails.transactionStatus === 'PENDING'
         ? 'PENDING'
         : 'CONFIRMED';
+    const normalizedAction: WebhookTransactionLogRecord['action'] =
+      mergedDetails.primaryWalletAddress &&
+      mergedDetails.toWalletAddress &&
+      mergedDetails.primaryWalletAddress === mergedDetails.toWalletAddress
+        ? 'BUY'
+        : mergedDetails.primaryWalletAddress &&
+            mergedDetails.fromWalletAddress &&
+            mergedDetails.primaryWalletAddress === mergedDetails.fromWalletAddress
+          ? 'SELL'
+          : mergedDetails.action;
 
     return {
       id: firstRow.id,
@@ -887,7 +897,7 @@ export async function dbListWebhookTransactionLogs(
       walletAddress: mergedDetails.primaryWalletAddress ?? firstRow.wallet_address,
       fromWalletAddress: mergedDetails.fromWalletAddress,
       toWalletAddress: mergedDetails.toWalletAddress,
-      action: mergedDetails.action,
+      action: normalizedAction,
       usdcAmount: mergedDetails.usdcAmount,
       tokenAmount: mergedDetails.tokenAmount,
       feeAmountUsd: mergedDetails.feeAmountUsd,

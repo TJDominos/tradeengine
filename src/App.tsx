@@ -928,7 +928,7 @@ export default function App() {
         recoveryPhrase: createEmptyRecoveryPhrase(),
         isRecovery: false,
         wordCount: 12,
-        derivedAccountCount: 20,
+        derivedAccountCount: Math.min((engineState?.internalAccs.length ?? 0) + 20, 100),
       });
       setDerivedAccountPreview([]);
       await loadState();
@@ -1425,6 +1425,7 @@ export default function App() {
         setAdminImportForm={setAdminImportForm}
         derivedAccountPreview={derivedAccountPreview}
         loadingDerivedAccountPreview={loadingDerivedAccountPreview}
+        managedAccountCount={managedWallets.length}
         managedWallets={managedWallets}
         walletBalanceErrors={walletBalanceErrors}
         walletBalances={walletBalances}

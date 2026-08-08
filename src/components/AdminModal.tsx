@@ -43,6 +43,7 @@ type AdminModalProps = {
   setAdminImportForm: React.Dispatch<React.SetStateAction<AdminImportFormState>>;
   derivedAccountPreview: DerivedAccountPreview[];
   loadingDerivedAccountPreview: boolean;
+  managedAccountCount: number;
   managedWallets: AccountRecord[];
   walletBalanceErrors: Record<string, string>;
   walletBalances: Record<string, WalletBalance>;
@@ -64,6 +65,7 @@ export default function AdminModal({
   setAdminImportForm,
   derivedAccountPreview,
   loadingDerivedAccountPreview,
+  managedAccountCount,
   managedWallets,
   walletBalanceErrors,
   walletBalances,
@@ -140,6 +142,32 @@ export default function AdminModal({
                     <h4 className="font-semibold">Recovery Phrase</h4>
                     <p className="text-xs text-slate-400">Import an existing wallet with a 12, 15, 18, 21, or 24-word recovery phrase.</p>
                   </div>
+                  <div className="rounded border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-100">
+                    <div className="font-semibold text-amber-300">Derived Account Range</div>
+                    <div className="mt-1">Currently imported internal wallets: {managedAccountCount}</div>
+                    <div className="mt-1">This import will preview and import the first {adminImportForm.derivedAccountCount} derived accounts from the phrase.</div>
+                  </div>
+                  <label className="block space-y-1.5">
+                    <span className="text-xs font-semibold uppercase text-slate-400">Derived Accounts To Import</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={adminImportForm.derivedAccountCount}
+                      onChange={(event) => {
+                        const nextCount = Number.parseInt(event.target.value, 10);
+                        setAdminImportForm({
+                          ...adminImportForm,
+                          derivedAccountCount: Number.isFinite(nextCount) ? nextCount : 1,
+                        });
+                      }}
+                      className="w-full rounded border-2 border-amber-500/40 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-amber-500"
+                    />
+                    <p className="text-[10px] leading-tight text-slate-500">
+                      Increase this number above your current imported wallet count to continue importing more derived accounts.
+                    </p>
+                  </label>
                   <div className="space-y-1.5">
                     <span className="text-xs font-semibold uppercase text-slate-400">Word Count</span>
                     <div className="grid grid-cols-5 gap-2">
@@ -190,27 +218,6 @@ export default function AdminModal({
                       </div>
                     ))}
                   </div>
-                  <label className="block space-y-1.5">
-                    <span className="text-xs font-semibold uppercase text-slate-400">Derived Accounts To Import</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      step={1}
-                      value={adminImportForm.derivedAccountCount}
-                      onChange={(event) => {
-                        const nextCount = Number.parseInt(event.target.value, 10);
-                        setAdminImportForm({
-                          ...adminImportForm,
-                          derivedAccountCount: Number.isFinite(nextCount) ? nextCount : 1,
-                        });
-                      }}
-                      className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-amber-500"
-                    />
-                    <p className="text-[10px] leading-tight text-slate-500">
-                      Imports the first N derived Solana accounts from this recovery phrase, whether active or not.
-                    </p>
-                  </label>
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-semibold uppercase text-slate-400">Derived Account Preview</span>
