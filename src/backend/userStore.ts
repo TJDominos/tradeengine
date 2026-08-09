@@ -21,6 +21,7 @@ import {
   validateUsername,
   verifyPassword,
 } from './workerCore';
+import { analyzeTradeDirection } from './services/webhookParser';
 import type {
   AccountRecord,
   AuditLog,
@@ -954,12 +955,13 @@ export async function dbListWebhookTransactionLogs(
       }>(),
     db
       .prepare(
-        'SELECT base_token_address AS contract_address, symbol FROM tradable_tokens WHERE network = ?1',
+        'SELECT base_token_address AS contract_address, symbol, amm_pool_address FROM tradable_tokens WHERE network = ?1',
       )
       .bind('solana')
       .all<{
         contract_address: string;
         symbol: string | null;
+        amm_pool_address: string | null;
       }>(),
     db
       .prepare(
@@ -969,9 +971,12 @@ export async function dbListWebhookTransactionLogs(
       .all<{ wallet_address: string }>(),
   ]);
 
-  const symbolByContract = new Map<string, string | null>();
+  const tokenMetaByContract = new Map<string, { symbol: string | null; ammPoolAddress: string | null }>();
   for (const token of tokens.results) {
-    symbolByContract.set(normalizePubkey(token.contract_address), token.symbol);
+    tokenMetaByContract.set(normalizePubkey(token.contract_address), {
+      symbol: token.symbol,
+      ammPoolAddress: token.amm_pool_address,
+    });
   }
   const managedAddressSet = new Set(
     managedAccounts.results.map((row) => row.wallet_address),
@@ -1023,8 +1028,29 @@ export async function dbListWebhookTransactionLogs(
     const toIsManaged =
       !!mergedDetails.toWalletAddress &&
       managedAddressSet.has(mergedDetails.toWalletAddress);
+    const tokenMeta = tokenContractAddress ? tokenMetaByContract.get(tokenContractAddress) ?? null : null;
+    const lpCorrectedAction: WebhookTransactionLogRecord['action'] =
+      tokenContractAddress && tokenMeta?.ammPoolAddress
+        ? (() => {
+            for (const row of group) {
+              try {
+                const payload = JSON.parse(row.payload) as unknown;
+                const corrected = analyzeTradeDirection(payload, {
+                  baseTokenAddress: tokenContractAddress,
+                  ammPoolAddress: tokenMeta.ammPoolAddress,
+                });
+                if (corrected === 'BUY' || corrected === 'SELL') {
+                  return corrected;
+                }
+              } catch {
+                // ignore malformed payloads and keep fallbacks below
+              }
+            }
+            return null;
+          })()
+        : null;
     const normalizedAction: WebhookTransactionLogRecord['action'] =
-      mergedDetails.action ?? (
+      lpCorrectedAction ?? mergedDetails.action ?? (
         fromIsManaged && !toIsManaged
           ? 'SELL'
           : toIsManaged && !fromIsManaged
@@ -1049,7 +1075,7 @@ export async function dbListWebhookTransactionLogs(
       id: firstRow.id,
       tokenContractAddress,
       tokenSymbol: tokenContractAddress
-        ? (symbolByContract.get(tokenContractAddress) ?? null)
+        ? (tokenMetaByContract.get(tokenContractAddress)?.symbol ?? null)
         : null,
       walletAddress: normalizedWalletAddress,
       fromWalletAddress: mergedDetails.fromWalletAddress,

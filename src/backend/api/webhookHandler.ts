@@ -156,6 +156,106 @@ async function handleRustNodeWebhook(
     metrics?: Record<string, unknown>;
   }>();
 
+  const signalSource = `strategy_webhook:user:${activeTarget.record.config.userId}`;
+  const signalExternalId = `${signalSource}:${payload.txHash}`;
+  const initialAction: 'BUY' | 'SELL' = payload.type === 'whale_sell' ? 'SELL' : 'BUY';
+  const initialDetails = {
+    tokenContractAddress: payload.contractAddress,
+    primaryWalletAddress: payload.wallet_address,
+    action: initialAction,
+    source: 'webhook' as const,
+    transactionStatus: 'PENDING' as const,
+    detailSource: 'payload' as const,
+  };
+
+  const { inserted, signal } = await dbCreateSignal(env.TRADINGBOT_DB, {
+    source: signalSource,
+    externalId: signalExternalId,
+    eventType: payload.type,
+    walletAddress: payload.wallet_address,
+    txSignature: payload.txHash,
+    payload: payload.payloadJson ?? JSON.stringify(payload),
+    detailsJson: JSON.stringify(initialDetails),
+  });
+
+  if (inserted || !signal.processed) {
+    const claimed = inserted
+      ? true
+      : await dbClaimSignalProcessing(env.TRADINGBOT_DB, signalSource, signalExternalId);
+
+    if (claimed) {
+      try {
+        const rpcUrls = await dbResolveSolanaRpcUrls(
+          env.TRADINGBOT_DB,
+          activeTarget.record.config.userId,
+          env.SOLANA_RPC_URL,
+        );
+        const tokenId = await dbResolveTradableTokenId(
+          env.TRADINGBOT_DB,
+          payload.contractAddress,
+        );
+        const payloadDetails = extractWebhookTransactionDetailsFromPayload(
+          payload.payloadJson ?? JSON.stringify(payload),
+          payload.contractAddress,
+        );
+        const rpcDetails = payload.txHash
+          ? await fetchSolanaWebhookTransactionDetailsFromRpc(
+              rpcUrls,
+              payload.txHash,
+              payload.contractAddress,
+              payloadDetails,
+            )
+          : null;
+        const mergedDetails = mergeStoredSignalTransactionDetails(
+          initialDetails,
+          payloadDetails,
+          rpcDetails,
+        );
+        const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
+          env.TRADINGBOT_DB,
+          activeTarget.record.config.userId,
+          [
+            mergedDetails.primaryWalletAddress,
+            mergedDetails.fromWalletAddress,
+            mergedDetails.toWalletAddress,
+          ],
+          payload.wallet_address,
+        );
+        mergedDetails.primaryWalletAddress = preferredWalletAddress;
+        await dbUpdateSignalTransactionDetails(
+          env.TRADINGBOT_DB,
+          signalSource,
+          signalExternalId,
+          preferredWalletAddress,
+          mergedDetails,
+        );
+        if (tokenId && payload.txHash) {
+          await dbApplyTokenHolderTransactionDelta(
+            env.TRADINGBOT_DB,
+            activeTarget.record.config.userId,
+            tokenId,
+            payload.txHash,
+            mergedDetails,
+          ).catch((err) => {
+            console.warn(`Failed to apply token holder delta for ${payload.txHash}:`, err);
+          });
+        }
+        await dbMarkSignalProcessed(
+          env.TRADINGBOT_DB,
+          signalSource,
+          signalExternalId,
+        );
+      } catch (err: unknown) {
+        await dbMarkSignalFailed(
+          env.TRADINGBOT_DB,
+          signalSource,
+          signalExternalId,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  }
+
   return jsonResponse({
     ok: true,
     forwarded: true,
