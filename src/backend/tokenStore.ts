@@ -259,6 +259,11 @@ export async function dbCreateTradableToken(
   const usesLegacyContractAddressUniqueness = hasContractAddressColumn
     ? await dbTradableTokensUseLegacyContractUniqueness(db)
     : false;
+  const storedContractAddress = hasContractAddressColumn
+    ? usesLegacyContractAddressUniqueness
+      ? `${contractAddress}::${quoteTokenAddress}`
+      : contractAddress
+    : contractAddress;
 
   const findExistingTokenId = async (): Promise<number | null> => {
     const pairRow = await db
@@ -273,54 +278,59 @@ export async function dbCreateTradableToken(
     if (pairRow?.id != null) {
       return pairRow.id;
     }
-    if (!usesLegacyContractAddressUniqueness) {
-      return null;
-    }
-    const legacyRow = await db
-      .prepare(
-        `SELECT id
-         FROM tradable_tokens
-         WHERE network = ?1 AND contract_address = ?2
-         LIMIT 1`,
-      )
-      .bind(network, contractAddress)
-      .first<{ id: number }>();
-    return legacyRow?.id ?? null;
+    return null;
   };
 
   const persistExistingToken = async (tokenId: number): Promise<void> => {
-    const statement = hasContractAddressColumn
-      ? db.prepare(
+    if (hasContractAddressColumn) {
+      await db
+        .prepare(
           `UPDATE tradable_tokens
            SET contract_address = ?2,
-               base_token_address = ?2,
-               quote_token_address = ?3,
-               amm_pool_address = COALESCE(?4, amm_pool_address),
-               symbol = COALESCE(?5, symbol),
-               name = COALESCE(?6, name),
-               decimals = COALESCE(?7, decimals),
-               quote_token_symbol = COALESCE(?8, quote_token_symbol),
-               quote_token_name = COALESCE(?9, quote_token_name),
-               quote_token_decimals = COALESCE(?10, quote_token_decimals),
+               base_token_address = ?3,
+               quote_token_address = ?4,
+               amm_pool_address = COALESCE(?5, amm_pool_address),
+               symbol = COALESCE(?6, symbol),
+               name = COALESCE(?7, name),
+               decimals = COALESCE(?8, decimals),
+               quote_token_symbol = COALESCE(?9, quote_token_symbol),
+               quote_token_name = COALESCE(?10, quote_token_name),
+               quote_token_decimals = COALESCE(?11, quote_token_decimals),
                is_active = 1
            WHERE id = ?1`,
         )
-      : db.prepare(
-          `UPDATE tradable_tokens
-           SET base_token_address = ?2,
-               quote_token_address = ?3,
-               amm_pool_address = COALESCE(?4, amm_pool_address),
-               symbol = COALESCE(?5, symbol),
-               name = COALESCE(?6, name),
-               decimals = COALESCE(?7, decimals),
-               quote_token_symbol = COALESCE(?8, quote_token_symbol),
-               quote_token_name = COALESCE(?9, quote_token_name),
-               quote_token_decimals = COALESCE(?10, quote_token_decimals),
-               is_active = 1
-           WHERE id = ?1`,
-        );
+        .bind(
+          tokenId,
+          storedContractAddress,
+          contractAddress,
+          quoteTokenAddress,
+          ammPoolAddress,
+          jupiterSymbol,
+          jupiterName,
+          resolvedDecimals,
+          quoteTokenSymbol,
+          quoteTokenName,
+          quoteTokenDecimals,
+        )
+        .run();
+      return;
+    }
 
-    await statement
+    await db
+      .prepare(
+        `UPDATE tradable_tokens
+         SET base_token_address = ?2,
+             quote_token_address = ?3,
+             amm_pool_address = COALESCE(?4, amm_pool_address),
+             symbol = COALESCE(?5, symbol),
+             name = COALESCE(?6, name),
+             decimals = COALESCE(?7, decimals),
+             quote_token_symbol = COALESCE(?8, quote_token_symbol),
+             quote_token_name = COALESCE(?9, quote_token_name),
+             quote_token_decimals = COALESCE(?10, quote_token_decimals),
+             is_active = 1
+         WHERE id = ?1`,
+      )
       .bind(
         tokenId,
         contractAddress,
@@ -337,8 +347,9 @@ export async function dbCreateTradableToken(
   };
 
   const insertNewToken = async (): Promise<void> => {
-    const statement = hasContractAddressColumn
-      ? db.prepare(
+    if (hasContractAddressColumn) {
+      await db
+        .prepare(
           `INSERT INTO tradable_tokens (
              network,
              contract_address,
@@ -353,26 +364,43 @@ export async function dbCreateTradableToken(
              quote_token_decimals,
              is_active,
              created_at
-           ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11)`,
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12)`,
         )
-      : db.prepare(
-          `INSERT INTO tradable_tokens (
-             network,
-             base_token_address,
-             quote_token_address,
-             amm_pool_address,
-             symbol,
-             name,
-             decimals,
-             quote_token_symbol,
-             quote_token_name,
-             quote_token_decimals,
-             is_active,
-             created_at
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11)`,
-        );
+        .bind(
+          network,
+          storedContractAddress,
+          contractAddress,
+          quoteTokenAddress,
+          ammPoolAddress,
+          jupiterSymbol,
+          jupiterName,
+          resolvedDecimals,
+          quoteTokenSymbol,
+          quoteTokenName,
+          quoteTokenDecimals,
+          createdAt,
+        )
+        .run();
+      return;
+    }
 
-    await statement
+    await db
+      .prepare(
+        `INSERT INTO tradable_tokens (
+           network,
+           base_token_address,
+           quote_token_address,
+           amm_pool_address,
+           symbol,
+           name,
+           decimals,
+           quote_token_symbol,
+           quote_token_name,
+           quote_token_decimals,
+           is_active,
+           created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11)`,
+      )
       .bind(
         network,
         contractAddress,
@@ -858,19 +886,11 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
   endTime: number,
   limit: number = 100,
 ): Promise<TokenMarketSnapshot[]> {
-  const marketSnapshotAddressColumn = await dbTableHasColumn(
-    db,
-    'token_market_snapshots',
-    'contract_address',
-  )
-    ? 'contract_address'
-    : 'base_token_address';
-
   const rows = await db
     .prepare(
       `SELECT
          network,
-         ${marketSnapshotAddressColumn} AS base_token_address,
+         base_token_address,
          token_name,
          token_symbol,
          price_usd,

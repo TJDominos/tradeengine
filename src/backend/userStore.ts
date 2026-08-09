@@ -33,7 +33,6 @@ import type {
   WalletBalanceResponse,
 } from './workerShared';
 import { SOLANA_USDC_MINT } from './workerShared';
-import { dbTableHasColumn } from './workerSchema';
 
 const ACCOUNT_TRADE_COOLDOWN_MS = 45_000;
 const ACCOUNT_MIN_SOL_RESERVE = 0.01;
@@ -860,14 +859,6 @@ export async function dbListAuditLogs(
 }
 
 export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]> {
-  const tokenAddressColumn = await dbTableHasColumn(
-    db,
-    'tradable_tokens',
-    'contract_address',
-  )
-    ? 'contract_address'
-    : 'base_token_address';
-
   const rows = await db
     .prepare(
       `SELECT
@@ -884,7 +875,7 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
          tl.error_message,
          tl.created_at,
          tl.updated_at,
-         tt.${tokenAddressColumn} AS token_contract_address,
+         tt.base_token_address AS token_contract_address,
          tt.symbol
        FROM trade_logs tl
        LEFT JOIN tradable_tokens tt ON tt.id = tl.token_id
@@ -931,14 +922,6 @@ export async function dbListWebhookTransactionLogs(
   db: D1Database,
   userId: number,
 ): Promise<WebhookTransactionLogRecord[]> {
-  const tokenAddressColumn = await dbTableHasColumn(
-    db,
-    'tradable_tokens',
-    'contract_address',
-  )
-    ? 'contract_address'
-    : 'base_token_address';
-
   const [rows, tokens, managedAccounts] = await Promise.all([
     db
       .prepare(
@@ -971,7 +954,7 @@ export async function dbListWebhookTransactionLogs(
       }>(),
     db
       .prepare(
-        `SELECT ${tokenAddressColumn} AS contract_address, symbol FROM tradable_tokens WHERE network = ?1`,
+        'SELECT base_token_address AS contract_address, symbol FROM tradable_tokens WHERE network = ?1',
       )
       .bind('solana')
       .all<{

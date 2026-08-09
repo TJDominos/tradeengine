@@ -428,80 +428,6 @@ export async function dbEnsureTableColumn(
     .run();
 }
 
-async function dbUpgradeTradableTokensToPairRegistry(
-  db: D1Database,
-): Promise<void> {
-  if (!(await dbTradableTokensUseLegacyContractUniqueness(db))) {
-    return;
-  }
-
-  await db.prepare('PRAGMA foreign_keys = OFF').run();
-  try {
-    await db.prepare('DROP TABLE IF EXISTS tradable_tokens_pair_registry_upgrade').run();
-    await db.prepare(
-      `CREATE TABLE tradable_tokens_pair_registry_upgrade (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        network TEXT NOT NULL DEFAULT 'solana',
-        contract_address TEXT NOT NULL,
-        base_token_address TEXT NOT NULL,
-        quote_token_address TEXT NOT NULL DEFAULT '${SOLANA_USDC_MINT}',
-        amm_pool_address TEXT,
-        symbol TEXT,
-        name TEXT,
-        decimals INTEGER,
-        quote_token_symbol TEXT,
-        quote_token_name TEXT,
-        quote_token_decimals INTEGER,
-        is_active INTEGER NOT NULL DEFAULT 1,
-        created_at INTEGER NOT NULL,
-        UNIQUE(network, base_token_address, quote_token_address)
-      )`,
-    ).run();
-
-    await db.prepare(
-      `INSERT INTO tradable_tokens_pair_registry_upgrade (
-         id,
-         network,
-        contract_address,
-         base_token_address,
-         quote_token_address,
-         amm_pool_address,
-         symbol,
-         name,
-         decimals,
-         quote_token_symbol,
-         quote_token_name,
-         quote_token_decimals,
-         is_active,
-         created_at
-       )
-       SELECT
-         id,
-         network,
-         COALESCE(NULLIF(TRIM(contract_address), ''), NULLIF(TRIM(base_token_address), ''), base_token_address),
-         COALESCE(NULLIF(TRIM(base_token_address), ''), NULLIF(TRIM(contract_address), ''), contract_address),
-         COALESCE(NULLIF(TRIM(quote_token_address), ''), '${SOLANA_USDC_MINT}'),
-         amm_pool_address,
-         symbol,
-         name,
-         decimals,
-         quote_token_symbol,
-         quote_token_name,
-         quote_token_decimals,
-         COALESCE(is_active, 1),
-         created_at
-       FROM tradable_tokens`,
-    ).run();
-
-    await db.prepare('DROP TABLE tradable_tokens').run();
-    await db.prepare(
-      'ALTER TABLE tradable_tokens_pair_registry_upgrade RENAME TO tradable_tokens',
-    ).run();
-  } finally {
-    await db.prepare('PRAGMA foreign_keys = ON').run();
-  }
-}
-
 export async function dbEnsureSchema(db: D1Database): Promise<void> {
   if (!schemaInitPromise) {
     schemaInitPromise = db
@@ -648,7 +574,6 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           )
           .bind(SOLANA_USDC_MINT)
           .run();
-        await dbUpgradeTradableTokensToPairRegistry(db);
         await dbEnsureTableColumn(
           db,
           'trade_logs',
