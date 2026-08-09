@@ -111,6 +111,12 @@ export function buildStrategyDocumentFromSettings(
         settings.timeJitterRatio ?? DEFAULT_EXECUTION_CONFIG.timeJitterRatio,
       volumeJitterRatio:
         settings.volumeJitterRatio ?? DEFAULT_EXECUTION_CONFIG.volumeJitterRatio,
+      accountCyclingEnabled:
+        settings.accountCyclingEnabled ??
+        DEFAULT_EXECUTION_CONFIG.accountCyclingEnabled,
+      accountDispersionStrength:
+        settings.accountDispersionStrength ??
+        DEFAULT_EXECUTION_CONFIG.accountDispersionStrength,
       macroObjective:
         settings.macroObjective ?? DEFAULT_EXECUTION_CONFIG.macroObjective,
       tactics: {
@@ -141,6 +147,12 @@ export function buildStrategyDocumentFromSettings(
           settings.timeJitterRatio ?? DEFAULT_EXECUTION_CONFIG.timeJitterRatio,
         volumeJitterRatio:
           settings.volumeJitterRatio ?? DEFAULT_EXECUTION_CONFIG.volumeJitterRatio,
+        accountCyclingEnabled:
+          settings.accountCyclingEnabled ??
+          DEFAULT_EXECUTION_CONFIG.accountCyclingEnabled,
+        accountDispersionStrength:
+          settings.accountDispersionStrength ??
+          DEFAULT_EXECUTION_CONFIG.accountDispersionStrength,
         onExternalBuy:
           settings.onExternalBuy ?? DEFAULT_TRIGGER_CONFIG.onExternalBuy,
         onExternalSell:

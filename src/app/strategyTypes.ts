@@ -91,6 +91,8 @@ export interface StrategyExecutionConfig {
   commitment: 'confirmed';
   timeJitterRatio: number;
   volumeJitterRatio: number;
+  accountCyclingEnabled: boolean;
+  accountDispersionStrength: number;
   macroObjective: StrategyMacroObjective;
   tactics: StrategyExecutionTactics;
 }
@@ -193,6 +195,8 @@ export type StrategyFieldPath =
   | 'execution.commitment'
   | 'execution.timeJitterRatio'
   | 'execution.volumeJitterRatio'
+  | 'execution.accountCyclingEnabled'
+  | 'execution.accountDispersionStrength'
   | 'execution.macroObjective'
   | 'execution.tactics.dumpRatio'
   | 'execution.tactics.followSellRatio'

@@ -80,6 +80,11 @@ type ManagedAccountCandidateRow = {
   created_at: number;
   is_active: number;
   last_traded_at: number | null;
+  wallet_usdc_balance?: number | null;
+  wallet_sol_balance?: number | null;
+  wallet_active_token_mint?: string | null;
+  wallet_active_token_balance?: number | null;
+  wallet_balance_updated_at?: number | null;
 };
 
 type AccountSnapshotRow = {
@@ -348,26 +353,27 @@ export async function listManagedAccountsWithStoredBalances(
       : '',
     quoteMint: SOLANA_USDC_MINT,
   };
-  const accounts = await dbListAccounts(db, userId, 'managed');
+  const accounts = await listActiveManagedAccountCandidates(db, userId);
 
   return accounts.map((account) => {
+    const accountRecord = mapAccountRow(account);
     const walletBalance =
-      buildWalletBalanceFromSnapshot(account, pair.baseMint) ?? {
-        address: account.address,
+      buildWalletBalanceFromSnapshot(accountRecord, pair.baseMint) ?? {
+        address: accountRecord.address,
         sol: '0',
         usdc: '0',
         tokens: [],
         updatedAt: 0,
       };
     return {
-      ...account,
+      ...accountRecord,
       walletBalance,
       quoteAvailableAmount: readQuoteBalanceAmount(walletBalance, pair.quoteMint),
       baseTokenAmount: pair.baseMint
         ? readBaseTokenAmount(walletBalance, pair.baseMint)
         : 0,
       hasSolReserve: (toFiniteNumber(walletBalance.sol) ?? 0) >= ACCOUNT_MIN_SOL_RESERVE,
-      pairCompatible: accountCapabilityMatchesMintPair(account, pair.baseMint, pair.quoteMint),
+      pairCompatible: accountCapabilityMatchesMintPair(accountRecord, pair.baseMint, pair.quoteMint),
     };
   });
 }
@@ -423,6 +429,11 @@ async function listActiveManagedAccountCandidates(
          a.capability_base_mint,
          a.capability_quote_mint,
          a.created_at,
+         a.wallet_usdc_balance,
+         a.wallet_sol_balance,
+         a.wallet_active_token_mint,
+         a.wallet_active_token_balance,
+         a.wallet_balance_updated_at,
          COALESCE(a.is_active, 1) AS is_active,
          (
            SELECT MAX(COALESCE(tl.updated_at, tl.created_at))

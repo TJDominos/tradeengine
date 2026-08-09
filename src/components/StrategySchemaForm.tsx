@@ -762,6 +762,27 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
+            <FieldShell label="Account Dispersion Strength" helper="Note: higher values push later slices away from accounts that already have more planned volume. Use 0 to keep weights near-even, 0.5 for the current default, and larger values for more aggressive spreading.">
+              <Controller
+                control={control}
+                name="execution.accountDispersionStrength"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="3"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => {
+                      const parsed = parseBlankableNumber(event.target.value);
+                      field.onChange(parsed == null ? null : Math.max(0, Math.min(3, parsed)));
+                    }}
+                    className={textInputClassName()}
+                  />
+                )}
+              />
+            </FieldShell>
+
             <FieldShell label="Max Position (USD)" helper="Optional hard ceiling for future position sizing logic.">
               <Controller
                 control={control}
@@ -856,6 +877,21 @@ export default function StrategySchemaForm({
                 </button>
               )}
             />
+
+            <Controller
+              control={control}
+              name="execution.accountCyclingEnabled"
+              render={({ field }) => (
+                <button
+                  type="button"
+                  onClick={() => field.onChange(!field.value)}
+                  className={`flex items-center justify-between rounded-xl border px-4 py-3 text-sm transition ${field.value ? 'border-blue-500 bg-blue-500/10 text-blue-200' : 'border-slate-700 bg-slate-900 text-slate-300'}`}
+                >
+                  <span>Account Cycling</span>
+                  <span>{field.value ? 'On' : 'Off'}</span>
+                </button>
+              )}
+            />
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2 text-xs text-slate-400">
@@ -910,9 +946,13 @@ export default function StrategySchemaForm({
               <span className={`rounded-full px-3 py-1 text-xs font-medium ${formData.riskControls?.requireCompleteMetrics ? 'bg-blue-500/15 text-blue-200' : 'bg-slate-700 text-slate-300'}`}>
                 Complete Metrics {formData.riskControls?.requireCompleteMetrics ? 'Required' : 'Optional'}
               </span>
+              <span className={`rounded-full px-3 py-1 text-xs font-medium ${formData.execution?.accountCyclingEnabled ? 'bg-blue-500/15 text-blue-200' : 'bg-slate-700 text-slate-300'}`}>
+                Account Cycling {formData.execution?.accountCyclingEnabled ? 'On' : 'Off'}
+              </span>
             </div>
             <p className="mt-3 text-sm text-slate-300">Max concurrency: {formatNumber(formData.riskControls?.maxConcurrentOrders)}</p>
             <p className="mt-1 text-sm text-slate-300">Max slippage: {formatPercentFromBps(formData.parameters?.maxSlippageBps)}</p>
+            <p className="mt-1 text-sm text-slate-300">Account dispersion: {formatNumberInputValue(formData.execution?.accountDispersionStrength ?? 0.5) || '0'}</p>
           </div>
 
           <div className="mt-6 rounded-2xl border border-slate-700 bg-slate-900/70 p-4">
@@ -959,6 +999,7 @@ export default function StrategySchemaForm({
                   <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Plan Snapshot</p>
                   <p className="mt-2">Pair: {contractPreview(planPreview.pair.baseTokenAddress)} / {contractPreview(planPreview.pair.quoteTokenAddress)}</p>
                   <p className="mt-1">Objective: {titleCase(planPreview.macroObjective)}</p>
+                  <p className="mt-1">Account cycling: {planPreview.accountCyclingEnabled ? 'Enabled' : 'Disabled'}</p>
                   <p className="mt-1">Generated: {formatPlannerTime(planPreview.generatedAt)}</p>
                 </div>
 
@@ -969,7 +1010,7 @@ export default function StrategySchemaForm({
                       planPreview.accounts.map((account) => (
                         <div
                           key={account.accountId}
-                          className={`rounded-xl border px-3 py-3 text-sm ${account.isBuyOverAllocated ? 'border-rose-500/30 bg-rose-500/10 text-rose-100' : 'border-slate-700 bg-slate-800/70 text-slate-200'}`}
+                          className="rounded-xl border border-slate-700 bg-slate-800/70 px-3 py-3 text-sm text-slate-200"
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div>
@@ -981,15 +1022,9 @@ export default function StrategySchemaForm({
                               <p className="mt-1">Sell {formatCurrency(account.plannedSellVolumeUsd)}</p>
                             </div>
                           </div>
-                          {account.isBuyOverAllocated ? (
-                            <div className="mt-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
-                              Planned buy allocation exceeds current quote balance by {formatCurrency(account.buyOverAllocationUsd)}.
-                            </div>
-                          ) : (
-                            <div className="mt-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
-                              Remaining quote balance after planned buys: {formatCurrency(account.buyRemainingQuoteUsd)}.
-                            </div>
-                          )}
+                          <div className="mt-2 rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
+                            Current quote snapshot: {formatCurrency(account.quoteAvailableAmount)}. Planner participation is based on eligibility, not per-account cap enforcement.
+                          </div>
                           <div className="mt-2 flex flex-wrap gap-2 text-xs">
                             <span className={`rounded-full px-2.5 py-1 ${account.eligibleForBuy ? 'bg-emerald-500/15 text-emerald-200' : 'bg-slate-700 text-slate-300'}`}>
                               Buy balance {formatNumber(account.quoteAvailableAmount)}
@@ -1024,17 +1059,19 @@ export default function StrategySchemaForm({
                           <p className="text-xs text-slate-400">{formatPlannerTime(task.scheduledAt)}</p>
                         </div>
                         <div className="mt-2 space-y-1">
+                          {task.unallocatedVolumeUsd > 0 ? (
+                            <div className="rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                              {formatCurrency(task.unallocatedVolumeUsd)} could not be assigned with the current balances.
+                            </div>
+                          ) : null}
                           {task.allocations.length > 0 ? (
                             task.allocations.map((allocation) => (
                               <div
                                 key={`${task.taskId}-${allocation.accountId}`}
-                                className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-xs ${allocation.accountBuyOverAllocated ? 'bg-rose-500/10 text-rose-100' : 'bg-slate-900/70 text-slate-300'}`}
+                                className="flex items-center justify-between gap-3 rounded-lg bg-slate-900/70 px-3 py-2 text-xs text-slate-300"
                               >
                                 <span>{allocation.label} · {contractPreview(allocation.walletAddress)}</span>
-                                <span>
-                                  {formatCurrency(allocation.plannedVolumeUsd)}
-                                  {allocation.accountBuyOverAllocated ? ` · Over by ${formatCurrency(allocation.accountBuyOverAllocationUsd)}` : ''}
-                                </span>
+                                <span>{formatCurrency(allocation.plannedVolumeUsd)}</span>
                               </div>
                             ))
                           ) : (

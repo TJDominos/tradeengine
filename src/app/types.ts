@@ -207,6 +207,7 @@ export type StrategyPlanPreviewTask = {
   totalOrders: number;
   scheduledAt: number;
   totalVolumeUsd: number;
+  unallocatedVolumeUsd: number;
   allocations: StrategyPlanPreviewAllocation[];
 };
 
@@ -234,6 +235,7 @@ export type StrategyPlanPreview = {
     quoteTokenAddress: string;
   };
   macroObjective: 'shakeout' | 'distribution' | 'accumulation';
+  accountCyclingEnabled: boolean;
   quoteLabel: string;
   requiredBuyAmount: number;
   availableBuyAmount: number;

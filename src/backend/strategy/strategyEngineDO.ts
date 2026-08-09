@@ -10,7 +10,7 @@ import type { ExternalTradeEvent } from './triggers';
 import { initializeAllSchemas } from '../services/dbSetup';
 import { executeSwap } from '../services/jupiterSwapService';
 import { getActiveAccounts } from '../services/accountPoolService';
-import { distributeVolumeAcrossAccounts } from '../services/tradeMath';
+import { allocateVolumeAcrossAccountCaps } from '../services/tradeMath';
 import { analyzeTradeDirection } from '../services/webhookParser';
 import { listManagedAccountsWithBalances } from '../userStore';
 
@@ -85,7 +85,15 @@ export interface PersistedStrategyEngineState {
   currentEngineState: EngineState | null;
   pendingTasks: StrategyEngineDurableObjectTask[];
   dedupedTxHashes: string[];
+  allocationRotationOffsets: Record<'buy' | 'sell', number>;
   updatedAt: number;
+}
+
+function createEmptyAllocationRotationOffsets(): Record<'buy' | 'sell', number> {
+  return {
+    buy: 0,
+    sell: 0,
+  };
 }
 
 function buildDurableObjectName(userId: number, baseTokenAddress: string): string {
@@ -146,6 +154,7 @@ function createIdleState(): PersistedStrategyEngineState {
     currentEngineState: null,
     pendingTasks: [],
     dedupedTxHashes: [],
+    allocationRotationOffsets: createEmptyAllocationRotationOffsets(),
     updatedAt: Date.now(),
   };
 }
@@ -330,6 +339,7 @@ export class StrategyEngineDurableObject {
     state.currentEngineState = buildInitialStateForObjective(state.config.macroObjective);
     state.pendingTasks = [];
     state.dedupedTxHashes = [];
+    state.allocationRotationOffsets = createEmptyAllocationRotationOffsets();
     this.ensureBasePlanIfNeeded(planStartTime);
     await this.persistState();
     await this.ctx.storage.setAlarm(planStartTime);
@@ -391,6 +401,7 @@ export class StrategyEngineDurableObject {
       this.persistedState.currentEngineState = buildInitialStateForObjective(nextConfig.macroObjective);
       this.persistedState.pendingTasks = [];
       this.persistedState.dedupedTxHashes = [];
+      this.persistedState.allocationRotationOffsets = createEmptyAllocationRotationOffsets();
     }
     await this.persistState({ scheduleAlarm: this.persistedState.status === 'running' });
   }
@@ -640,20 +651,21 @@ export class StrategyEngineDurableObject {
         },
       },
     );
-    const eligibleWallets = new Set(
-      fundedAccounts
-        .filter((account) =>
-          account.pairCompatible &&
-          account.hasSolReserve &&
-          (task.side === 'buy'
-            ? account.quoteAvailableAmount > 0
-            : account.baseTokenAmount > 0),
-        )
-        .map((account) => account.address),
+    const activeAccountsByAddress = new Map(
+      activeAccounts.map((account) => [account.publicKey, account]),
     );
-    const executableAccounts = activeAccounts.filter((account) =>
-      eligibleWallets.has(account.publicKey),
-    );
+    const executableAccounts = fundedAccounts
+      .filter((account) =>
+        account.pairCompatible &&
+        account.hasSolReserve &&
+        (task.side === 'buy'
+          ? account.quoteAvailableAmount > 0
+          : account.baseTokenAmount > 0),
+      )
+      .flatMap((account) => {
+        const signingAccount = activeAccountsByAddress.get(account.address);
+        return signingAccount ? [{ balance: account, signingAccount }] : [];
+      });
     if (executableAccounts.length === 0) {
       throw new ApiError(
         409,
@@ -661,16 +673,36 @@ export class StrategyEngineDurableObject {
       );
     }
 
-    const slices = distributeVolumeAcrossAccounts(
+    const allocationPlan = allocateVolumeAcrossAccountCaps(
       task.amountUsd,
-      executableAccounts.length,
+      executableAccounts.map(({ balance }) => ({
+        accountId: balance.id,
+        maxVolumeUsd: null,
+        existingVolumeUsd: 0,
+      })),
+      {
+        accountCyclingEnabled: config.execution.accountCyclingEnabled,
+        rotationOffset: this.persistedState.allocationRotationOffsets[task.side],
+        accountDispersionStrength: config.execution.accountDispersionStrength,
+      },
+    );
+    this.persistedState.allocationRotationOffsets[task.side] =
+      allocationPlan.nextRotationOffset;
+    if (allocationPlan.allocations.length === 0) {
+      throw new ApiError(
+        409,
+        'No active managed accounts available for strategy execution',
+      );
+    }
+
+    const allocatedVolumeByAccountId = new Map(
+      allocationPlan.allocations.map((allocation) => [allocation.accountId, allocation.volumeUsd]),
     );
     let executedVolumeUsd = 0;
-    let retryVolumeUsd = 0;
+    let retryVolumeUsd = allocationPlan.unallocatedVolumeUsd;
 
-    for (let index = 0; index < executableAccounts.length; index += 1) {
-      const account = executableAccounts[index];
-      const sliceVolumeUsd = slices[index] ?? 0;
+    for (const executableAccount of executableAccounts) {
+      const sliceVolumeUsd = allocatedVolumeByAccountId.get(executableAccount.balance.id) ?? 0;
       if (!Number.isFinite(sliceVolumeUsd) || sliceVolumeUsd <= 0) {
         continue;
       }
@@ -680,8 +712,8 @@ export class StrategyEngineDurableObject {
         const swap = await executeSwap(
           this.env,
           {
-            publicKey: account.publicKey,
-            privateKey: account.privateKeyBytes,
+            publicKey: executableAccount.signingAccount.publicKey,
+            privateKey: executableAccount.signingAccount.privateKeyBytes,
           },
           swapInput.amountAtomic,
           task.side,
@@ -696,7 +728,7 @@ export class StrategyEngineDurableObject {
       } catch (error: unknown) {
         retryVolumeUsd += sliceVolumeUsd;
         console.error(
-          `[StrategyEngineDO] Account ${account.publicKey} failed ${task.side} slice ${sliceVolumeUsd} on ${config.baseTokenAddress}:`,
+          `[StrategyEngineDO] Account ${executableAccount.signingAccount.publicKey} failed ${task.side} slice ${sliceVolumeUsd} on ${config.baseTokenAddress}:`,
           error,
         );
       }
@@ -981,7 +1013,17 @@ export class StrategyEngineDurableObject {
         return;
       }
       const stored = await this.ctx.storage.get<PersistedStrategyEngineState>(STORAGE_KEY);
-      this.persistedState = stored ?? createIdleState();
+      const idleState = createIdleState();
+      this.persistedState = stored
+        ? {
+            ...idleState,
+            ...stored,
+            allocationRotationOffsets: {
+              ...idleState.allocationRotationOffsets,
+              ...(stored.allocationRotationOffsets ?? {}),
+            },
+          }
+        : idleState;
       this.hydrated = true;
     });
   }

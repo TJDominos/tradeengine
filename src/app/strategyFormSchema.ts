@@ -372,6 +372,26 @@ export const STRATEGY_FIELD_SCHEMAS: StrategyFieldSchema[] = [
     capability: 'supported',
     editable: true,
   },
+  {
+    id: 'accountCyclingEnabled',
+    path: 'execution.accountCyclingEnabled',
+    section: 'execution',
+    label: 'Account Cycling',
+    description: 'Rotate planned orders across eligible accounts instead of spreading every slice across the whole pool.',
+    fieldType: 'boolean',
+    capability: 'supported',
+    editable: true,
+  },
+  {
+    id: 'accountDispersionStrength',
+    path: 'execution.accountDispersionStrength',
+    section: 'execution',
+    label: 'Account Dispersion Strength',
+    description: 'Higher values reduce the weight of accounts that have already accumulated more planned volume.',
+    fieldType: 'number',
+    capability: 'supported',
+    editable: true,
+  },
 ];
 
 export function createStrategyDraftFromSettings(
@@ -420,6 +440,8 @@ export function createStrategyDraftFromSettings(
       commitment: 'confirmed',
       timeJitterRatio: 0.15,
       volumeJitterRatio: 0.15,
+      accountCyclingEnabled: false,
+      accountDispersionStrength: 0.5,
       macroObjective: 'accumulation',
       tactics: {
         dumpRatio: 1.2,

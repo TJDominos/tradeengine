@@ -16,7 +16,7 @@ import {
   buildStrategyTaskExecutionContext,
   StrategyAutomationService,
 } from '../services/strategyAutomationService';
-import { distributeVolumeAcrossAccounts } from '../services/tradeMath';
+import { allocateVolumeAcrossAccountCaps } from '../services/tradeMath';
 import type {
   StrategyRecordConfig,
   StrategyVersionDocument,
@@ -60,6 +60,7 @@ type StrategyPlanPreviewTask = {
   totalOrders: number;
   scheduledAt: number;
   totalVolumeUsd: number;
+  unallocatedVolumeUsd: number;
   allocations: StrategyPlanPreviewAllocation[];
 };
 
@@ -87,6 +88,7 @@ type StrategyPlanPreviewResponse = {
     quoteTokenAddress: string;
   };
   macroObjective: 'shakeout' | 'distribution' | 'accumulation';
+  accountCyclingEnabled: boolean;
   quoteLabel: string;
   requiredBuyAmount: number;
   availableBuyAmount: number;
@@ -208,6 +210,10 @@ function buildStrategyPlanPreview(
   const random = createDeterministicRandom(JSON.stringify(document));
   const quoteLabel = formatQuoteLabel(config.quoteTokenAddress);
   const accountSummaries = new Map<number, StrategyPlanPreviewAccount>();
+  const rotationOffsets: Record<'buy' | 'sell', number> = {
+    buy: 0,
+    sell: 0,
+  };
 
   for (const account of accounts) {
     const solBalance = Number.parseFloat(account.walletBalance.sol) || 0;
@@ -241,22 +247,39 @@ function buildStrategyPlanPreview(
       baseTokenAddress: config.baseTokenAddress,
       random,
     });
-    const eligibleAccounts = [...accountSummaries.values()].filter((account) =>
-      spec.side === 'buy' ? account.eligibleForBuy : account.eligibleForSell,
-    );
 
     for (const slice of plan.slices) {
-      const shares = distributeVolumeAcrossAccounts(
-        slice.targetVolume,
-        eligibleAccounts.length,
-        random,
+      const eligibleAccounts = [...accountSummaries.values()].filter((account) =>
+        spec.side === 'buy' ? account.eligibleForBuy : account.eligibleForSell,
       );
-      const allocations = eligibleAccounts
-        .map((account, index) => {
-          const plannedVolumeUsd = shares[index] ?? 0;
-          if (plannedVolumeUsd <= 0) {
+      const eligibleAccountsById = new Map(
+        eligibleAccounts.map((account) => [account.accountId, account]),
+      );
+      const allocationPlan = allocateVolumeAcrossAccountCaps(
+        slice.targetVolume,
+        eligibleAccounts.map((account) => ({
+          accountId: account.accountId,
+          maxVolumeUsd: null,
+          existingVolumeUsd:
+            spec.side === 'buy'
+              ? account.plannedBuyVolumeUsd
+              : account.plannedSellVolumeUsd,
+        })),
+        {
+          random,
+          accountCyclingEnabled: document.execution.accountCyclingEnabled,
+          rotationOffset: rotationOffsets[spec.side],
+          accountDispersionStrength: document.execution.accountDispersionStrength,
+        },
+      );
+      rotationOffsets[spec.side] = allocationPlan.nextRotationOffset;
+      const allocations = allocationPlan.allocations
+        .map((allocationPlanEntry) => {
+          const account = eligibleAccountsById.get(allocationPlanEntry.accountId);
+          if (!account) {
             return null;
           }
+          const plannedVolumeUsd = allocationPlanEntry.volumeUsd;
           const summary = accountSummaries.get(account.accountId);
           if (summary) {
             if (spec.side === 'buy') {
@@ -287,6 +310,7 @@ function buildStrategyPlanPreview(
         totalOrders: plan.orderCount,
         scheduledAt: slice.scheduledAt + spec.scheduledOffsetMs,
         totalVolumeUsd: Number(slice.targetVolume.toFixed(6)),
+        unallocatedVolumeUsd: Number(allocationPlan.unallocatedVolumeUsd.toFixed(6)),
         allocations,
       });
     }
@@ -342,6 +366,7 @@ function buildStrategyPlanPreview(
       quoteTokenAddress: config.quoteTokenAddress,
     },
     macroObjective: config.macroObjective,
+    accountCyclingEnabled: document.execution.accountCyclingEnabled,
     quoteLabel,
     requiredBuyAmount,
     availableBuyAmount,

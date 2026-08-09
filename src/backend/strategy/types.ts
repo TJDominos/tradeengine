@@ -52,6 +52,8 @@ export interface StrategySettingsInput {
   onExternalSell?: StrategyExternalSellAction;
   triggerThresholdUsd?: number;
   macroObjective?: StrategyMacroObjective;
+  accountCyclingEnabled?: boolean;
+  accountDispersionStrength?: number;
   tactics?: Partial<StrategyExecutionTactics>;
 }
 
@@ -96,6 +98,8 @@ export interface StrategyExecutionConfig {
   commitment: 'confirmed';
   timeJitterRatio: number;
   volumeJitterRatio: number;
+  accountCyclingEnabled: boolean;
+  accountDispersionStrength: number;
   macroObjective: StrategyMacroObjective;
   tactics: StrategyExecutionTactics;
 }

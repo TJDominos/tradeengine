@@ -39,6 +39,11 @@ function normalizeJitterRatio(value: unknown, fallback: number): number {
   return clampNumber(parsed, 0, 0.5);
 }
 
+function normalizeDispersionStrength(value: unknown, fallback: number): number {
+  const parsed = readNumber(value, fallback);
+  return clampNumber(parsed, 0, 3);
+}
+
 function readRecord(value: unknown): Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -160,6 +165,14 @@ function normalizeExecution(value: unknown): StrategyExecutionConfig {
     volumeJitterRatio: normalizeJitterRatio(
       raw.volumeJitterRatio,
       DEFAULT_EXECUTION_CONFIG.volumeJitterRatio,
+    ),
+    accountCyclingEnabled: readBoolean(
+      raw.accountCyclingEnabled,
+      DEFAULT_EXECUTION_CONFIG.accountCyclingEnabled,
+    ),
+    accountDispersionStrength: normalizeDispersionStrength(
+      raw.accountDispersionStrength,
+      DEFAULT_EXECUTION_CONFIG.accountDispersionStrength,
     ),
     macroObjective:
       raw.macroObjective === 'shakeout' ||

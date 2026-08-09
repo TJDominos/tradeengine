@@ -43,6 +43,8 @@ export const DEFAULT_EXECUTION_CONFIG: StrategyExecutionConfig = {
   commitment: 'confirmed',
   timeJitterRatio: 0.15,
   volumeJitterRatio: 0.15,
+  accountCyclingEnabled: false,
+  accountDispersionStrength: 0.5,
   macroObjective: 'accumulation',
   tactics: {
     dumpRatio: 1.2,
