@@ -2,7 +2,9 @@ import type { StrategyParameters } from '../strategy/types.ts';
 
 export type TradeDirection = 'BUY' | 'SELL' | 'UNKNOWN';
 
-type StrategyConfig = Pick<StrategyParameters, 'baseTokenAddress' | 'ammPoolAddress'>;
+type StrategyConfig = Pick<StrategyParameters, 'baseTokenAddress'> & {
+  ammPoolAddress?: string | null;
+};
 
 type TokenTransferLike = {
   mint?: unknown;

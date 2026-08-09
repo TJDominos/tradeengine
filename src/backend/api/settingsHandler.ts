@@ -1,4 +1,4 @@
-import { parseActiveTokenUpdateRequest, parseJsonBody, parseRpcEndpointCreateRequest, parseTradableTokenCreateRequest } from '../workerSchema';
+import { parseActiveTokenUpdateRequest, parseJsonBody, parseRpcEndpointCreateRequest, parseTradableTokenCreateRequest, parseTradableTokenUpdateRequest } from '../workerSchema';
 import {
   checkTradableTokenWebhookSupport,
   dbAddRpcEndpoint,
@@ -7,6 +7,7 @@ import {
   dbDeleteTradableToken,
   dbResolveSolanaRpcUrls,
   dbResolveTradableTokenId,
+  dbUpdateTradableToken,
 } from '../tokenStore';
 import { dbAddAuditLog, dbLoadSettings, dbSaveActiveContractAddress, dbSaveSettings } from '../userStore';
 import { fetchSolanaMintDecimals, jsonResponse, normalizePubkey } from '../workerCore';
@@ -167,6 +168,7 @@ export async function handleSettingsRoutes(
         network: body.network,
         baseTokenAddress: normalizedAddress,
         quoteTokenAddress: normalizedQuoteTokenAddress,
+        ammPoolAddress: body.ammPoolAddress,
       },
       decimals,
     );
@@ -177,6 +179,7 @@ export async function handleSettingsRoutes(
     const marketSnapshot = await loadStoredMarketSnapshotByContractAddress(
       env.TRADINGBOT_DB,
       normalizedAddress,
+      normalizedQuoteTokenAddress,
     );
     await dbAddAuditLog(
       env.TRADINGBOT_DB,
@@ -195,6 +198,33 @@ export async function handleSettingsRoutes(
       ].join(' '),
     );
     return jsonResponse({ token, marketSnapshot, webhookCheck }, 201);
+  }
+
+  if (method === 'POST' && /^\/api\/tradable-tokens\/\d+$/.test(pathname)) {
+    const user = await requireAdmin(request, env);
+    const tokenId = Number.parseInt(url.pathname.split('/').pop() ?? '', 10);
+    if (!Number.isInteger(tokenId) || tokenId <= 0) {
+      return jsonResponse({ error: 'Tracked pair id is invalid' }, 400);
+    }
+
+    const body = parseTradableTokenUpdateRequest(
+      await parseJsonBody<unknown>(request),
+    );
+    const token = await dbUpdateTradableToken(env.TRADINGBOT_DB, tokenId, {
+      ammPoolAddress: body.ammPoolAddress,
+    });
+
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      user.id,
+      'token.updated',
+      token.baseTokenAddress,
+      token.ammPoolAddress
+        ? `Updated tracked pair AMM pool for ${token.network}.`
+        : `Cleared tracked pair AMM pool for ${token.network}.`,
+    );
+
+    return jsonResponse({ token });
   }
 
   if (method === 'DELETE' && /^\/api\/tradable-tokens\/\d+$/.test(pathname)) {

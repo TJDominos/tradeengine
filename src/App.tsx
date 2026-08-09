@@ -120,6 +120,7 @@ export default function App() {
     network: 'solana',
     contractAddress: '',
     quoteTokenAddress: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+    ammPoolAddress: '',
   });
   const [rpcEndpointForm, setRpcEndpointForm] = React.useState({ url: '' });
   const [strategyDraft, setStrategyDraft] = React.useState<StrategyVersionDocument | null>(null);
@@ -740,7 +741,9 @@ export default function App() {
         method: 'DELETE',
       });
 
-      const clearedDraftTarget = strategyDraft?.parameters.contractAddress === response.token.baseTokenAddress;
+      const clearedDraftTarget =
+        strategyDraft?.parameters.contractAddress === response.token.baseTokenAddress &&
+        strategyDraft?.parameters.quoteTokenAddress === response.token.quoteTokenAddress;
       if (clearedDraftTarget) {
         strategyDraftDirtyRef.current = true;
         setStrategyDraft((current) =>
@@ -750,6 +753,9 @@ export default function App() {
                 parameters: {
                   ...current.parameters,
                   contractAddress: '',
+                  baseTokenAddress: '',
+                  quoteTokenAddress: '',
+                  ammPoolAddress: '',
                 },
               }
             : current,
@@ -800,6 +806,7 @@ export default function App() {
           network: tradableTokenForm.network,
           baseTokenAddress: tradableTokenForm.contractAddress,
           quoteTokenAddress: tradableTokenForm.quoteTokenAddress,
+          ammPoolAddress: tradableTokenForm.ammPoolAddress,
         }),
       });
 
@@ -847,6 +854,7 @@ export default function App() {
       setTradableTokenForm((current) => ({
         ...current,
         contractAddress: '',
+        ammPoolAddress: '',
       }));
       const webhookNotice = response.webhookCheck.ok
         ? response.webhookCheck.latestSignature
@@ -859,6 +867,49 @@ export default function App() {
           : activeMarketSnapshot
             ? `Pair saved as active with stored market data. ${webhookNotice}`
             : `Pair saved as active. Market data refresh now runs only on manual refresh or webhook events. ${webhookNotice}`,
+      );
+      await refresh();
+    });
+
+  const handleUpdateTrackedToken = (tokenId: number, ammPoolAddress: string) =>
+    submitWithFeedback(`token-update-${tokenId}`, async () => {
+      const response = await api<{ token: TradableToken }>(`/api/tradable-tokens/${tokenId}`, {
+        method: 'POST',
+        body: JSON.stringify({ ammPoolAddress }),
+      });
+
+      setEngineState((current) =>
+        current
+          ? {
+              ...current,
+              tradableTokens: mergeTradableToken(current.tradableTokens, response.token),
+            }
+          : current,
+      );
+
+      setStrategyDraft((current) => {
+        if (!current) {
+          return current;
+        }
+        if (
+          current.parameters.contractAddress !== response.token.baseTokenAddress ||
+          current.parameters.quoteTokenAddress !== response.token.quoteTokenAddress
+        ) {
+          return current;
+        }
+        return {
+          ...current,
+          parameters: {
+            ...current.parameters,
+            ammPoolAddress: response.token.ammPoolAddress ?? current.parameters.ammPoolAddress,
+          },
+        };
+      });
+
+      setNotice(
+        response.token.ammPoolAddress
+          ? 'Tracked pair AMM pool saved.'
+          : 'Tracked pair AMM pool cleared.',
       );
       await refresh();
     });
@@ -1331,9 +1382,13 @@ export default function App() {
       hasDateRange={hasDateRange}
       marketSnapshotSubtitle={marketSnapshotSubtitle}
       settingsContractAddress={activeBaseTokenAddress}
+      settingsQuoteTokenAddress={activeQuoteTokenAddress}
       activeTokenSymbol={activeTokenSymbol}
       activeTokenName={activeTokenName}
       activeTokenContractAddress={activeTokenContractAddress}
+      tradableTokens={engineState.tradableTokens}
+      submitting={submitting}
+      onUseToken={(contractAddress, quoteTokenAddress) => void handleUseToken(contractAddress, quoteTokenAddress)}
       totalInternalTokenAmount={totalInternalTokenAmount}
       managedAccountsCount={engineState.stats.managedAccounts}
       profitUsdc={engineState.profitUsdc}
@@ -1400,6 +1455,7 @@ export default function App() {
     <TradingSetupPage
       engineState={engineState}
       activeContractAddress={activeBaseTokenAddress}
+      activeQuoteTokenAddress={activeQuoteTokenAddress}
       strategyDraft={strategyDraft}
       tradableTokenForm={tradableTokenForm}
       setTradableTokenForm={setTradableTokenForm}
@@ -1408,6 +1464,7 @@ export default function App() {
       submitting={submitting}
       handleAddTrackedToken={handleAddTrackedToken}
       handleUseToken={handleUseToken}
+      handleUpdateTrackedToken={handleUpdateTrackedToken}
       handleDeleteTrackedToken={handleDeleteTrackedToken}
       handleAddRpcEndpoint={handleAddRpcEndpoint}
       handleDeleteRpcEndpoint={handleDeleteRpcEndpoint}

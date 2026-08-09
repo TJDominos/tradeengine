@@ -733,6 +733,7 @@ export function mapStrategyDocumentToSettingsUpdate(
 ): SettingsUpdateRequest {
   return {
     baseTokenAddress: document.parameters.baseTokenAddress,
+    activeQuoteTokenAddress: document.parameters.quoteTokenAddress,
     volatilityTarget: document.targets.volatilityPctMin,
     pullbackTarget: document.targets.pullbackPctMax,
     volumeTarget: document.targets.volumeUsdMin,

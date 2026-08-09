@@ -1,3 +1,4 @@
+import { ApiError } from '../errors';
 import { dbGetLatestTokenMarketSnapshot, dbListRpcEndpoints, dbListTradableTokens, dbResolveTradableTokenId } from '../tokenStore';
 import {
   dbGetTokenHolderAggregate,
@@ -14,8 +15,10 @@ import {
   dbListTradeLogs,
   dbListWebhookTransactionLogs,
   dbLoadSettings,
+  dbAddAuditLog,
 } from '../userStore';
 import { jsonResponse } from '../workerCore';
+import { parseJsonBody } from '../workerSchema';
 import type {
   Env,
   MarketRefreshStatusRecord,
@@ -27,12 +30,85 @@ import type {
 import { requireAdmin, requireUser } from '../services/accessControl';
 import { dbComputeManagedProfitUsdc, dbListHistoricalSetups } from '../services/historyMetricsService';
 import { dbGetMarketRefreshState } from '../services/marketRefreshStateService';
+import { StrategyAutomationService } from '../services/strategyAutomationService';
 import {
   dbGetActiveStrategyVersion,
   dbListStrategyEvaluations,
   dbListStrategyVersions,
   dedupeStrategyVersionsForDisplay,
 } from '../services/strategyStore';
+
+const strategyAutomationService = new StrategyAutomationService();
+
+type StrategyDebugSimulateRequest = {
+  action: 'hold' | 'fill' | 'complete';
+  executedVolumeUsd?: number;
+  actualNetInflowUsd?: number;
+  tacticsTriggeredCount?: number;
+  clearPendingTasks?: boolean;
+};
+
+function assertLocalDebugRequest(url: URL): void {
+  if (url.protocol === 'http:') {
+    return;
+  }
+  const hostname = url.hostname.trim().toLowerCase();
+  if (hostname !== '127.0.0.1' && hostname !== 'localhost') {
+    throw new ApiError(404, 'Not found');
+  }
+}
+
+function parseStrategyDebugSimulateRequest(body: unknown): StrategyDebugSimulateRequest {
+  if (body == null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new ApiError(400, 'Debug simulation request must be a JSON object');
+  }
+
+  const raw = body as Record<string, unknown>;
+  const action = typeof raw.action === 'string' ? raw.action.trim() : '';
+  if (action !== 'hold' && action !== 'fill' && action !== 'complete') {
+    throw new ApiError(400, 'action must be hold, fill, or complete');
+  }
+
+  const executedVolumeUsd = raw.executedVolumeUsd;
+  if (
+    executedVolumeUsd != null &&
+    (typeof executedVolumeUsd !== 'number' || !Number.isFinite(executedVolumeUsd) || executedVolumeUsd < 0)
+  ) {
+    throw new ApiError(400, 'executedVolumeUsd must be a non-negative number');
+  }
+
+  const actualNetInflowUsd = raw.actualNetInflowUsd;
+  if (
+    actualNetInflowUsd != null &&
+    (typeof actualNetInflowUsd !== 'number' || !Number.isFinite(actualNetInflowUsd))
+  ) {
+    throw new ApiError(400, 'actualNetInflowUsd must be a finite number');
+  }
+
+  const tacticsTriggeredCount = raw.tacticsTriggeredCount;
+  if (
+    tacticsTriggeredCount != null &&
+    (typeof tacticsTriggeredCount !== 'number' || !Number.isFinite(tacticsTriggeredCount) || tacticsTriggeredCount < 0)
+  ) {
+    throw new ApiError(400, 'tacticsTriggeredCount must be a non-negative number');
+  }
+
+  const clearPendingTasks = raw.clearPendingTasks;
+  if (clearPendingTasks != null && typeof clearPendingTasks !== 'boolean') {
+    throw new ApiError(400, 'clearPendingTasks must be a boolean');
+  }
+
+  return {
+    action,
+    executedVolumeUsd: typeof executedVolumeUsd === 'number' ? executedVolumeUsd : undefined,
+    actualNetInflowUsd:
+      typeof actualNetInflowUsd === 'number' ? actualNetInflowUsd : undefined,
+    tacticsTriggeredCount:
+      typeof tacticsTriggeredCount === 'number' ? tacticsTriggeredCount : undefined,
+    clearPendingTasks:
+      typeof clearPendingTasks === 'boolean' ? clearPendingTasks : undefined,
+  };
+}
 
 export async function handleStateRoutes(
   request: Request,
@@ -49,6 +125,32 @@ export async function handleStateRoutes(
       backend: 'cloudflare-worker',
       databaseConnected: true,
       databasePath: 'D1:tradingbot',
+    });
+  }
+
+  if (method === 'POST' && pathname === '/api/debug/strategy/current/simulate') {
+    assertLocalDebugRequest(url);
+    const user = await requireAdmin(request, env);
+    const body = parseStrategyDebugSimulateRequest(
+      await parseJsonBody<unknown>(request),
+    );
+    const simulated = await strategyAutomationService.simulateActiveStrategy(env, body);
+    if (!simulated) {
+      throw new ApiError(409, 'No active strategy is currently running');
+    }
+
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      user.id,
+      'strategy.debug_simulated',
+      simulated.record.versionId,
+      `Local debug simulation executed for active strategy (${body.action}).`,
+    );
+
+    return jsonResponse({
+      simulated: true,
+      strategy: simulated.record,
+      state: simulated.state,
     });
   }
 

@@ -1,29 +1,14 @@
 import { ApiError } from '../errors';
-import {
-  fetchJupiterTokenMetadata,
-  fetchJupiterTokenPrice,
-} from '../jupiter';
-import {
-  dbGetLatestTokenMarketSnapshot,
-  dbResolveTradableTokenId,
-} from '../tokenStore';
-import type { Env } from '../workerShared';
+import { fetchJupiterTokenMetadata, fetchJupiterTokenPrice } from '../jupiter';
+import { dbFindTradableTokenByPair, dbGetLatestTokenMarketSnapshot, dbResolveTradableTokenId } from '../tokenStore';
 import { fetchSolanaMintDecimals, normalizePubkey } from '../workerCore';
-import {
-  buildRandomizedTwapPlan,
-  type EngineState,
-  type MacroObjective,
-} from './engine';
+import { SOLANA_USDC_MINT, type Env } from '../workerShared';
+import { buildRandomizedTwapPlan, type EngineState, type MacroObjective } from './engine';
 import { normalizeStrategyDocument } from './migrations';
-import type {
-  ExecutionReport,
-  StrategyExecutionConfig,
-  StrategyVersionDocument,
-} from './types';
+import type { ExecutionReport, StrategyExecutionConfig, StrategyVersionDocument } from './types';
 import type { ExternalTradeEvent } from './triggers';
 import { initializeAllSchemas } from '../services/dbSetup';
 import { executeSwap } from '../services/jupiterSwapService';
-import { SOLANA_USDC_MINT } from '../workerShared';
 import { getActiveAccounts } from '../services/accountPoolService';
 import { distributeVolumeAcrossAccounts } from '../services/tradeMath';
 import { analyzeTradeDirection } from '../services/webhookParser';
@@ -33,6 +18,7 @@ const MAX_DEDUPED_TX_HASHES = 256;
 const DEFAULT_STRATEGY_TASK_BASE_VOLUME_USD = 300;
 const DEFAULT_DISTRIBUTION_CHUNK_COUNT = 3;
 const DEFAULT_DISTRIBUTION_DELAY_JITTER_MS = 2_000;
+const INITIAL_EXECUTION_DELAY_MS = 1_000;
 
 export type StrategyEngineDurableObjectStatus =
   | 'idle'
@@ -81,6 +67,14 @@ export interface StrategyEngineDurableObjectConfigureRequest {
 export interface StrategyEngineDurableObjectEventRequest
   extends StrategyEngineDurableObjectConfigureRequest {
   event: ExternalTradeEvent;
+}
+
+export interface StrategyEngineDurableObjectDebugSimulateRequest {
+  action: 'hold' | 'fill' | 'complete';
+  executedVolumeUsd?: number;
+  actualNetInflowUsd?: number;
+  tacticsTriggeredCount?: number;
+  clearPendingTasks?: boolean;
 }
 
 export interface PersistedStrategyEngineState {
@@ -239,6 +233,12 @@ export class StrategyEngineDurableObject {
       });
     }
 
+    if (request.method === 'POST' && url.pathname === '/debug/simulate') {
+      const body = await request.json<StrategyEngineDurableObjectDebugSimulateRequest>();
+      await this.debugSimulate(body);
+      return Response.json({ ok: true, simulated: true, state: this.buildMetricsResponse() });
+    }
+
     if (request.method === 'POST' && url.pathname === '/clear') {
       await this.clear();
       return Response.json({ ok: true, cleared: true, state: this.buildMetricsResponse() });
@@ -323,14 +323,15 @@ export class StrategyEngineDurableObject {
       throw new ApiError(409, 'Strategy engine durable object could not be configured');
     }
     const startTime = Date.now();
+    const planStartTime = startTime + INITIAL_EXECUTION_DELAY_MS;
     state.status = 'running';
     state.metrics = createEmptyMetrics(startTime);
     state.currentEngineState = buildInitialStateForObjective(state.config.macroObjective);
     state.pendingTasks = [];
     state.dedupedTxHashes = [];
-    this.ensureBasePlanIfNeeded(startTime);
+    this.ensureBasePlanIfNeeded(planStartTime);
     await this.persistState();
-    await this.ctx.storage.setAlarm(startTime);
+    await this.ctx.storage.setAlarm(planStartTime);
   }
 
   private async abort(reason: string): Promise<ExecutionReport> {
@@ -424,9 +425,19 @@ export class StrategyEngineDurableObject {
     let payloadDirection: 'BUY' | 'SELL' | 'UNKNOWN' = 'UNKNOWN';
     if (event.payloadJson) {
       try {
+        const trackedPair = await dbFindTradableTokenByPair(
+          this.env.TRADINGBOT_DB,
+          config.strategyDocument.parameters.baseTokenAddress,
+          config.strategyDocument.parameters.quoteTokenAddress,
+        );
         payloadDirection = analyzeTradeDirection(
           JSON.parse(event.payloadJson),
-          config.strategyDocument.parameters,
+          {
+            baseTokenAddress: config.strategyDocument.parameters.baseTokenAddress,
+            ammPoolAddress:
+              trackedPair?.ammPoolAddress ??
+              config.strategyDocument.parameters.ammPoolAddress,
+          },
         );
       } catch {
         payloadDirection = 'UNKNOWN';
@@ -511,6 +522,60 @@ export class StrategyEngineDurableObject {
 
     await this.persistState();
     return false;
+  }
+
+  private async debugSimulate(
+    input: StrategyEngineDurableObjectDebugSimulateRequest,
+  ): Promise<void> {
+    const config = this.persistedState.config;
+    if (!config) {
+      throw new ApiError(409, 'Strategy engine durable object is not configured');
+    }
+
+    const now = Date.now();
+    if (this.persistedState.status !== 'running' && input.action !== 'complete') {
+      this.persistedState.status = 'running';
+      this.persistedState.metrics.endTime = null;
+    }
+    if (!this.persistedState.metrics.startTime) {
+      this.persistedState.metrics.startTime = now;
+    }
+    if (!this.persistedState.currentEngineState) {
+      this.persistedState.currentEngineState = buildInitialStateForObjective(
+        config.macroObjective,
+      );
+    }
+
+    const executedVolumeUsd = clampPositiveNumber(input.executedVolumeUsd ?? 0, 0);
+    const actualNetInflowUsd =
+      typeof input.actualNetInflowUsd === 'number' && Number.isFinite(input.actualNetInflowUsd)
+        ? input.actualNetInflowUsd
+        : 0;
+    const tacticsTriggeredCount =
+      typeof input.tacticsTriggeredCount === 'number' && Number.isFinite(input.tacticsTriggeredCount)
+        ? Math.max(0, Math.round(input.tacticsTriggeredCount))
+        : 0;
+
+    this.persistedState.metrics.actualTotalVolumeUsd += executedVolumeUsd;
+    this.persistedState.metrics.actualNetInflowUsd += actualNetInflowUsd;
+    this.persistedState.metrics.tacticsTriggeredCount += tacticsTriggeredCount;
+
+    if (input.action === 'complete') {
+      if (this.persistedState.metrics.actualTotalVolumeUsd < config.targetTotalVolumeUsd) {
+        this.persistedState.metrics.actualTotalVolumeUsd = config.targetTotalVolumeUsd;
+      }
+      await this.markCompleted();
+      return;
+    }
+
+    if (input.clearPendingTasks ?? true) {
+      this.persistedState.pendingTasks = [];
+      await this.ctx.storage.deleteAlarm();
+      await this.persistState({ scheduleAlarm: false });
+      return;
+    }
+
+    await this.persistState();
   }
 
   private applyExecutedTask(

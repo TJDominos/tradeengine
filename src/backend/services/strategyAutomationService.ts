@@ -7,6 +7,7 @@ import {
 import {
   strategyEngineDurableObjectNameFor,
   type StrategyEngineDurableObjectConfigureRequest,
+  type StrategyEngineDurableObjectDebugSimulateRequest,
   type StrategyEngineDurableObjectMetrics,
   type StrategyEngineDurableObjectStatus,
 } from '../strategy/strategyEngineDO';
@@ -67,6 +68,12 @@ interface StrategyEngineDurableObjectMetricsResponse {
   metrics: StrategyEngineDurableObjectMetrics;
   currentEngineState: string | null;
   nextExecutionTime: number | null;
+}
+
+interface StrategyEngineDurableObjectDebugSimulateResponse {
+  ok: boolean;
+  simulated: boolean;
+  state: StrategyEngineDurableObjectMetricsResponse;
 }
 
 interface ResolvedExecutionPair {
@@ -485,6 +492,34 @@ export class StrategyAutomationService {
       currentEngineState: response.currentEngineState,
       nextExecutionTime: response.nextExecutionTime,
       metrics: this.mapMetricsResponse(response.metrics),
+    };
+  }
+
+  public async simulateActiveStrategy(
+    env: Env,
+    request: StrategyEngineDurableObjectDebugSimulateRequest,
+  ): Promise<{
+    record: StrategyRecord;
+    state: StrategyEngineDurableObjectMetricsResponse;
+  } | null> {
+    const activeRecord = await getActiveStrategy(env);
+    if (!activeRecord) {
+      return null;
+    }
+
+    const stub = this.resolveStrategyEngineStub(env, activeRecord);
+    const response = await this.fetchStrategyEngineJson<StrategyEngineDurableObjectDebugSimulateResponse>(
+      stub,
+      '/debug/simulate',
+      {
+        method: 'POST',
+        body: JSON.stringify(request),
+      },
+    );
+
+    return {
+      record: activeRecord,
+      state: response.state,
     };
   }
 

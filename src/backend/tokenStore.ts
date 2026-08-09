@@ -159,6 +159,7 @@ export async function dbListTradableTokens(db: D1Database): Promise<TradableToke
          network,
         base_token_address,
          quote_token_address,
+         amm_pool_address,
          symbol,
          name,
          decimals,
@@ -175,6 +176,7 @@ export async function dbListTradableTokens(db: D1Database): Promise<TradableToke
       network: string;
       base_token_address: string;
       quote_token_address: string;
+      amm_pool_address: string | null;
       symbol: string | null;
       name: string | null;
       decimals: number | null;
@@ -188,6 +190,7 @@ export async function dbListTradableTokens(db: D1Database): Promise<TradableToke
     network: row.network,
     baseTokenAddress: row.base_token_address,
     quoteTokenAddress: row.quote_token_address,
+    ammPoolAddress: row.amm_pool_address,
     symbol: row.symbol,
     name: row.name,
     decimals: row.decimals,
@@ -209,6 +212,9 @@ export async function dbCreateTradableToken(
   }
   const contractAddress = normalizePubkey(input.baseTokenAddress);
   const quoteTokenAddress = normalizePubkey(input.quoteTokenAddress);
+  const ammPoolAddress = input.ammPoolAddress?.trim()
+    ? normalizePubkey(input.ammPoolAddress)
+    : null;
   if (contractAddress === quoteTokenAddress) {
     throw new ApiError(400, 'Base and quote token addresses must be different');
   }
@@ -286,12 +292,13 @@ export async function dbCreateTradableToken(
            SET contract_address = ?2,
                base_token_address = ?2,
                quote_token_address = ?3,
-               symbol = COALESCE(?4, symbol),
-               name = COALESCE(?5, name),
-               decimals = COALESCE(?6, decimals),
-               quote_token_symbol = COALESCE(?7, quote_token_symbol),
-               quote_token_name = COALESCE(?8, quote_token_name),
-               quote_token_decimals = COALESCE(?9, quote_token_decimals),
+               amm_pool_address = COALESCE(?4, amm_pool_address),
+               symbol = COALESCE(?5, symbol),
+               name = COALESCE(?6, name),
+               decimals = COALESCE(?7, decimals),
+               quote_token_symbol = COALESCE(?8, quote_token_symbol),
+               quote_token_name = COALESCE(?9, quote_token_name),
+               quote_token_decimals = COALESCE(?10, quote_token_decimals),
                is_active = 1
            WHERE id = ?1`,
         )
@@ -299,12 +306,13 @@ export async function dbCreateTradableToken(
           `UPDATE tradable_tokens
            SET base_token_address = ?2,
                quote_token_address = ?3,
-               symbol = COALESCE(?4, symbol),
-               name = COALESCE(?5, name),
-               decimals = COALESCE(?6, decimals),
-               quote_token_symbol = COALESCE(?7, quote_token_symbol),
-               quote_token_name = COALESCE(?8, quote_token_name),
-               quote_token_decimals = COALESCE(?9, quote_token_decimals),
+               amm_pool_address = COALESCE(?4, amm_pool_address),
+               symbol = COALESCE(?5, symbol),
+               name = COALESCE(?6, name),
+               decimals = COALESCE(?7, decimals),
+               quote_token_symbol = COALESCE(?8, quote_token_symbol),
+               quote_token_name = COALESCE(?9, quote_token_name),
+               quote_token_decimals = COALESCE(?10, quote_token_decimals),
                is_active = 1
            WHERE id = ?1`,
         );
@@ -314,6 +322,7 @@ export async function dbCreateTradableToken(
         tokenId,
         contractAddress,
         quoteTokenAddress,
+        ammPoolAddress,
         jupiterSymbol,
         jupiterName,
         resolvedDecimals,
@@ -332,6 +341,7 @@ export async function dbCreateTradableToken(
              contract_address,
              base_token_address,
              quote_token_address,
+             amm_pool_address,
              symbol,
              name,
              decimals,
@@ -340,13 +350,14 @@ export async function dbCreateTradableToken(
              quote_token_decimals,
              is_active,
              created_at
-           ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)`,
+           ) VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11)`,
         )
       : db.prepare(
           `INSERT INTO tradable_tokens (
              network,
              base_token_address,
              quote_token_address,
+             amm_pool_address,
              symbol,
              name,
              decimals,
@@ -355,7 +366,7 @@ export async function dbCreateTradableToken(
              quote_token_decimals,
              is_active,
              created_at
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)`,
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11)`,
         );
 
     await statement
@@ -363,6 +374,7 @@ export async function dbCreateTradableToken(
         network,
         contractAddress,
         quoteTokenAddress,
+        ammPoolAddress,
         jupiterSymbol,
         jupiterName,
         resolvedDecimals,
@@ -396,7 +408,7 @@ export async function dbCreateTradableToken(
 
   const row = await db
     .prepare(
-      `SELECT id, network, base_token_address, quote_token_address, symbol, name, decimals,
+      `SELECT id, network, base_token_address, quote_token_address, amm_pool_address, symbol, name, decimals,
               quote_token_symbol, quote_token_name, quote_token_decimals, is_active
        FROM tradable_tokens
        WHERE network = ?1 AND base_token_address = ?2 AND quote_token_address = ?3`,
@@ -407,6 +419,7 @@ export async function dbCreateTradableToken(
       network: string;
       base_token_address: string;
       quote_token_address: string;
+      amm_pool_address: string | null;
       symbol: string | null;
       name: string | null;
       decimals: number | null;
@@ -421,6 +434,7 @@ export async function dbCreateTradableToken(
     network: row.network,
     baseTokenAddress: row.base_token_address,
     quoteTokenAddress: row.quote_token_address,
+    ammPoolAddress: row.amm_pool_address,
     symbol: row.symbol,
     name: row.name,
     decimals: row.decimals,
@@ -437,7 +451,7 @@ export async function dbDeleteTradableToken(
 ): Promise<TradableToken> {
   const row = await db
     .prepare(
-      `SELECT id, network, base_token_address, quote_token_address, symbol, name, decimals,
+      `SELECT id, network, base_token_address, quote_token_address, amm_pool_address, symbol, name, decimals,
               quote_token_symbol, quote_token_name, quote_token_decimals, is_active
        FROM tradable_tokens WHERE id = ?1 LIMIT 1`,
     )
@@ -447,6 +461,7 @@ export async function dbDeleteTradableToken(
       network: string;
       base_token_address: string;
       quote_token_address: string;
+      amm_pool_address: string | null;
       symbol: string | null;
       name: string | null;
       decimals: number | null;
@@ -473,6 +488,7 @@ export async function dbDeleteTradableToken(
     network: row.network,
     baseTokenAddress: row.base_token_address,
     quoteTokenAddress: row.quote_token_address,
+    ammPoolAddress: row.amm_pool_address,
     symbol: row.symbol,
     name: row.name,
     decimals: row.decimals,
@@ -480,6 +496,65 @@ export async function dbDeleteTradableToken(
     quoteTokenName: row.quote_token_name,
     quoteTokenDecimals: row.quote_token_decimals,
     isActive: false,
+  };
+}
+
+export async function dbUpdateTradableToken(
+  db: D1Database,
+  tokenId: number,
+  input: Pick<TradableTokenCreateRequest, 'ammPoolAddress'>,
+): Promise<TradableToken> {
+  const ammPoolAddress = input.ammPoolAddress?.trim()
+    ? normalizePubkey(input.ammPoolAddress)
+    : null;
+
+  await db
+    .prepare(
+      `UPDATE tradable_tokens
+       SET amm_pool_address = ?2
+       WHERE id = ?1 AND is_active = 1`,
+    )
+    .bind(tokenId, ammPoolAddress)
+    .run();
+
+  const row = await db
+    .prepare(
+      `SELECT id, network, base_token_address, quote_token_address, amm_pool_address, symbol, name, decimals,
+              quote_token_symbol, quote_token_name, quote_token_decimals, is_active
+       FROM tradable_tokens WHERE id = ?1 LIMIT 1`,
+    )
+    .bind(tokenId)
+    .first<{
+      id: number;
+      network: string;
+      base_token_address: string;
+      quote_token_address: string;
+      amm_pool_address: string | null;
+      symbol: string | null;
+      name: string | null;
+      decimals: number | null;
+      quote_token_symbol: string | null;
+      quote_token_name: string | null;
+      quote_token_decimals: number | null;
+      is_active: number;
+    }>();
+  if (!row || row.is_active === 0) {
+    throw new ApiError(404, 'Tracked pair not found');
+  }
+
+  return {
+    id: row.id,
+    network: row.network,
+    baseTokenAddress: row.base_token_address,
+    quoteTokenAddress: row.quote_token_address,
+    ammPoolAddress: row.amm_pool_address,
+    symbol: row.symbol,
+    name: row.name,
+    decimals: row.decimals,
+    quoteTokenSymbol: row.quote_token_symbol,
+    quoteTokenName: row.quote_token_name,
+    quoteTokenDecimals: row.quote_token_decimals,
+    isActive: row.is_active === 1,
   };
 }
 
@@ -574,7 +649,7 @@ export async function dbFindTradableTokenByPair(
   const normalizedQuoteTokenAddress = normalizePubkey(quoteTokenAddress);
   const row = await db
     .prepare(
-      `SELECT id, network, base_token_address, quote_token_address, symbol, name, decimals,
+      `SELECT id, network, base_token_address, quote_token_address, amm_pool_address, symbol, name, decimals,
               quote_token_symbol, quote_token_name, quote_token_decimals, is_active
        FROM tradable_tokens
        WHERE network = ?1 AND base_token_address = ?2 AND quote_token_address = ?3 AND is_active = 1
@@ -586,6 +661,7 @@ export async function dbFindTradableTokenByPair(
       network: string;
       base_token_address: string;
       quote_token_address: string;
+      amm_pool_address: string | null;
       symbol: string | null;
       name: string | null;
       decimals: number | null;
@@ -602,6 +678,53 @@ export async function dbFindTradableTokenByPair(
     network: row.network,
     baseTokenAddress: row.base_token_address,
     quoteTokenAddress: row.quote_token_address,
+    ammPoolAddress: row.amm_pool_address,
+    symbol: row.symbol,
+    name: row.name,
+    decimals: row.decimals,
+    quoteTokenSymbol: row.quote_token_symbol,
+    quoteTokenName: row.quote_token_name,
+    quoteTokenDecimals: row.quote_token_decimals,
+    isActive: row.is_active === 1,
+  };
+}
+
+export async function dbFindTradableTokenById(
+  db: D1Database,
+  tokenId: number,
+): Promise<TradableToken | null> {
+  const row = await db
+    .prepare(
+      `SELECT id, network, base_token_address, quote_token_address, amm_pool_address, symbol, name, decimals,
+              quote_token_symbol, quote_token_name, quote_token_decimals, is_active
+       FROM tradable_tokens
+       WHERE id = ?1 AND is_active = 1
+       LIMIT 1`,
+    )
+    .bind(tokenId)
+    .first<{
+      id: number;
+      network: string;
+      base_token_address: string;
+      quote_token_address: string;
+      amm_pool_address: string | null;
+      symbol: string | null;
+      name: string | null;
+      decimals: number | null;
+      quote_token_symbol: string | null;
+      quote_token_name: string | null;
+      quote_token_decimals: number | null;
+      is_active: number;
+    }>();
+  if (!row) {
+    return null;
+  }
+  return {
+    id: row.id,
+    network: row.network,
+    baseTokenAddress: row.base_token_address,
+    quoteTokenAddress: row.quote_token_address,
+    ammPoolAddress: row.amm_pool_address,
     symbol: row.symbol,
     name: row.name,
     decimals: row.decimals,

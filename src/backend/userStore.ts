@@ -299,6 +299,10 @@ export async function dbSaveSettings(
   const normalizedContractAddress = update.baseTokenAddress.trim()
     ? normalizePubkey(update.baseTokenAddress)
     : '';
+  const normalizedActiveQuoteTokenAddress =
+    typeof update.activeQuoteTokenAddress === 'string' && update.activeQuoteTokenAddress.trim().length > 0
+      ? normalizePubkey(update.activeQuoteTokenAddress)
+      : '';
   if (update.volatilityTarget < 0 || update.volatilityTarget > 100) {
     throw new ApiError(400, 'Volatility target must be between 0 and 100');
   }
@@ -318,6 +322,8 @@ export async function dbSaveSettings(
 
   const pairs: [string, string][] = [
     ['contractAddress', normalizedContractAddress],
+    ['activeBaseTokenAddress', normalizedContractAddress],
+    ['activeQuoteTokenAddress', normalizedActiveQuoteTokenAddress],
     ['volatilityTarget', String(update.volatilityTarget)],
     ['pullbackTarget', String(update.pullbackTarget)],
     ['volumeTarget', String(update.volumeTarget)],

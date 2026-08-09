@@ -33,6 +33,7 @@ export type TradableToken = {
   network: string;
   baseTokenAddress: string;
   quoteTokenAddress: string;
+  ammPoolAddress?: string | null;
   symbol: string | null;
   name: string | null;
   decimals: number | null;

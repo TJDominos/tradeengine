@@ -96,17 +96,6 @@ export const STRATEGY_FIELD_SCHEMAS: StrategyFieldSchema[] = [
     placeholder: 'Quote token mint address',
   },
   {
-    id: 'ammPoolAddress',
-    path: 'parameters.ammPoolAddress',
-    section: 'basic',
-    label: 'Main AMM Pool Address',
-    description: 'Pool address used to infer buy or sell direction from webhook token flows.',
-    fieldType: 'text',
-    capability: 'supported',
-    editable: true,
-    placeholder: 'Raydium or AMM pool address',
-  },
-  {
     id: 'timeRangeTarget',
     path: 'parameters.timeRangeTarget',
     section: 'parameters',

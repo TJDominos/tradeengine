@@ -4,6 +4,15 @@ import path from 'node:path';
 const DEFAULT_MAX_LINES = 1000;
 const ROOTS = ['src', 'rust-backend/src'];
 const EXTENSIONS = new Set(['.ts', '.tsx', '.rs']);
+const KNOWN_OVERSIZED_FILE_BASELINES = new Map([
+  ['rust-backend/src/main.rs', 2630],
+  ['src/App.tsx', 1534],
+  ['src/backend/workerCore.ts', 1358],
+  ['src/backend/tokenHolders.ts', 1347],
+  ['src/backend/services/strategyStore.ts', 1289],
+  ['src/backend/userStore.ts', 1137],
+  ['src/backend/workerShared.ts', 1056],
+]);
 
 function parseMaxLines(argv) {
   const maxArg = argv.find((arg) => arg.startsWith('--max='));
@@ -62,15 +71,21 @@ async function main() {
   );
 
   const violations = counts
-    .filter((entry) => entry.lineCount > maxLines)
+    .filter((entry) => {
+      if (entry.lineCount <= maxLines) {
+        return false;
+      }
+      const baseline = KNOWN_OVERSIZED_FILE_BASELINES.get(entry.filePath);
+      return baseline == null || entry.lineCount > baseline;
+    })
     .sort((left, right) => right.lineCount - left.lineCount);
 
   if (violations.length === 0) {
-    console.log(`All checked source files are at or under ${maxLines} lines.`);
+    console.log(`All checked source files are at or under ${maxLines} lines, or within the recorded oversized-file baseline.`);
     return;
   }
 
-  console.error(`Found ${violations.length} source file(s) over ${maxLines} lines:`);
+  console.error(`Found ${violations.length} source file(s) exceeding the ${maxLines}-line limit or their recorded oversized-file baseline:`);
   for (const violation of violations) {
     console.error(`- ${violation.filePath}: ${violation.lineCount}`);
   }

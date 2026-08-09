@@ -1,10 +1,28 @@
 import React from 'react';
 
 import { CONTRACT_ADDRESS } from '../app/constants';
-import type { DateRangeState, TokenHolderAggregate, TokenMarketSnapshot } from '../app/types';
+import type { DateRangeState, TokenHolderAggregate, TokenMarketSnapshot, TradableToken } from '../app/types';
 import { formatLivePrice, formatNum, formatOptionalUsd, formatUSD } from '../app/utils';
 import DateRangePicker from '../components/DateRangePicker';
 import StatCard from '../components/StatCard';
+
+function mintPreview(mintAddress: string): string {
+  if (mintAddress.length <= 18) {
+    return mintAddress || 'Not configured';
+  }
+  return `${mintAddress.slice(0, 8)}...${mintAddress.slice(-8)}`;
+}
+
+function pairValue(baseTokenAddress: string, quoteTokenAddress: string): string {
+  return `${baseTokenAddress}::${quoteTokenAddress}`;
+}
+
+function pairLabel(token: TradableToken): string {
+  const baseLabel = token.symbol ?? token.name ?? mintPreview(token.baseTokenAddress);
+  const quoteLabel =
+    token.quoteTokenSymbol ?? token.quoteTokenName ?? mintPreview(token.quoteTokenAddress);
+  return `${baseLabel} / ${quoteLabel}`;
+}
 
 type DashboardPageProps = {
   dateRange: DateRangeState;
@@ -15,9 +33,13 @@ type DashboardPageProps = {
   hasDateRange: boolean;
   marketSnapshotSubtitle: string;
   settingsContractAddress: string;
+  settingsQuoteTokenAddress: string;
   activeTokenSymbol: string;
   activeTokenName: string;
   activeTokenContractAddress: string;
+  tradableTokens: TradableToken[];
+  submitting: string | null;
+  onUseToken: (contractAddress: string, quoteTokenAddress: string) => void;
   totalInternalTokenAmount: number;
   managedAccountsCount: number;
   profitUsdc: number;
@@ -38,9 +60,13 @@ export default function DashboardPage({
   hasDateRange,
   marketSnapshotSubtitle,
   settingsContractAddress,
+  settingsQuoteTokenAddress,
   activeTokenSymbol,
   activeTokenName,
   activeTokenContractAddress,
+  tradableTokens,
+  submitting,
+  onUseToken,
   totalInternalTokenAmount,
   managedAccountsCount,
   profitUsdc,
@@ -95,6 +121,33 @@ export default function DashboardPage({
       : outsiderAmountHolding != null
         ? `Token total ${formatNum(outsiderAmountHolding)} ${activeTokenSymbol}`
         : 'Holder aggregate unavailable';
+  const pairOptions = React.useMemo(
+    () =>
+      tradableTokens.map((token) => ({
+        value: pairValue(token.baseTokenAddress, token.quoteTokenAddress),
+        label: pairLabel(token),
+        baseTokenAddress: token.baseTokenAddress,
+        quoteTokenAddress: token.quoteTokenAddress,
+      })),
+    [tradableTokens],
+  );
+  const activePairValue =
+    settingsContractAddress && settingsQuoteTokenAddress
+      ? pairValue(settingsContractAddress, settingsQuoteTokenAddress)
+      : '';
+  const activePairOption = pairOptions.find((option) => option.value === activePairValue) ?? null;
+  const selectedPairValue = activePairOption?.value ?? '';
+  const activePairDisplay = activePairOption?.label
+    ?? (settingsContractAddress
+      ? `${mintPreview(settingsContractAddress)} / ${mintPreview(settingsQuoteTokenAddress)}`
+      : 'Not Configured');
+  const activePairSubtitle = settingsContractAddress
+    ? settingsQuoteTokenAddress
+      ? `${settingsContractAddress} / ${settingsQuoteTokenAddress}`
+      : settingsContractAddress
+    : CONTRACT_ADDRESS
+      ? `${CONTRACT_ADDRESS} / quote not set`
+      : 'Select a tracked pair to begin.';
 
   return (
     <div className="space-y-6">
@@ -111,8 +164,49 @@ export default function DashboardPage({
         </div>
       </DateRangePicker>
 
+      <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 shadow-sm">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Active Tracked Pair
+            </p>
+            <p className="mt-1 text-sm text-slate-500">
+              Switch the live dashboard pair directly from the tracked-pair registry.
+            </p>
+          </div>
+          <div className="w-full lg:max-w-xl">
+            <select
+              value={selectedPairValue}
+              onChange={(event) => {
+                const nextPair = pairOptions.find((option) => option.value === event.target.value);
+                if (nextPair) {
+                  void onUseToken(nextPair.baseTokenAddress, nextPair.quoteTokenAddress);
+                }
+              }}
+              disabled={pairOptions.length === 0 || submitting === 'use-token'}
+              className="h-11 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <option value="">
+                {pairOptions.length === 0
+                  ? 'No tracked pairs in registry'
+                  : activePairOption
+                    ? 'Select a tracked pair'
+                    : hasActiveToken
+                      ? `${activePairDisplay} (not in registry)`
+                      : 'Select a tracked pair'}
+              </option>
+              {pairOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard title="Base Token Address" value={settingsContractAddress || CONTRACT_ADDRESS || 'Not Configured'} isAddress />
+        <StatCard title="Active Pair" value={activePairDisplay} subtitle={activePairSubtitle} />
         <StatCard
           title={`Total ${activeTokenSymbol} Amount (Internal)`}
           value={activeTokenContractAddress ? formatNum(totalInternalTokenAmount) : 'Not Configured'}

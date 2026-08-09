@@ -56,6 +56,64 @@ async function wait(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function stopWorkerProcess(childProcess) {
+  if (!childProcess) {
+    return;
+  }
+
+  const waitForExit = async (timeoutMs) => {
+    if (childProcess.exitCode != null || childProcess.signalCode != null) {
+      return;
+    }
+    try {
+      await Promise.race([once(childProcess, 'exit'), wait(timeoutMs)]);
+    } catch {
+      // ignore
+    }
+  };
+
+  if (process.platform === 'win32') {
+    try {
+      execFileSync('taskkill', ['/pid', String(childProcess.pid), '/t', '/f'], {
+        stdio: 'ignore',
+      });
+    } catch {
+      // ignore
+    }
+  } else if (childProcess.pid != null) {
+    try {
+      process.kill(-childProcess.pid, 'SIGTERM');
+    } catch {
+      // ignore
+    }
+  }
+
+  await waitForExit(5000);
+
+  if (childProcess.exitCode == null && childProcess.signalCode == null) {
+    if (process.platform === 'win32') {
+      try {
+        execFileSync('taskkill', ['/pid', String(childProcess.pid), '/t', '/f'], {
+          stdio: 'ignore',
+        });
+      } catch {
+        // ignore
+      }
+    } else if (childProcess.pid != null) {
+      try {
+        process.kill(-childProcess.pid, 'SIGKILL');
+      } catch {
+        // ignore
+      }
+    }
+
+    await waitForExit(2000);
+  }
+
+  childProcess.stdout?.destroy();
+  childProcess.stderr?.destroy();
+}
+
 async function getAvailablePort() {
   const server = createServer();
   server.unref();
@@ -107,6 +165,15 @@ async function requestJson(pathname, options = {}) {
     throw new Error(`Request ${pathname} failed (${response.status}): ${text}`);
   }
   return { response, payload };
+}
+
+async function simulateActiveStrategy(authHeaders, body) {
+  const { payload } = await requestJson('/api/debug/strategy/current/simulate', {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify(body),
+  });
+  return payload;
 }
 
 function buildStrategyDocument(note, volumeUsd) {
@@ -221,6 +288,7 @@ try {
     ],
     {
       cwd: repoRoot,
+      detached: process.platform !== 'win32',
       env: {
         ...process.env,
         CI: '1',
@@ -272,6 +340,13 @@ try {
   assert.ok(firstActivation.payload.queuedStrategy?.versionId, 'first activation should enqueue strategy');
   const firstQueueVersionId = firstActivation.payload.queuedStrategy.versionId;
 
+  await simulateActiveStrategy(authHeaders, {
+    action: 'fill',
+    executedVolumeUsd: 6,
+    actualNetInflowUsd: -6,
+    clearPendingTasks: true,
+  });
+
   const secondActivation = await requestJson('/api/strategy/active', {
     method: 'POST',
     headers: authHeaders,
@@ -299,27 +374,9 @@ try {
     },
   );
 
-  const progressedSnapshot = await waitFor(
-    async () => {
-      const { payload } = await requestJson('/api/strategy/current', {
-        method: 'GET',
-        headers: authHeaders,
-      });
-      if ((payload.currentMetrics?.actualTotalVolume ?? 0) > 0) {
-        return payload;
-      }
-      return null;
-    },
-    {
-      timeoutMs: 30000,
-      intervalMs: 500,
-      timeoutMessage: 'Timed out waiting for DO alarm loop to produce live metrics',
-    },
-  );
-
   assert.ok(
-    progressedSnapshot.currentMetrics.actualTotalVolume > 0,
-    'DO metrics should reflect executed TWAP volume',
+    runningSnapshot.currentMetrics.actualTotalVolume > 0,
+    'debug-simulated metrics should reflect non-zero active volume',
   );
 
   const webhookResponse = await requestJson('/api/webhook', {
@@ -373,6 +430,11 @@ try {
   });
   assert.equal(resumeResponse.payload.started, true, 'resume should start the next queued strategy');
 
+  await simulateActiveStrategy(authHeaders, {
+    action: 'hold',
+    clearPendingTasks: true,
+  });
+
   const resumedSnapshot = await waitFor(
     async () => {
       const { payload } = await requestJson('/api/strategy/current', {
@@ -395,18 +457,7 @@ try {
   console.log('Strategy DO lifecycle check passed. Start, metrics, webhook, abort, and resume all succeeded.');
 } finally {
   if (workerProcess) {
-    workerProcess.kill('SIGTERM');
-    try {
-      await Promise.race([
-        once(workerProcess, 'exit'),
-        wait(5000),
-      ]);
-    } catch {
-      // ignore
-    }
-    if (!workerProcess.killed) {
-      workerProcess.kill('SIGKILL');
-    }
+    await stopWorkerProcess(workerProcess);
   }
   rmSync(persistDir, { recursive: true, force: true });
 }

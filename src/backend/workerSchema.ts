@@ -4,6 +4,7 @@ import type {
   ManagedWalletImportRequest,
   RpcEndpointCreateRequest,
   TradableTokenCreateRequest,
+  TradableTokenUpdateRequest,
 } from './workerShared';
 import { SOLANA_USDC_MINT } from './workerShared';
 
@@ -63,6 +64,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     network TEXT NOT NULL DEFAULT 'solana',
     base_token_address TEXT NOT NULL,
     quote_token_address TEXT NOT NULL DEFAULT '${SOLANA_USDC_MINT}',
+    amm_pool_address TEXT,
     symbol TEXT,
     name TEXT,
     decimals INTEGER,
@@ -396,6 +398,77 @@ export async function dbEnsureTableColumn(
     .run();
 }
 
+async function dbUpgradeTradableTokensToPairRegistry(
+  db: D1Database,
+): Promise<void> {
+  if (!(await dbTableHasColumn(db, 'tradable_tokens', 'contract_address'))) {
+    return;
+  }
+
+  await db.prepare('PRAGMA foreign_keys = OFF').run();
+  try {
+    await db.prepare('DROP TABLE IF EXISTS tradable_tokens_pair_registry_upgrade').run();
+    await db.prepare(
+      `CREATE TABLE tradable_tokens_pair_registry_upgrade (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        network TEXT NOT NULL DEFAULT 'solana',
+        base_token_address TEXT NOT NULL,
+        quote_token_address TEXT NOT NULL DEFAULT '${SOLANA_USDC_MINT}',
+        amm_pool_address TEXT,
+        symbol TEXT,
+        name TEXT,
+        decimals INTEGER,
+        quote_token_symbol TEXT,
+        quote_token_name TEXT,
+        quote_token_decimals INTEGER,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        UNIQUE(network, base_token_address, quote_token_address)
+      )`,
+    ).run();
+
+    await db.prepare(
+      `INSERT INTO tradable_tokens_pair_registry_upgrade (
+         id,
+         network,
+         base_token_address,
+         quote_token_address,
+         amm_pool_address,
+         symbol,
+         name,
+         decimals,
+         quote_token_symbol,
+         quote_token_name,
+         quote_token_decimals,
+         is_active,
+         created_at
+       )
+       SELECT
+         id,
+         network,
+         COALESCE(NULLIF(TRIM(base_token_address), ''), NULLIF(TRIM(contract_address), ''), contract_address),
+         COALESCE(NULLIF(TRIM(quote_token_address), ''), '${SOLANA_USDC_MINT}'),
+         amm_pool_address,
+         symbol,
+         name,
+         decimals,
+         quote_token_symbol,
+         quote_token_name,
+         quote_token_decimals,
+         COALESCE(is_active, 1),
+         created_at
+       FROM tradable_tokens`,
+    ).run();
+
+    await db.prepare('DROP TABLE tradable_tokens').run();
+    await db.prepare(
+      'ALTER TABLE tradable_tokens_pair_registry_upgrade RENAME TO tradable_tokens',
+    ).run();
+  } finally {
+    await db.prepare('PRAGMA foreign_keys = ON').run();
+  }
+}
+
 export async function dbEnsureSchema(db: D1Database): Promise<void> {
   if (!schemaInitPromise) {
     schemaInitPromise = db
@@ -489,6 +562,7 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           'quote_token_address',
           `TEXT NOT NULL DEFAULT '${SOLANA_USDC_MINT}'`,
         );
+        await dbEnsureTableColumn(db, 'tradable_tokens', 'amm_pool_address', 'TEXT');
         await dbEnsureTableColumn(db, 'tradable_tokens', 'quote_token_symbol', 'TEXT');
         await dbEnsureTableColumn(db, 'tradable_tokens', 'quote_token_name', 'TEXT');
         await dbEnsureTableColumn(db, 'tradable_tokens', 'quote_token_decimals', 'INTEGER');
@@ -526,6 +600,7 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           )
           .bind(SOLANA_USDC_MINT)
           .run();
+        await dbUpgradeTradableTokensToPairRegistry(db);
         await dbEnsureTableColumn(
           db,
           'trade_logs',
@@ -653,11 +728,12 @@ export function parseTradableTokenCreateRequest(
   if (!body || typeof body !== 'object') {
     throw new ApiError(400, 'Network, contract address, and quote token address are required');
   }
-  const { network, contractAddress, baseTokenAddress, quoteTokenAddress } = body as {
+  const { network, contractAddress, baseTokenAddress, quoteTokenAddress, ammPoolAddress } = body as {
     network?: unknown;
     contractAddress?: unknown;
     baseTokenAddress?: unknown;
     quoteTokenAddress?: unknown;
+    ammPoolAddress?: unknown;
   };
   if (
     typeof network !== 'string' ||
@@ -666,11 +742,15 @@ export function parseTradableTokenCreateRequest(
   ) {
     throw new ApiError(400, 'Network, contract address, and quote token address are required');
   }
+  if (ammPoolAddress != null && typeof ammPoolAddress !== 'string') {
+    throw new ApiError(400, 'AMM pool address must be a string');
+  }
   return {
     network,
     baseTokenAddress:
       typeof baseTokenAddress === 'string' ? baseTokenAddress : (contractAddress as string),
     quoteTokenAddress,
+    ammPoolAddress: typeof ammPoolAddress === 'string' ? ammPoolAddress : undefined,
   };
 }
 
@@ -712,4 +792,21 @@ export function parseRpcEndpointCreateRequest(
     throw new ApiError(400, 'Network and RPC URL are required');
   }
   return { network, url };
+}
+
+export function parseTradableTokenUpdateRequest(
+  body: unknown,
+): TradableTokenUpdateRequest {
+  if (!body || typeof body !== 'object') {
+    throw new ApiError(400, 'Tracked pair update body is required');
+  }
+  const { ammPoolAddress } = body as {
+    ammPoolAddress?: unknown;
+  };
+  if (ammPoolAddress != null && typeof ammPoolAddress !== 'string') {
+    throw new ApiError(400, 'AMM pool address must be a string');
+  }
+  return {
+    ammPoolAddress: typeof ammPoolAddress === 'string' ? ammPoolAddress : undefined,
+  };
 }

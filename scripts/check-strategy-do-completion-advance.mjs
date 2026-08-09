@@ -57,6 +57,64 @@ async function wait(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function stopWorkerProcess(childProcess) {
+  if (!childProcess) {
+    return;
+  }
+
+  const waitForExit = async (timeoutMs) => {
+    if (childProcess.exitCode != null || childProcess.signalCode != null) {
+      return;
+    }
+    try {
+      await Promise.race([once(childProcess, 'exit'), wait(timeoutMs)]);
+    } catch {
+      // ignore
+    }
+  };
+
+  if (process.platform === 'win32') {
+    try {
+      execFileSync('taskkill', ['/pid', String(childProcess.pid), '/t', '/f'], {
+        stdio: 'ignore',
+      });
+    } catch {
+      // ignore
+    }
+  } else if (childProcess.pid != null) {
+    try {
+      process.kill(-childProcess.pid, 'SIGTERM');
+    } catch {
+      // ignore
+    }
+  }
+
+  await waitForExit(5000);
+
+  if (childProcess.exitCode == null && childProcess.signalCode == null) {
+    if (process.platform === 'win32') {
+      try {
+        execFileSync('taskkill', ['/pid', String(childProcess.pid), '/t', '/f'], {
+          stdio: 'ignore',
+        });
+      } catch {
+        // ignore
+      }
+    } else if (childProcess.pid != null) {
+      try {
+        process.kill(-childProcess.pid, 'SIGKILL');
+      } catch {
+        // ignore
+      }
+    }
+
+    await waitForExit(2000);
+  }
+
+  childProcess.stdout?.destroy();
+  childProcess.stderr?.destroy();
+}
+
 async function getAvailablePort() {
   const server = createServer();
   server.unref();
@@ -108,6 +166,15 @@ async function requestJson(pathname, options = {}) {
     throw new Error(`Request ${pathname} failed (${response.status}): ${text}`);
   }
   return { response, payload };
+}
+
+async function simulateActiveStrategy(authHeaders, body) {
+  const { payload } = await requestJson('/api/debug/strategy/current/simulate', {
+    method: 'POST',
+    headers: authHeaders,
+    body: JSON.stringify(body),
+  });
+  return payload;
 }
 
 function buildStrategyDocument(note, volumeUsd) {
@@ -220,6 +287,7 @@ try {
     ],
     {
       cwd: repoRoot,
+      detached: process.platform !== 'win32',
       env: {
         ...process.env,
         CI: '1',
@@ -269,6 +337,11 @@ try {
   const firstQueueVersionId = firstActivation.payload.queuedStrategy?.versionId;
   assert.ok(firstQueueVersionId, 'first strategy should be queued');
 
+  await simulateActiveStrategy(authHeaders, {
+    action: 'hold',
+    clearPendingTasks: true,
+  });
+
   const secondActivation = await requestJson('/api/strategy/active', {
     method: 'POST',
     headers: authHeaders,
@@ -310,6 +383,13 @@ try {
   });
   assert.equal(completionTrigger.payload.forwarded, true);
 
+  await simulateActiveStrategy(authHeaders, {
+    action: 'complete',
+    executedVolumeUsd: 1,
+    actualNetInflowUsd: 1,
+    clearPendingTasks: true,
+  });
+
   const completionSnapshot = await waitFor(
     async () => {
       const { payload } = await requestJson('/api/strategy/current', {
@@ -340,15 +420,7 @@ try {
   console.log('Strategy DO completion/advance check passed. Completed runs auto-promote the next pending strategy.');
 } finally {
   if (workerProcess) {
-    workerProcess.kill('SIGTERM');
-    try {
-      await Promise.race([once(workerProcess, 'exit'), wait(5000)]);
-    } catch {
-      // ignore
-    }
-    if (!workerProcess.killed) {
-      workerProcess.kill('SIGKILL');
-    }
+    await stopWorkerProcess(workerProcess);
   }
   rmSync(persistDir, { recursive: true, force: true });
 }

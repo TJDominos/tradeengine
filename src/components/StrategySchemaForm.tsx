@@ -158,6 +158,10 @@ function registryPairLabel(token: TradableToken): string {
   return `${baseLabel} / ${quoteLabel}`;
 }
 
+function registryPairValue(token: TradableToken): string {
+  return `${token.baseTokenAddress}::${token.quoteTokenAddress}`;
+}
+
 function FormCard({
   title,
   description,
@@ -228,24 +232,39 @@ export default function StrategySchemaForm({
     const options = tradableTokens
       .filter((token) => token.network === 'solana' && token.isActive)
       .map((token) => ({
-        value: token.baseTokenAddress,
+        value: registryPairValue(token),
         label: registryPairLabel(token),
       }));
 
     const currentContractAddress =
       (draft.parameters.contractAddress ?? draft.parameters.baseTokenAddress ?? '').trim();
+    const currentQuoteTokenAddress =
+      draft.parameters.quoteTokenAddress?.trim() ?? '';
+    const currentPairValue =
+      currentContractAddress && currentQuoteTokenAddress
+        ? `${currentContractAddress}::${currentQuoteTokenAddress}`
+        : currentContractAddress;
     if (
-      currentContractAddress &&
-      !options.some((option) => option.value === currentContractAddress)
+      currentPairValue &&
+      !options.some((option) => option.value === currentPairValue)
     ) {
       options.unshift({
-        value: currentContractAddress,
+        value: currentPairValue,
         label: `${contractPreview(currentContractAddress)} (removed from registry)`,
       });
     }
 
     return options;
-  }, [draft.parameters.contractAddress, tradableTokens]);
+  }, [draft.parameters.contractAddress, draft.parameters.quoteTokenAddress, tradableTokens]);
+
+  const selectedPairValue = React.useMemo(() => {
+    const baseTokenAddress = formData.parameters?.contractAddress?.trim();
+    const quoteTokenAddress = formData.parameters?.quoteTokenAddress?.trim();
+    if (baseTokenAddress && quoteTokenAddress) {
+      return `${baseTokenAddress}::${quoteTokenAddress}`;
+    }
+    return baseTokenAddress ?? '';
+  }, [formData.parameters?.contractAddress, formData.parameters?.quoteTokenAddress]);
 
   const selectedRegistryToken = React.useMemo(
     () =>
@@ -253,9 +272,9 @@ export default function StrategySchemaForm({
         (token) =>
           token.network === 'solana' &&
           token.isActive &&
-          token.baseTokenAddress === formData.parameters?.contractAddress,
+          registryPairValue(token) === selectedPairValue,
       ) ?? null,
-    [formData.parameters?.contractAddress, tradableTokens],
+    [selectedPairValue, tradableTokens],
   );
 
   React.useEffect(() => {
@@ -286,8 +305,13 @@ export default function StrategySchemaForm({
       ...formData,
       parameters: {
         ...formData.parameters,
+        contractAddress: selectedRegistryToken.baseTokenAddress,
         baseTokenAddress: selectedRegistryToken.baseTokenAddress,
         quoteTokenAddress: selectedRegistryToken.quoteTokenAddress,
+        ammPoolAddress:
+          selectedRegistryToken.ammPoolAddress ??
+          formData.parameters?.ammPoolAddress ??
+          '',
       },
     });
   }, [formData, reset, selectedRegistryToken]);
@@ -371,7 +395,14 @@ export default function StrategySchemaForm({
                 name="parameters.contractAddress"
                 render={({ field }) => (
                   <select
-                    {...field}
+                    value={selectedPairValue}
+                    onChange={(event) => {
+                      const nextPairValue = event.target.value;
+                      const nextToken = tradableTokens.find(
+                        (token) => registryPairValue(token) === nextPairValue,
+                      );
+                      field.onChange(nextToken?.baseTokenAddress ?? '');
+                    }}
                     className={textInputClassName()}
                     disabled={contractOptions.length === 0}
                   >
@@ -404,11 +435,12 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
-            <FieldShell label="Main AMM Pool Address" helper="Used to classify webhook events by checking whether the base token is flowing out of or into the configured pool.">
+            <FieldShell label="Main AMM Pool Address" helper="Managed on the tracked pair registry. The live runtime uses the registry value and falls back to legacy strategy data only for older versions.">
               <input
-                {...register('parameters.ammPoolAddress')}
-                className={textInputClassName()}
-                placeholder="Raydium or AMM pool address"
+                value={selectedRegistryToken?.ammPoolAddress ?? formData.parameters?.ammPoolAddress ?? ''}
+                readOnly
+                className={textInputClassName(true)}
+                placeholder="Configure on the tracked pair registry"
               />
             </FieldShell>
 
