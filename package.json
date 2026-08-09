@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "npm run build && wrangler dev",
+    "preview": "npm run build && wrangler dev --config dist/tradeengine/wrangler.json",
     "clean": "rm -rf dist rust-backend/target",
     "lint": "tsc --noEmit",
     "check:webhook-parser": "node scripts/check-webhook-parser.mjs",
@@ -17,7 +17,7 @@
     "check:max-lines": "node scripts/check-max-lines.mjs",
     "check:base-token-backfill:local": "wrangler d1 execute tradingbot --local --file ./scripts/check-base-token-backfill.sql",
     "check:base-token-backfill:remote": "wrangler d1 execute tradingbot --remote --file ./scripts/check-base-token-backfill.sql",
-    "deploy": "npm run build && wrangler deploy"
+    "deploy": "npm run build && wrangler deploy --config dist/tradeengine/wrangler.json"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
