@@ -135,11 +135,13 @@ export default function TransactionLogsCard({
                   : null;
               const normalizedWebhookAction =
                 log.kind === 'webhook'
-                  ? webhookFromOwnership?.ownership === 'internal' && webhookToOwnership?.ownership !== 'internal'
-                    ? 'SELL'
-                    : webhookToOwnership?.ownership === 'internal' && webhookFromOwnership?.ownership !== 'internal'
-                      ? 'BUY'
-                      : log.action
+                  ? log.action ?? (
+                      webhookFromOwnership?.ownership === 'internal' && webhookToOwnership?.ownership !== 'internal'
+                        ? 'SELL'
+                        : webhookToOwnership?.ownership === 'internal' && webhookFromOwnership?.ownership !== 'internal'
+                          ? 'BUY'
+                          : null
+                    )
                   : null;
               const actionLabel =
                 log.kind === 'webhook'

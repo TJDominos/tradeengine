@@ -279,6 +279,9 @@ export default function TradingSetupPage({
                           Clear Pool
                         </button>
                       </div>
+                      <div className="mt-2 break-all font-mono text-xs text-slate-500">
+                        Saved pool: {token.ammPoolAddress?.trim() ? token.ammPoolAddress : 'Not configured'}
+                      </div>
                       <p className="mt-2 text-xs text-slate-500">
                         Stored on the tracked pair and used by webhook parsing plus strategy runtime resolution.
                       </p>

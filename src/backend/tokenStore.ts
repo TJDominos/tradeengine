@@ -838,6 +838,56 @@ export async function dbInsertTokenMarketSnapshot(
   tokenId: number,
   snapshot: TokenMarketSnapshot,
 ): Promise<void> {
+  const hasLegacyContractAddressColumn = await dbTableHasColumn(
+    db,
+    'token_market_snapshots',
+    'contract_address',
+  );
+
+  if (hasLegacyContractAddressColumn) {
+    await db
+      .prepare(
+        `INSERT INTO token_market_snapshots (
+          token_id,
+          network,
+          contract_address,
+          base_token_address,
+          token_name,
+          token_symbol,
+          price_usd,
+          liquidity_usd,
+          fdv,
+          volume_24h,
+          total_holders,
+          total_transactions_24h,
+          outsiders_over_one_usd,
+          dex_id,
+          pair_address,
+          fetched_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
+      )
+      .bind(
+        tokenId,
+        snapshot.network,
+        snapshot.baseTokenAddress,
+        snapshot.baseTokenAddress,
+        snapshot.tokenName,
+        snapshot.tokenSymbol,
+        snapshot.priceUsd,
+        snapshot.liquidityUsd,
+        snapshot.fdv,
+        snapshot.volume24h,
+        snapshot.totalHolders,
+        snapshot.totalTransactions24h,
+        snapshot.outsidersOverOneUsd,
+        snapshot.dexId,
+        snapshot.pairAddress,
+        snapshot.fetchedAt,
+      )
+      .run();
+    return;
+  }
+
   await db
     .prepare(
       `INSERT INTO token_market_snapshots (

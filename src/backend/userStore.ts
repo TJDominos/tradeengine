@@ -1024,19 +1024,21 @@ export async function dbListWebhookTransactionLogs(
       !!mergedDetails.toWalletAddress &&
       managedAddressSet.has(mergedDetails.toWalletAddress);
     const normalizedAction: WebhookTransactionLogRecord['action'] =
-      fromIsManaged && !toIsManaged
-        ? 'SELL'
-        : toIsManaged && !fromIsManaged
-        ? 'BUY'
-        : mergedDetails.primaryWalletAddress &&
-            mergedDetails.fromWalletAddress &&
-            mergedDetails.primaryWalletAddress === mergedDetails.fromWalletAddress
+      mergedDetails.action ?? (
+        fromIsManaged && !toIsManaged
           ? 'SELL'
-          : mergedDetails.primaryWalletAddress &&
-              mergedDetails.toWalletAddress &&
-              mergedDetails.primaryWalletAddress === mergedDetails.toWalletAddress
+          : toIsManaged && !fromIsManaged
             ? 'BUY'
-          : mergedDetails.action;
+            : mergedDetails.primaryWalletAddress &&
+                mergedDetails.fromWalletAddress &&
+                mergedDetails.primaryWalletAddress === mergedDetails.fromWalletAddress
+              ? 'SELL'
+              : mergedDetails.primaryWalletAddress &&
+                  mergedDetails.toWalletAddress &&
+                  mergedDetails.primaryWalletAddress === mergedDetails.toWalletAddress
+                ? 'BUY'
+                : null
+      );
     const normalizedWalletAddress = fromIsManaged
       ? mergedDetails.fromWalletAddress
       : toIsManaged
