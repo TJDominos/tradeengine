@@ -5,6 +5,7 @@ function roundToSixDecimals(value: number): number {
 export function distributeVolumeAcrossAccounts(
   targetVolume: number,
   accountsCount: number,
+  random: () => number = Math.random,
 ): number[] {
   if (!Number.isFinite(targetVolume) || targetVolume <= 0 || accountsCount <= 0) {
     return [];
@@ -14,7 +15,7 @@ export function distributeVolumeAcrossAccounts(
     return [targetVolume];
   }
 
-  const weights = Array.from({ length: accountsCount }, () => Math.random());
+  const weights = Array.from({ length: accountsCount }, () => random());
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
   if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
     return [targetVolume, ...Array.from({ length: accountsCount - 1 }, () => 0)].slice(0, accountsCount);

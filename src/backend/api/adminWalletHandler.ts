@@ -1,5 +1,6 @@
 import { ApiError } from '../errors';
 import { parseManagedWalletImportRequest, parseJsonBody } from '../workerSchema';
+import { dbUpdateTokenHolderWalletBalanceSnapshotByAddress } from '../tokenHolders';
 import { dbListTradableTokens, dbResolveSolanaRpcUrls } from '../tokenStore';
 import {
   dbAddAuditLog,
@@ -343,6 +344,19 @@ export async function handleAdminWalletRoutes(
       tradableTokens,
       rpcUrls,
     );
+    try {
+      await dbUpdateTokenHolderWalletBalanceSnapshotByAddress(
+        env.TRADINGBOT_DB,
+        address,
+        {
+          usdcBalance: Number.parseFloat(balance.usdc) || 0,
+          solBalance: Number.parseFloat(balance.sol) || 0,
+          updatedAt: balance.updatedAt,
+        },
+      );
+    } catch (err: unknown) {
+      console.warn(`Failed to persist token-holder balance snapshot for ${address}:`, err);
+    }
     return jsonResponse(balance);
   }
 

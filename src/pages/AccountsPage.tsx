@@ -29,14 +29,14 @@ type AccountsPageProps = {
   accountSearchTerm: string;
   onAccountSearchTermChange: (value: string) => void;
   internalSummary: AccountSummary;
-  filteredInternal: AccountRecord[];
-  internalCurrentSlice: AccountRecord[];
+  internalRows: AccountRecord[];
+  internalRowsTotal: number;
   internalSort: 'newest' | 'usdc' | 'sol' | 'token';
   onInternalSortChange: (value: 'newest' | 'usdc' | 'sol' | 'token') => void;
   outsideHolderRows: OutsideTokenHolder[];
   outsideHolderRowsTotal: number;
-  outsideHolderSort: 'newest' | 'largest';
-  onOutsideHolderSortChange: (value: 'newest' | 'largest') => void;
+  outsideHolderSort: 'newest' | 'largest' | 'usdc' | 'sol';
+  onOutsideHolderSortChange: (value: 'newest' | 'largest' | 'usdc' | 'sol') => void;
   outsideHolderCount: number | null;
   outsideHolderTotalAmount: number | null;
   outsideHolderSummaryLoading: boolean;
@@ -47,6 +47,7 @@ type AccountsPageProps = {
   walletBalances: Record<string, WalletBalance>;
   walletBalanceErrors: Record<string, string>;
   walletBalancePending: Record<string, boolean>;
+  internalListLoading: boolean;
   internalPage: number;
   outsiderPage: number;
   onInternalPageChange: (page: number) => void;
@@ -69,8 +70,8 @@ export default function AccountsPage({
   accountSearchTerm,
   onAccountSearchTermChange,
   internalSummary,
-  filteredInternal,
-  internalCurrentSlice,
+  internalRows,
+  internalRowsTotal,
   internalSort,
   onInternalSortChange,
   outsideHolderRows,
@@ -87,6 +88,7 @@ export default function AccountsPage({
   walletBalances,
   walletBalanceErrors,
   walletBalancePending,
+  internalListLoading,
   internalPage,
   outsiderPage,
   onInternalPageChange,
@@ -117,6 +119,9 @@ export default function AccountsPage({
         : 'Unavailable';
   const tokenAmountSortActive = outsideHolderSort === 'largest';
   const newestSortActive = outsideHolderSort === 'newest';
+  const usdcSortActive = outsideHolderSort === 'usdc';
+  const solSortActive = outsideHolderSort === 'sol';
+  const displayOutsideHolderRows = outsideHolderRows;
 
   const handleCopyAddress = async (address: string) => {
     try {
@@ -169,8 +174,8 @@ export default function AccountsPage({
       <AccountsTable
         title="Internal Account List"
         icon={<Wallet size={16} className="text-blue-400" />}
-        count={filteredInternal.length}
-        rows={internalCurrentSlice}
+        count={internalRowsTotal}
+        rows={internalRows}
         typeLabel="Managed"
         typeClass="text-emerald-400"
         balances={walletBalances}
@@ -178,7 +183,7 @@ export default function AccountsPage({
         balancePending={walletBalancePending}
         trackedTokenMint={activeTokenContractAddress}
         trackedTokenSymbol={activeTokenSymbol}
-        emptyText="No internal accounts found."
+        emptyText={internalListLoading ? 'Fetching internal account data...' : 'No internal accounts found.'}
         sortValue={internalSort}
         onSortChange={onInternalSortChange}
         onToggleTradingAccount={onToggleInternalAccountTrading}
@@ -200,7 +205,7 @@ export default function AccountsPage({
           </div>
         }
       >
-        <Pagination currentPage={internalPage} totalItems={filteredInternal.length} itemsPerPage={itemsPerPage} onPageChange={onInternalPageChange} />
+        <Pagination currentPage={internalPage} totalItems={internalRowsTotal} itemsPerPage={itemsPerPage} onPageChange={onInternalPageChange} />
       </AccountsTable>
 
       <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
@@ -212,9 +217,10 @@ export default function AccountsPage({
           <div className="flex items-center gap-3">
             <button
               onClick={onRefreshOutsideBalances}
+              title="Refresh balances for the currently loaded outside-holder page"
               className="flex h-9 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm text-white hover:bg-slate-700"
             >
-              <RefreshCw size={14} /> Refresh Wallet Balances
+              <RefreshCw size={14} /> Refresh Visible Balances
             </button>
           </div>
         </div>
@@ -238,8 +244,32 @@ export default function AccountsPage({
                     <span aria-hidden="true">↓</span>
                   </button>
                 </th>
-                <th className="px-4 py-3 text-right font-medium text-blue-400">USDC Bal</th>
-                <th className="px-4 py-3 text-right font-medium text-amber-400">SOL Bal</th>
+                <th className="px-4 py-3 text-right font-medium text-blue-400">
+                  <button
+                    type="button"
+                    onClick={() => onOutsideHolderSortChange('usdc')}
+                    aria-pressed={usdcSortActive}
+                    className={`inline-flex w-full items-center justify-end gap-1 transition ${
+                      usdcSortActive ? 'text-blue-300' : 'text-slate-400 hover:text-blue-300'
+                    }`}
+                  >
+                    <span>USDC Bal</span>
+                    <span aria-hidden="true">↓</span>
+                  </button>
+                </th>
+                <th className="px-4 py-3 text-right font-medium text-amber-400">
+                  <button
+                    type="button"
+                    onClick={() => onOutsideHolderSortChange('sol')}
+                    aria-pressed={solSortActive}
+                    className={`inline-flex w-full items-center justify-end gap-1 transition ${
+                      solSortActive ? 'text-amber-300' : 'text-slate-400 hover:text-amber-300'
+                    }`}
+                  >
+                    <span>SOL Bal</span>
+                    <span aria-hidden="true">↓</span>
+                  </button>
+                </th>
                 <th className="px-4 py-3 text-right font-medium">
                   <button
                     type="button"
@@ -258,7 +288,7 @@ export default function AccountsPage({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
-              {outsideHolderRows.map((holder) => {
+              {displayOutsideHolderRows.map((holder) => {
                 const balance = walletBalances[holder.address];
                 const pending = walletBalancePending[holder.address];
                 const balanceError = walletBalanceErrors[holder.address];
@@ -301,7 +331,7 @@ export default function AccountsPage({
                   </tr>
                 );
               })}
-              {outsideHolderRows.length === 0 ? (
+              {displayOutsideHolderRows.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="py-8 text-center text-slate-500">
                     {outsideHolderListLoading ? 'Fetching outside holder data...' : 'No outside holders found.'}

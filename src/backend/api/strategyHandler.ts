@@ -1,4 +1,5 @@
 import { ApiError } from '../errors';
+import { buildRandomizedTwapPlan } from '../strategy/engine';
 import { normalizeStrategyDocument } from '../strategy/migrations';
 import {
   strategyEngineDurableObjectNameFor,
@@ -15,7 +16,13 @@ import {
   buildStrategyTaskExecutionContext,
   StrategyAutomationService,
 } from '../services/strategyAutomationService';
+import { distributeVolumeAcrossAccounts } from '../services/tradeMath';
+import type {
+  StrategyRecordConfig,
+  StrategyVersionDocument,
+} from '../strategy/types';
 import {
+  buildStrategyRecordConfigFromDocument,
   dbDeletePreviousStrategyVersions,
   dbGetActiveStrategyVersion,
   removePendingStrategy,
@@ -23,8 +30,329 @@ import {
   mapStrategyDocumentToSettingsUpdate,
 } from '../services/strategyStore';
 import { loadStoredMarketSnapshotByContractAddress } from '../services/tokenMarketService';
+import {
+  getManagedBuyCapacitySummary,
+  listManagedAccountsWithBalances,
+  type ManagedAccountBalanceRecord,
+} from '../userStore';
 
 const strategyAutomationService = new StrategyAutomationService();
+const DEFAULT_STRATEGY_DEPLOY_BUY_AMOUNT = 300;
+
+type StrategyPlanPreviewAllocation = {
+  accountId: number;
+  label: string;
+  walletAddress: string;
+  plannedVolumeUsd: number;
+  quoteAvailableAmount: number;
+  baseTokenAmount: number;
+  solBalance: number;
+  accountBuyOverAllocated: boolean;
+  accountBuyOverAllocationUsd: number;
+};
+
+type StrategyPlanPreviewTask = {
+  taskId: string;
+  side: 'buy' | 'sell';
+  pulse: string | null;
+  orderIndex: number;
+  totalOrders: number;
+  scheduledAt: number;
+  totalVolumeUsd: number;
+  allocations: StrategyPlanPreviewAllocation[];
+};
+
+type StrategyPlanPreviewAccount = {
+  accountId: number;
+  label: string;
+  walletAddress: string;
+  quoteAvailableAmount: number;
+  baseTokenAmount: number;
+  solBalance: number;
+  plannedBuyVolumeUsd: number;
+  plannedSellVolumeUsd: number;
+  buyOverAllocationUsd: number;
+  buyRemainingQuoteUsd: number;
+  isBuyOverAllocated: boolean;
+  pairCompatible: boolean;
+  eligibleForBuy: boolean;
+  eligibleForSell: boolean;
+};
+
+type StrategyPlanPreviewResponse = {
+  generatedAt: number;
+  pair: {
+    baseTokenAddress: string;
+    quoteTokenAddress: string;
+  };
+  macroObjective: 'shakeout' | 'distribution' | 'accumulation';
+  quoteLabel: string;
+  requiredBuyAmount: number;
+  availableBuyAmount: number;
+  enabledAccountCount: number;
+  eligibleAccountCount: number;
+  skippedForCapabilityCount: number;
+  skippedForSolReserveCount: number;
+  sufficientBuyCapacity: boolean;
+  tasks: StrategyPlanPreviewTask[];
+  accounts: StrategyPlanPreviewAccount[];
+};
+
+type StrategyPlanTaskSpec = {
+  side: 'buy' | 'sell';
+  pulse: string;
+  totalVolumeUsd: number;
+  orderCount: number;
+  durationMs: number;
+  scheduledOffsetMs: number;
+};
+
+function deriveRequiredStrategyBuyAmount(document: StrategyVersionDocument): number {
+  if (
+    document.riskControls.maxPositionUsd != null &&
+    Number.isFinite(document.riskControls.maxPositionUsd) &&
+    document.riskControls.maxPositionUsd > 0
+  ) {
+    return document.riskControls.maxPositionUsd;
+  }
+  if (
+    Number.isFinite(document.targets.volumeUsdMin) &&
+    document.targets.volumeUsdMin > 0
+  ) {
+    return document.targets.volumeUsdMin;
+  }
+  return DEFAULT_STRATEGY_DEPLOY_BUY_AMOUNT;
+}
+
+function formatQuoteLabel(quoteMint: string): string {
+  if (quoteMint === SOLANA_USDC_MINT) {
+    return 'USDC';
+  }
+  if (quoteMint.length <= 12) {
+    return quoteMint;
+  }
+  return `${quoteMint.slice(0, 6)}...${quoteMint.slice(-4)}`;
+}
+
+function createDeterministicRandom(seedText: string): () => number {
+  let seed = 2166136261;
+  for (let index = 0; index < seedText.length; index += 1) {
+    seed ^= seedText.charCodeAt(index);
+    seed = Math.imul(seed, 16777619);
+  }
+  return () => {
+    seed += 0x6D2B79F5;
+    let next = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    next ^= next + Math.imul(next ^ (next >>> 7), 61 | next);
+    return ((next ^ (next >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function buildStrategyPlanTaskSpecs(
+  config: StrategyRecordConfig,
+): StrategyPlanTaskSpec[] {
+  switch (config.macroObjective) {
+    case 'distribution':
+      return [
+        {
+          side: 'buy',
+          pulse: 'wash_buy',
+          totalVolumeUsd: config.baseTotalVolumeUsd / 2,
+          orderCount: Math.max(1, Math.floor(config.baseOrderCount / 2)),
+          durationMs: config.baseDurationMs,
+          scheduledOffsetMs: 0,
+        },
+        {
+          side: 'sell',
+          pulse: 'wash_sell',
+          totalVolumeUsd: config.baseTotalVolumeUsd / 2,
+          orderCount: Math.max(1, Math.floor(config.baseOrderCount / 2)),
+          durationMs: config.baseDurationMs,
+          scheduledOffsetMs: 750,
+        },
+      ];
+    case 'accumulation':
+      return [
+        {
+          side: 'buy',
+          pulse: 'slow_buy',
+          totalVolumeUsd: config.baseTotalVolumeUsd,
+          orderCount: Math.max(1, Math.ceil(config.baseOrderCount / 2)),
+          durationMs: Math.round(config.baseDurationMs * 1.5),
+          scheduledOffsetMs: 0,
+        },
+      ];
+    case 'shakeout':
+    default:
+      return [
+        {
+          side: 'buy',
+          pulse: 'trend',
+          totalVolumeUsd: config.baseTotalVolumeUsd,
+          orderCount: config.baseOrderCount,
+          durationMs: config.baseDurationMs,
+          scheduledOffsetMs: 0,
+        },
+      ];
+  }
+}
+
+function buildStrategyPlanPreview(
+  document: StrategyVersionDocument,
+  config: StrategyRecordConfig,
+  accounts: ManagedAccountBalanceRecord[],
+  requiredBuyAmount: number,
+): StrategyPlanPreviewResponse {
+  const generatedAt = Date.now();
+  const random = createDeterministicRandom(JSON.stringify(document));
+  const quoteLabel = formatQuoteLabel(config.quoteTokenAddress);
+  const accountSummaries = new Map<number, StrategyPlanPreviewAccount>();
+
+  for (const account of accounts) {
+    const solBalance = Number.parseFloat(account.walletBalance.sol) || 0;
+    accountSummaries.set(account.id, {
+      accountId: account.id,
+      label: account.label,
+      walletAddress: account.address,
+      quoteAvailableAmount: account.quoteAvailableAmount,
+      baseTokenAmount: account.baseTokenAmount,
+      solBalance,
+      plannedBuyVolumeUsd: 0,
+      plannedSellVolumeUsd: 0,
+      buyOverAllocationUsd: 0,
+      buyRemainingQuoteUsd: account.quoteAvailableAmount,
+      isBuyOverAllocated: false,
+      pairCompatible: account.pairCompatible,
+      eligibleForBuy: account.pairCompatible && account.hasSolReserve && account.quoteAvailableAmount > 0,
+      eligibleForSell: account.pairCompatible && account.hasSolReserve && account.baseTokenAmount > 0,
+    });
+  }
+
+  const planStartTime = generatedAt + 1_000;
+  const tasks: StrategyPlanPreviewTask[] = [];
+  for (const spec of buildStrategyPlanTaskSpecs(config)) {
+    const plan = buildRandomizedTwapPlan(config.execution, {
+      side: spec.side,
+      totalVolume: spec.totalVolumeUsd,
+      orderCount: spec.orderCount,
+      durationMs: spec.durationMs,
+      startTime: planStartTime,
+      baseTokenAddress: config.baseTokenAddress,
+      random,
+    });
+    const eligibleAccounts = [...accountSummaries.values()].filter((account) =>
+      spec.side === 'buy' ? account.eligibleForBuy : account.eligibleForSell,
+    );
+
+    for (const slice of plan.slices) {
+      const shares = distributeVolumeAcrossAccounts(
+        slice.targetVolume,
+        eligibleAccounts.length,
+        random,
+      );
+      const allocations = eligibleAccounts
+        .map((account, index) => {
+          const plannedVolumeUsd = shares[index] ?? 0;
+          if (plannedVolumeUsd <= 0) {
+            return null;
+          }
+          const summary = accountSummaries.get(account.accountId);
+          if (summary) {
+            if (spec.side === 'buy') {
+              summary.plannedBuyVolumeUsd = Number((summary.plannedBuyVolumeUsd + plannedVolumeUsd).toFixed(6));
+            } else {
+              summary.plannedSellVolumeUsd = Number((summary.plannedSellVolumeUsd + plannedVolumeUsd).toFixed(6));
+            }
+          }
+          return {
+            accountId: account.accountId,
+            label: account.label,
+            walletAddress: account.walletAddress,
+            plannedVolumeUsd: Number(plannedVolumeUsd.toFixed(6)),
+            quoteAvailableAmount: account.quoteAvailableAmount,
+            baseTokenAmount: account.baseTokenAmount,
+            solBalance: account.solBalance,
+            accountBuyOverAllocated: false,
+            accountBuyOverAllocationUsd: 0,
+          };
+        })
+        .filter((allocation): allocation is StrategyPlanPreviewAllocation => allocation != null);
+
+      tasks.push({
+        taskId: `${spec.pulse}-${slice.orderIndex}-${slice.scheduledAt + spec.scheduledOffsetMs}`,
+        side: spec.side,
+        pulse: spec.pulse,
+        orderIndex: slice.orderIndex,
+        totalOrders: plan.orderCount,
+        scheduledAt: slice.scheduledAt + spec.scheduledOffsetMs,
+        totalVolumeUsd: Number(slice.targetVolume.toFixed(6)),
+        allocations,
+      });
+    }
+  }
+
+  const accountList = [...accountSummaries.values()].sort((left, right) => {
+    const leftTotal = left.plannedBuyVolumeUsd + left.plannedSellVolumeUsd;
+    const rightTotal = right.plannedBuyVolumeUsd + right.plannedSellVolumeUsd;
+    if (rightTotal !== leftTotal) {
+      return rightTotal - leftTotal;
+    }
+    return left.label.localeCompare(right.label) || left.walletAddress.localeCompare(right.walletAddress);
+  });
+
+  for (const account of accountList) {
+    account.buyOverAllocationUsd = Number(
+      Math.max(0, account.plannedBuyVolumeUsd - account.quoteAvailableAmount).toFixed(6),
+    );
+    account.buyRemainingQuoteUsd = Number(
+      Math.max(0, account.quoteAvailableAmount - account.plannedBuyVolumeUsd).toFixed(6),
+    );
+    account.isBuyOverAllocated = account.buyOverAllocationUsd > 0;
+  }
+
+  const overAllocatedByAccountId = new Map(
+    accountList.map((account) => [
+      account.accountId,
+      {
+        isBuyOverAllocated: account.isBuyOverAllocated,
+        buyOverAllocationUsd: account.buyOverAllocationUsd,
+      },
+    ]),
+  );
+  for (const task of tasks) {
+    for (const allocation of task.allocations) {
+      const status = overAllocatedByAccountId.get(allocation.accountId);
+      allocation.accountBuyOverAllocated = status?.isBuyOverAllocated ?? false;
+      allocation.accountBuyOverAllocationUsd = status?.buyOverAllocationUsd ?? 0;
+    }
+  }
+
+  const eligibleBuyAccounts = accountList.filter((account) => account.eligibleForBuy);
+  const availableBuyAmount = Number(
+    eligibleBuyAccounts
+      .reduce((sum, account) => sum + account.quoteAvailableAmount, 0)
+      .toFixed(6),
+  );
+
+  return {
+    generatedAt,
+    pair: {
+      baseTokenAddress: config.baseTokenAddress,
+      quoteTokenAddress: config.quoteTokenAddress,
+    },
+    macroObjective: config.macroObjective,
+    quoteLabel,
+    requiredBuyAmount,
+    availableBuyAmount,
+    enabledAccountCount: accountList.length,
+    eligibleAccountCount: eligibleBuyAccounts.length,
+    skippedForCapabilityCount: accountList.filter((account) => !account.pairCompatible).length,
+    skippedForSolReserveCount: accountList.filter((account) => account.pairCompatible && account.solBalance < 0.01).length,
+    sufficientBuyCapacity: availableBuyAmount >= requiredBuyAmount,
+    tasks: tasks.sort((left, right) => left.scheduledAt - right.scheduledAt || left.taskId.localeCompare(right.taskId)),
+    accounts: accountList,
+  };
+}
 
 type StrategyExecutionConsumeRequest = {
   action: 'BUY' | 'SELL';
@@ -162,6 +490,62 @@ export async function handleStrategyRoutes(
     return jsonResponse(result);
   }
 
+  if (method === 'POST' && pathname === '/api/strategy/plan-preview') {
+    const user = await requireAdmin(request, env);
+    const document = normalizeStrategyDocument(
+      await parseJsonBody<unknown>(request),
+    );
+
+    const normalizedBaseTokenAddress = document.parameters.baseTokenAddress.trim()
+      ? normalizePubkey(document.parameters.baseTokenAddress)
+      : '';
+    const normalizedQuoteTokenAddress = document.parameters.quoteTokenAddress.trim()
+      ? normalizePubkey(document.parameters.quoteTokenAddress)
+      : SOLANA_USDC_MINT;
+
+    if (!normalizedBaseTokenAddress) {
+      throw new ApiError(400, 'Strategy base token is not configured');
+    }
+    if (normalizedBaseTokenAddress === normalizedQuoteTokenAddress) {
+      throw new ApiError(400, 'Strategy base and quote token addresses must be different');
+    }
+
+    const normalizedDocument = normalizeStrategyDocument({
+      ...document,
+      parameters: {
+        ...document.parameters,
+        baseTokenAddress: normalizedBaseTokenAddress,
+        quoteTokenAddress: normalizedQuoteTokenAddress,
+      },
+    });
+
+    const config = buildStrategyRecordConfigFromDocument(
+      normalizedDocument,
+      user.id,
+    );
+    const requiredBuyAmount = deriveRequiredStrategyBuyAmount(normalizedDocument);
+    const accounts = await listManagedAccountsWithBalances(
+      env.TRADINGBOT_DB,
+      user.id,
+      {
+        envRpcUrl: env.SOLANA_RPC_URL,
+        pair: {
+          baseMint: normalizedBaseTokenAddress,
+          quoteMint: normalizedQuoteTokenAddress,
+        },
+      },
+    );
+
+    return jsonResponse(
+      buildStrategyPlanPreview(
+        normalizedDocument,
+        config,
+        accounts,
+        requiredBuyAmount,
+      ),
+    );
+  }
+
   if (method === 'POST' && pathname === '/api/strategy/active') {
     const user = await requireAdmin(request, env);
     const previousActiveStrategyVersion = await dbGetActiveStrategyVersion(
@@ -195,6 +579,30 @@ export async function handleStrategyRoutes(
         origin: 'manual',
       },
     });
+
+    const requiredBuyAmount = deriveRequiredStrategyBuyAmount(normalizedDocument);
+    const deploymentValidation = await getManagedBuyCapacitySummary(
+      env.TRADINGBOT_DB,
+      user.id,
+      {
+        envRpcUrl: env.SOLANA_RPC_URL,
+        pair: {
+          baseMint: normalizedBaseTokenAddress,
+          quoteMint: normalizedQuoteTokenAddress,
+        },
+      },
+    );
+    const quoteLabel = formatQuoteLabel(normalizedQuoteTokenAddress);
+
+    if (deploymentValidation.enabledAccountCount === 0) {
+      throw new ApiError(409, 'No enabled managed accounts are available for strategy deployment');
+    }
+    if (deploymentValidation.availableQuoteAmount < requiredBuyAmount) {
+      throw new ApiError(
+        409,
+        `Enabled managed accounts only provide ${deploymentValidation.availableQuoteAmount.toFixed(2)} ${quoteLabel} of immediate buy balance across ${deploymentValidation.eligibleAccountCount}/${deploymentValidation.enabledAccountCount} eligible accounts, below required ${requiredBuyAmount.toFixed(2)} ${quoteLabel}`,
+      );
+    }
 
     const strategySave = await dbSaveActiveStrategyVersionDocument(
       env.TRADINGBOT_DB,
@@ -317,6 +725,13 @@ export async function handleStrategyRoutes(
       settings: updatedSettings,
       marketSnapshot,
       queuedStrategy,
+      deploymentValidation: {
+        requiredBuyAmount,
+        availableBuyAmount: deploymentValidation.availableQuoteAmount,
+        quoteLabel,
+        enabledAccountCount: deploymentValidation.enabledAccountCount,
+        eligibleAccountCount: deploymentValidation.eligibleAccountCount,
+      },
     });
   }
 

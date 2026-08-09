@@ -43,6 +43,45 @@ export interface AvailableAccountRecord extends AccountRecord {
   walletBalance: WalletBalanceResponse;
 }
 
+export interface ManagedBuyCapacitySummary {
+  enabledAccountCount: number;
+  eligibleAccountCount: number;
+  skippedForCapabilityCount: number;
+  skippedForSolReserveCount: number;
+  availableQuoteAmount: number;
+  quoteMint: string;
+}
+
+export type ManagedAccountSort = 'newest' | 'usdc' | 'sol' | 'token';
+
+export interface ManagedAccountPageRecord {
+  items: AccountRecord[];
+  page: number;
+  pageSize: number;
+  totalItems: number;
+  balances: Record<string, WalletBalanceResponse>;
+}
+
+export interface ManagedAccountBalanceRecord extends AccountRecord {
+  walletBalance: WalletBalanceResponse;
+  quoteAvailableAmount: number;
+  baseTokenAmount: number;
+  hasSolReserve: boolean;
+  pairCompatible: boolean;
+}
+
+type ManagedAccountCandidateRow = {
+  id: number;
+  label: string;
+  wallet_address: string;
+  type: string;
+  capability_base_mint: string | null;
+  capability_quote_mint: string | null;
+  created_at: number;
+  is_active: number;
+  last_traded_at: number | null;
+};
+
 function mapAccountRow(
   row: {
     id: number;
@@ -147,6 +186,197 @@ function hasAnyPairTokenBalance(
   }
   const quoteBalance = walletBalance.tokens.find((token) => token.mint === pair.quoteMint);
   return (toFiniteNumber(quoteBalance?.amount) ?? 0) > 0;
+}
+
+function readQuoteBalanceAmount(
+  walletBalance: WalletBalanceResponse,
+  quoteMint: string,
+): number {
+  if (quoteMint === SOLANA_USDC_MINT) {
+    return Math.max(0, toFiniteNumber(walletBalance.usdc) ?? 0);
+  }
+  const quoteBalance = walletBalance.tokens.find((token) => token.mint === quoteMint);
+  return Math.max(0, toFiniteNumber(quoteBalance?.amount) ?? 0);
+}
+
+function readBaseTokenAmount(
+  walletBalance: WalletBalanceResponse,
+  baseMint: string,
+): number {
+  const baseBalance = walletBalance.tokens.find((token) => token.mint === baseMint);
+  return Math.max(0, toFiniteNumber(baseBalance?.amount) ?? 0);
+}
+
+function compareManagedAccountsByNewest(
+  left: AccountRecord,
+  right: AccountRecord,
+): number {
+  if (left.isActive !== right.isActive) {
+    return left.isActive ? -1 : 1;
+  }
+  const createdAtDelta = normalizeTimestampMs(right.createdAt) - normalizeTimestampMs(left.createdAt);
+  if (createdAtDelta !== 0) {
+    return createdAtDelta;
+  }
+  return right.id - left.id;
+}
+
+function compareManagedAccountsByNumeric(
+  left: AccountRecord,
+  right: AccountRecord,
+  leftValue: number,
+  rightValue: number,
+): number {
+  if (rightValue !== leftValue) {
+    return rightValue - leftValue;
+  }
+  return compareManagedAccountsByNewest(left, right);
+}
+
+async function loadWalletBalancesByAddress(
+  accounts: AccountRecord[],
+  settings: SettingsState,
+  tradableTokens: Awaited<ReturnType<typeof dbListTradableTokens>>,
+  rpcUrls: string[],
+): Promise<Record<string, WalletBalanceResponse>> {
+  if (accounts.length === 0) {
+    return {};
+  }
+
+  const results = await Promise.allSettled(
+    accounts.map(async (account) => ({
+      address: account.address,
+      balance: await loadWalletBalance(
+        account.address,
+        settings,
+        tradableTokens,
+        rpcUrls,
+      ),
+    })),
+  );
+
+  const balances: Record<string, WalletBalanceResponse> = {};
+  for (const result of results) {
+    if (result.status !== 'fulfilled') {
+      continue;
+    }
+    balances[result.value.address] = result.value.balance;
+  }
+  return balances;
+}
+
+async function listActiveManagedAccountCandidates(
+  db: D1Database,
+  userId: number,
+): Promise<ManagedAccountCandidateRow[]> {
+  const candidateRows = await db
+    .prepare(
+      `SELECT
+         a.id,
+         a.label,
+         a.wallet_address,
+         a.type,
+         a.capability_base_mint,
+         a.capability_quote_mint,
+         a.created_at,
+         COALESCE(a.is_active, 1) AS is_active,
+         (
+           SELECT MAX(COALESCE(tl.updated_at, tl.created_at))
+           FROM trade_logs tl
+           WHERE tl.wallet_address = a.wallet_address
+         ) AS last_traded_at
+       FROM accounts a
+       WHERE a.user_id = ?1
+         AND a.type = 'managed'
+         AND COALESCE(a.is_active, 1) = 1`,
+    )
+    .bind(userId)
+    .all<ManagedAccountCandidateRow>();
+
+  return [...candidateRows.results].sort((left, right) =>
+    compareLeastRecentlyUsed(
+      {
+        id: left.id,
+        createdAt: left.created_at,
+        lastTradedAt: normalizeTimestampMs(left.last_traded_at),
+      },
+      {
+        id: right.id,
+        createdAt: right.created_at,
+        lastTradedAt: normalizeTimestampMs(right.last_traded_at),
+      },
+    ),
+  );
+}
+
+function candidateCapabilityMatchesMintPair(
+  candidate: ManagedAccountCandidateRow,
+  baseMint: string,
+  quoteMint: string,
+): boolean {
+  return accountCapabilityMatchesMintPair(
+    {
+      capabilityBaseMint: candidate.capability_base_mint,
+      capabilityQuoteMint: candidate.capability_quote_mint,
+    },
+    baseMint,
+    quoteMint,
+  );
+}
+
+export async function listManagedAccountsWithBalances(
+  db: D1Database,
+  userId: number,
+  options?: {
+    envRpcUrl?: string;
+    pair?: {
+      baseMint: string;
+      quoteMint: string;
+    };
+  },
+): Promise<ManagedAccountBalanceRecord[]> {
+  const settings = await dbLoadSettings(db, userId);
+  const pair = options?.pair ?? {
+    baseMint: settings.baseTokenAddress.trim()
+      ? normalizePubkey(settings.baseTokenAddress)
+      : '',
+    quoteMint: SOLANA_USDC_MINT,
+  };
+  const candidates = await listActiveManagedAccountCandidates(db, userId);
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const tradableTokens = await dbListTradableTokens(db);
+  const rpcUrls = await dbResolveSolanaRpcUrls(db, userId, options?.envRpcUrl);
+
+  return Promise.all(
+    candidates.map(async (candidate) => {
+      const walletBalance = await loadWalletBalance(
+        candidate.wallet_address,
+        settings,
+        tradableTokens,
+        rpcUrls,
+      );
+      const quoteAvailableAmount = readQuoteBalanceAmount(walletBalance, pair.quoteMint);
+      const baseTokenAmount = pair.baseMint
+        ? readBaseTokenAmount(walletBalance, pair.baseMint)
+        : 0;
+      const solBalance = toFiniteNumber(walletBalance.sol) ?? 0;
+      return {
+        ...mapAccountRow(candidate),
+        walletBalance,
+        quoteAvailableAmount,
+        baseTokenAmount,
+        hasSolReserve: solBalance >= ACCOUNT_MIN_SOL_RESERVE,
+        pairCompatible: candidateCapabilityMatchesMintPair(
+          candidate,
+          pair.baseMint,
+          pair.quoteMint,
+        ),
+      };
+    }),
+  );
 }
 
 /**
@@ -394,7 +624,7 @@ export async function dbLoadSettings(
     netBuyinTarget: 0,
     timeRangeTarget: '24h',
     maxTransactions: 100,
-    maxSlippage: 1,
+    maxSlippage: 0.1,
     strategyNotes:
       'Trading execution is intentionally disabled until a real execution engine is implemented and reviewed.',
     managedKeyCount: 0,
@@ -483,6 +713,120 @@ export async function dbListAccounts(
       is_active: number;
     }>();
   return rows.results.map((row) => mapAccountRow(row));
+}
+
+export async function dbListManagedAccountsPage(
+  db: D1Database,
+  userId: number,
+  options?: {
+    page?: number;
+    pageSize?: number;
+    searchTerm?: string | null;
+    sort?: ManagedAccountSort;
+    envRpcUrl?: string;
+  },
+): Promise<ManagedAccountPageRecord> {
+  const page = Math.max(1, options?.page ?? 1);
+  const pageSize = Math.max(1, options?.pageSize ?? 20);
+  const searchTerm = (options?.searchTerm ?? '').trim().toLowerCase();
+  const sort: ManagedAccountSort =
+    options?.sort === 'usdc' ||
+    options?.sort === 'sol' ||
+    options?.sort === 'token'
+      ? options.sort
+      : 'newest';
+
+  const allAccounts = await dbListAccounts(db, userId, 'managed');
+  const filteredAccounts = searchTerm
+    ? allAccounts.filter(
+        (account) =>
+          account.address.toLowerCase().includes(searchTerm) ||
+          account.label.toLowerCase().includes(searchTerm),
+      )
+    : allAccounts;
+
+  if (sort === 'newest') {
+    filteredAccounts.sort(compareManagedAccountsByNewest);
+  } else {
+    const [settings, tradableTokens] = await Promise.all([
+      dbLoadSettings(db, userId),
+      dbListTradableTokens(db),
+    ]);
+    const rpcUrls = await dbResolveSolanaRpcUrls(db, userId, options?.envRpcUrl);
+    const balancesByAddress = await loadWalletBalancesByAddress(
+      filteredAccounts,
+      settings,
+      tradableTokens,
+      rpcUrls,
+    );
+    const activeBaseTokenAddress =
+      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+
+    filteredAccounts.sort((left, right) => {
+      if (sort === 'usdc') {
+        return compareManagedAccountsByNumeric(
+          left,
+          right,
+          toFiniteNumber(balancesByAddress[left.address]?.usdc) ?? 0,
+          toFiniteNumber(balancesByAddress[right.address]?.usdc) ?? 0,
+        );
+      }
+      if (sort === 'sol') {
+        return compareManagedAccountsByNumeric(
+          left,
+          right,
+          toFiniteNumber(balancesByAddress[left.address]?.sol) ?? 0,
+          toFiniteNumber(balancesByAddress[right.address]?.sol) ?? 0,
+        );
+      }
+      return compareManagedAccountsByNumeric(
+        left,
+        right,
+        activeBaseTokenAddress
+          ? readBaseTokenAmount(balancesByAddress[left.address] ?? {
+              address: left.address,
+              sol: '0',
+              usdc: '0',
+              tokens: [],
+              updatedAt: 0,
+            }, activeBaseTokenAddress)
+          : 0,
+        activeBaseTokenAddress
+          ? readBaseTokenAmount(balancesByAddress[right.address] ?? {
+              address: right.address,
+              sol: '0',
+              usdc: '0',
+              tokens: [],
+              updatedAt: 0,
+            }, activeBaseTokenAddress)
+          : 0,
+      );
+    });
+  }
+
+  const totalItems = filteredAccounts.length;
+  const offset = (page - 1) * pageSize;
+  const items = filteredAccounts.slice(offset, offset + pageSize);
+
+  const [settings, tradableTokens] = await Promise.all([
+    dbLoadSettings(db, userId),
+    dbListTradableTokens(db),
+  ]);
+  const rpcUrls = await dbResolveSolanaRpcUrls(db, userId, options?.envRpcUrl);
+  const balances = await loadWalletBalancesByAddress(
+    items,
+    settings,
+    tradableTokens,
+    rpcUrls,
+  );
+
+  return {
+    items,
+    page,
+    pageSize,
+    totalItems,
+    balances,
+  };
 }
 
 export async function dbListManagedAccountAddresses(
@@ -650,54 +994,7 @@ export async function getAvailableAccount(
     return null;
   }
 
-  const candidateRows = await db
-    .prepare(
-      `SELECT
-         a.id,
-         a.label,
-         a.wallet_address,
-         a.type,
-        a.capability_base_mint,
-        a.capability_quote_mint,
-         a.created_at,
-         COALESCE(a.is_active, 1) AS is_active,
-         (
-           SELECT MAX(COALESCE(tl.updated_at, tl.created_at))
-           FROM trade_logs tl
-           WHERE tl.wallet_address = a.wallet_address
-         ) AS last_traded_at
-       FROM accounts a
-       WHERE a.user_id = ?1
-         AND a.type = 'managed'
-         AND COALESCE(a.is_active, 1) = 1`,
-    )
-    .bind(userId)
-    .all<{
-      id: number;
-      label: string;
-      wallet_address: string;
-      type: string;
-      capability_base_mint: string | null;
-      capability_quote_mint: string | null;
-      created_at: number;
-      is_active: number;
-      last_traded_at: number | null;
-    }>();
-
-  const candidates = [...candidateRows.results].sort((left, right) =>
-    compareLeastRecentlyUsed(
-      {
-        id: left.id,
-        createdAt: left.created_at,
-        lastTradedAt: normalizeTimestampMs(left.last_traded_at),
-      },
-      {
-        id: right.id,
-        createdAt: right.created_at,
-        lastTradedAt: normalizeTimestampMs(right.last_traded_at),
-      },
-    ),
-  );
+  const candidates = await listActiveManagedAccountCandidates(db, userId);
   if (candidates.length === 0) {
     return null;
   }
@@ -710,6 +1007,9 @@ export async function getAvailableAccount(
   for (const candidate of candidates) {
     const lastTradedAtMs = normalizeTimestampMs(candidate.last_traded_at);
     if (lastTradedAtMs != null && cooldownMs > 0 && now - lastTradedAtMs < cooldownMs) {
+      continue;
+    }
+    if (!candidateCapabilityMatchesMintPair(candidate, pair.baseMint, pair.quoteMint)) {
       continue;
     }
 
@@ -734,6 +1034,75 @@ export async function getAvailableAccount(
   }
 
   return null;
+}
+
+export async function getManagedBuyCapacitySummary(
+  db: D1Database,
+  userId: number,
+  options?: {
+    envRpcUrl?: string;
+    pair?: {
+      baseMint: string;
+      quoteMint: string;
+    };
+  },
+): Promise<ManagedBuyCapacitySummary> {
+  const settings = await dbLoadSettings(db, userId);
+  const pair = options?.pair ?? {
+    baseMint: settings.baseTokenAddress.trim()
+      ? normalizePubkey(settings.baseTokenAddress)
+      : '',
+    quoteMint: SOLANA_USDC_MINT,
+  };
+
+  const accounts = await listManagedAccountsWithBalances(db, userId, {
+    envRpcUrl: options?.envRpcUrl,
+    pair,
+  });
+  if (accounts.length === 0) {
+    return {
+      enabledAccountCount: 0,
+      eligibleAccountCount: 0,
+      skippedForCapabilityCount: 0,
+      skippedForSolReserveCount: 0,
+      availableQuoteAmount: 0,
+      quoteMint: pair.quoteMint,
+    };
+  }
+
+  let eligibleAccountCount = 0;
+  let skippedForCapabilityCount = 0;
+  let skippedForSolReserveCount = 0;
+  let availableQuoteAmount = 0;
+
+  for (const account of accounts) {
+    if (!account.pairCompatible) {
+      skippedForCapabilityCount += 1;
+      continue;
+    }
+
+    if (!account.hasSolReserve) {
+      skippedForSolReserveCount += 1;
+      continue;
+    }
+
+    const quoteAmount = account.quoteAvailableAmount;
+    if (quoteAmount <= 0) {
+      continue;
+    }
+
+    eligibleAccountCount += 1;
+    availableQuoteAmount += quoteAmount;
+  }
+
+  return {
+    enabledAccountCount: accounts.length,
+    eligibleAccountCount,
+    skippedForCapabilityCount,
+    skippedForSolReserveCount,
+    availableQuoteAmount: Number(availableQuoteAmount.toFixed(6)),
+    quoteMint: pair.quoteMint,
+  };
 }
 
 export async function dbImportWatchAccount(

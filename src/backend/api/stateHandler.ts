@@ -10,6 +10,7 @@ import {
 } from '../tokenHolders';
 import {
   dbListAccounts,
+  dbListManagedAccountsPage,
   dbListAuditLogs,
   dbListRecentSignalsForDebug,
   dbListTradeLogs,
@@ -442,6 +443,31 @@ export async function handleStateRoutes(
     });
   }
 
+  if (method === 'GET' && pathname === '/api/accounts/managed') {
+    const user = await requireUser(request, env);
+    const page = Number.parseInt(url.searchParams.get('page') ?? '1', 10);
+    const pageSize = Number.parseInt(url.searchParams.get('pageSize') ?? '20', 10);
+    const searchTerm = url.searchParams.get('search') ?? '';
+    const sortParam = url.searchParams.get('sort');
+
+    const result = await dbListManagedAccountsPage(
+      env.TRADINGBOT_DB,
+      user.id,
+      {
+        page: Number.isFinite(page) ? page : 1,
+        pageSize: Math.min(Math.max(Number.isFinite(pageSize) ? pageSize : 20, 1), 20),
+        searchTerm,
+        sort:
+          sortParam === 'usdc' || sortParam === 'sol' || sortParam === 'token'
+            ? sortParam
+            : 'newest',
+        envRpcUrl: env.SOLANA_RPC_URL,
+      },
+    );
+
+    return jsonResponse(result);
+  }
+
   if (method === 'GET' && pathname === '/api/token-holders') {
     const user = await requireUser(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
@@ -486,7 +512,10 @@ export async function handleStateRoutes(
       url.searchParams.get('latestUpdatedAt') ?? '',
       10,
     );
-    const sort: OutsideTokenHolderSort = sortParam === 'largest' ? 'largest' : 'newest';
+    const sort: OutsideTokenHolderSort =
+      sortParam === 'largest' || sortParam === 'usdc' || sortParam === 'sol'
+        ? sortParam
+        : 'newest';
 
     const result = await dbListOutsideTokenHoldersPage(
       env.TRADINGBOT_DB,

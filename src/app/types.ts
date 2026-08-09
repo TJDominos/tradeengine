@@ -166,6 +166,9 @@ export type OutsideTokenHolder = {
   ownership: 'internal' | 'outside';
   firstSeenAt: number | null;
   updatedAt: number;
+  usdcBalance: number | null;
+  solBalance: number | null;
+  balanceUpdatedAt: number | null;
 };
 
 export type OutsideTokenHolderPage = {
@@ -177,6 +180,65 @@ export type OutsideTokenHolderPage = {
   changeToken: string;
   latestChangedAddresses: string[];
   unchanged: boolean;
+};
+
+export type StrategyPlanPreviewAllocation = {
+  accountId: number;
+  label: string;
+  walletAddress: string;
+  plannedVolumeUsd: number;
+  quoteAvailableAmount: number;
+  baseTokenAmount: number;
+  solBalance: number;
+  accountBuyOverAllocated: boolean;
+  accountBuyOverAllocationUsd: number;
+};
+
+export type StrategyPlanPreviewTask = {
+  taskId: string;
+  side: 'buy' | 'sell';
+  pulse: string | null;
+  orderIndex: number;
+  totalOrders: number;
+  scheduledAt: number;
+  totalVolumeUsd: number;
+  allocations: StrategyPlanPreviewAllocation[];
+};
+
+export type StrategyPlanPreviewAccount = {
+  accountId: number;
+  label: string;
+  walletAddress: string;
+  quoteAvailableAmount: number;
+  baseTokenAmount: number;
+  solBalance: number;
+  plannedBuyVolumeUsd: number;
+  plannedSellVolumeUsd: number;
+  buyOverAllocationUsd: number;
+  buyRemainingQuoteUsd: number;
+  isBuyOverAllocated: boolean;
+  pairCompatible: boolean;
+  eligibleForBuy: boolean;
+  eligibleForSell: boolean;
+};
+
+export type StrategyPlanPreview = {
+  generatedAt: number;
+  pair: {
+    baseTokenAddress: string;
+    quoteTokenAddress: string;
+  };
+  macroObjective: 'shakeout' | 'distribution' | 'accumulation';
+  quoteLabel: string;
+  requiredBuyAmount: number;
+  availableBuyAmount: number;
+  enabledAccountCount: number;
+  eligibleAccountCount: number;
+  skippedForCapabilityCount: number;
+  skippedForSolReserveCount: number;
+  sufficientBuyCapacity: boolean;
+  tasks: StrategyPlanPreviewTask[];
+  accounts: StrategyPlanPreviewAccount[];
 };
 
 export type TradableToken = {

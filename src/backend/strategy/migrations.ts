@@ -58,7 +58,7 @@ function normalizeParameters(value: unknown): StrategyParameters {
     ammPoolAddress,
     timeRangeTarget: readString(raw.timeRangeTarget, '24h'),
     maxTransactions: readNumber(raw.maxTransactions, 100),
-    maxSlippageBps: readNumber(raw.maxSlippageBps, 100),
+    maxSlippageBps: readNumber(raw.maxSlippageBps, 10),
     notes: readString(raw.notes),
   };
 }

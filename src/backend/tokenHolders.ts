@@ -142,6 +142,32 @@ export async function dbSyncTokenHolderBalances(
   };
 }
 
+export async function dbUpdateTokenHolderWalletBalanceSnapshotByAddress(
+  db: D1Database,
+  walletAddress: string,
+  balances: {
+    usdcBalance: number;
+    solBalance: number;
+    updatedAt: number;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE token_holder_addresses
+       SET wallet_usdc_balance = ?2,
+           wallet_sol_balance = ?3,
+           wallet_balance_updated_at = ?4
+       WHERE wallet_address = ?1`,
+    )
+    .bind(
+      walletAddress,
+      balances.usdcBalance,
+      balances.solBalance,
+      balances.updatedAt,
+    )
+    .run();
+}
+
 export async function dbGetTokenHolderSyncState(
   db: D1Database,
   tokenId: number,
@@ -898,6 +924,9 @@ export async function dbListOutsideTokenHoldersFromFinal(
    SELECT
      tha.wallet_address,
      tha.amount_holding,
+     tha.wallet_usdc_balance AS usdc_balance,
+     tha.wallet_sol_balance AS sol_balance,
+     tha.wallet_balance_updated_at AS balance_updated_at,
      tha.source,
       tha.first_seen_at,
      tha.last_seen_at,
@@ -916,6 +945,9 @@ export async function dbListOutsideTokenHoldersFromFinal(
         .all<{
           wallet_address: string;
           amount_holding: number;
+          usdc_balance: number | null;
+          sol_balance: number | null;
+          balance_updated_at: number | null;
           source: string;
           first_seen_at: number | null;
           last_seen_at: number;
@@ -928,6 +960,9 @@ export async function dbListOutsideTokenHoldersFromFinal(
         .all<{
           wallet_address: string;
           amount_holding: number;
+          usdc_balance: number | null;
+          sol_balance: number | null;
+          balance_updated_at: number | null;
           source: string;
           first_seen_at: number | null;
           last_seen_at: number;
@@ -942,6 +977,9 @@ export async function dbListOutsideTokenHoldersFromFinal(
     ownership: row.account_type === 'managed' ? 'internal' : 'outside',
     firstSeenAt: row.first_seen_at,
     updatedAt: row.last_seen_at,
+    usdcBalance: row.usdc_balance,
+    solBalance: row.sol_balance,
+    balanceUpdatedAt: row.balance_updated_at,
   }));
 }
 
@@ -965,6 +1003,9 @@ export async function dbListOutsideTokenHoldersFromStage(
    SELECT
      hr.wallet_address,
      hr.amount_holding,
+     tha.wallet_usdc_balance AS usdc_balance,
+     tha.wallet_sol_balance AS sol_balance,
+     tha.wallet_balance_updated_at AS balance_updated_at,
      COALESCE(tha.first_seen_at, hr.updated_at) AS first_seen_at,
      hr.updated_at,
      a.account_type,
@@ -983,6 +1024,9 @@ export async function dbListOutsideTokenHoldersFromStage(
         .all<{
           wallet_address: string;
           amount_holding: number;
+          usdc_balance: number | null;
+          sol_balance: number | null;
+          balance_updated_at: number | null;
           first_seen_at: number | null;
           updated_at: number;
           account_type: string | null;
@@ -994,6 +1038,9 @@ export async function dbListOutsideTokenHoldersFromStage(
         .all<{
           wallet_address: string;
           amount_holding: number;
+          usdc_balance: number | null;
+          sol_balance: number | null;
+          balance_updated_at: number | null;
           first_seen_at: number | null;
           updated_at: number;
           account_type: string | null;
@@ -1007,6 +1054,9 @@ export async function dbListOutsideTokenHoldersFromStage(
     ownership: row.account_type === 'managed' ? 'internal' : 'outside',
     firstSeenAt: row.first_seen_at,
     updatedAt: row.updated_at,
+    usdcBalance: row.usdc_balance,
+    solBalance: row.sol_balance,
+    balanceUpdatedAt: row.balance_updated_at,
   }));
 }
 
@@ -1025,6 +1075,9 @@ type OutsideTokenHolderPageSnapshot = {
   latestUpdatedAt: number | null;
   updatedAtSum: number;
   amountChecksum: number;
+  balanceUpdatedAtSum: number;
+  usdcBalanceChecksum: number;
+  solBalanceChecksum: number;
 };
 
 function normalizeOutsideTokenHolderPageOptions(
@@ -1034,7 +1087,12 @@ function normalizeOutsideTokenHolderPageOptions(
     page: Math.max(1, options?.page ?? 1),
     pageSize: Math.max(1, options?.pageSize ?? 20),
     searchTerm: (options?.searchTerm ?? '').trim().toLowerCase(),
-    sort: options?.sort === 'largest' ? 'largest' : 'newest',
+    sort:
+      options?.sort === 'largest' ||
+      options?.sort === 'usdc' ||
+      options?.sort === 'sol'
+        ? options.sort
+        : 'newest',
     knownChangeToken: (options?.knownChangeToken ?? '').trim(),
     knownLatestUpdatedAt:
       typeof options?.knownLatestUpdatedAt === 'number' && Number.isFinite(options.knownLatestUpdatedAt)
@@ -1049,12 +1107,18 @@ function mapOutsideTokenHolderSnapshotRow(row: {
   latest_updated_at: number | null;
   updated_at_sum: number | null;
   amount_checksum: number | null;
+  balance_updated_at_sum: number | null;
+  usdc_balance_checksum: number | null;
+  sol_balance_checksum: number | null;
 } | null): OutsideTokenHolderPageSnapshot {
   return {
     totalItems: row?.total_items ?? 0,
     latestUpdatedAt: row?.latest_updated_at ?? null,
     updatedAtSum: row?.updated_at_sum ?? 0,
     amountChecksum: row?.amount_checksum ?? 0,
+    balanceUpdatedAtSum: row?.balance_updated_at_sum ?? 0,
+    usdcBalanceChecksum: row?.usdc_balance_checksum ?? 0,
+    solBalanceChecksum: row?.sol_balance_checksum ?? 0,
   };
 }
 
@@ -1069,6 +1133,9 @@ function buildOutsideTokenHolderChangeToken(
     snapshot.latestUpdatedAt ?? 0,
     snapshot.updatedAtSum,
     snapshot.amountChecksum,
+    snapshot.balanceUpdatedAtSum,
+    snapshot.usdcBalanceChecksum,
+    snapshot.solBalanceChecksum,
   ].join(':');
 }
 
@@ -1086,7 +1153,10 @@ async function dbGetOutsideTokenHolderPageSnapshotFromFinal(
          COUNT(*) AS total_items,
          MAX(tha.last_seen_at) AS latest_updated_at,
          COALESCE(SUM(tha.last_seen_at), 0) AS updated_at_sum,
-         COALESCE(SUM(CAST(ROUND(tha.amount_holding * 1000000) AS INTEGER)), 0) AS amount_checksum
+         COALESCE(SUM(CAST(ROUND(tha.amount_holding * 1000000) AS INTEGER)), 0) AS amount_checksum,
+         COALESCE(SUM(COALESCE(tha.wallet_balance_updated_at, 0)), 0) AS balance_updated_at_sum,
+         COALESCE(SUM(CAST(ROUND(COALESCE(tha.wallet_usdc_balance, 0) * 1000000) AS INTEGER)), 0) AS usdc_balance_checksum,
+         COALESCE(SUM(CAST(ROUND(COALESCE(tha.wallet_sol_balance, 0) * 1000000) AS INTEGER)), 0) AS sol_balance_checksum
        FROM token_holder_addresses tha
        LEFT JOIN account_lookup a
          ON a.wallet_address = tha.wallet_address
@@ -1105,6 +1175,9 @@ async function dbGetOutsideTokenHolderPageSnapshotFromFinal(
       latest_updated_at: number | null;
       updated_at_sum: number | null;
       amount_checksum: number | null;
+      balance_updated_at_sum: number | null;
+      usdc_balance_checksum: number | null;
+      sol_balance_checksum: number | null;
     }>();
 
   return mapOutsideTokenHolderSnapshotRow(row);
@@ -1134,10 +1207,16 @@ async function dbGetOutsideTokenHolderPageSnapshotFromStage(
          COUNT(*) AS total_items,
          MAX(hr.updated_at) AS latest_updated_at,
          COALESCE(SUM(hr.updated_at), 0) AS updated_at_sum,
-         COALESCE(SUM(CAST(ROUND(hr.amount_holding * 1000000) AS INTEGER)), 0) AS amount_checksum
+         COALESCE(SUM(CAST(ROUND(hr.amount_holding * 1000000) AS INTEGER)), 0) AS amount_checksum,
+         COALESCE(SUM(COALESCE(tha.wallet_balance_updated_at, 0)), 0) AS balance_updated_at_sum,
+         COALESCE(SUM(CAST(ROUND(COALESCE(tha.wallet_usdc_balance, 0) * 1000000) AS INTEGER)), 0) AS usdc_balance_checksum,
+         COALESCE(SUM(CAST(ROUND(COALESCE(tha.wallet_sol_balance, 0) * 1000000) AS INTEGER)), 0) AS sol_balance_checksum
        FROM holder_rows hr
        LEFT JOIN account_lookup a
          ON a.wallet_address = hr.wallet_address
+       LEFT JOIN token_holder_addresses tha
+         ON tha.token_id = ?2
+        AND tha.wallet_address = hr.wallet_address
        WHERE
          (a.account_type IS NULL OR a.account_type != 'managed')
          AND (
@@ -1152,6 +1231,9 @@ async function dbGetOutsideTokenHolderPageSnapshotFromStage(
       latest_updated_at: number | null;
       updated_at_sum: number | null;
       amount_checksum: number | null;
+      balance_updated_at_sum: number | null;
+      usdc_balance_checksum: number | null;
+      sol_balance_checksum: number | null;
     }>();
 
   return mapOutsideTokenHolderSnapshotRow(row);
@@ -1241,10 +1323,19 @@ function buildOutsideTokenHolderOrderBy(
     firstSeenAt: string;
     lastSeenAt: string;
     walletAddress: string;
+    usdcBalance: string;
+    solBalance: string;
+    balanceUpdatedAt: string;
   },
 ): string {
   if (sort === 'largest') {
     return `${columns.amountHolding} DESC, ${columns.firstSeenAt} DESC, ${columns.lastSeenAt} DESC, ${columns.walletAddress} ASC`;
+  }
+  if (sort === 'usdc') {
+    return `COALESCE(${columns.usdcBalance}, -1) DESC, COALESCE(${columns.balanceUpdatedAt}, 0) DESC, ${columns.amountHolding} DESC, ${columns.walletAddress} ASC`;
+  }
+  if (sort === 'sol') {
+    return `COALESCE(${columns.solBalance}, -1) DESC, COALESCE(${columns.balanceUpdatedAt}, 0) DESC, ${columns.amountHolding} DESC, ${columns.walletAddress} ASC`;
   }
   return `${columns.firstSeenAt} DESC, ${columns.lastSeenAt} DESC, ${columns.amountHolding} DESC, ${columns.walletAddress} ASC`;
 }
@@ -1252,6 +1343,9 @@ function buildOutsideTokenHolderOrderBy(
 function mapOutsideTokenHolderRow(row: {
   wallet_address: string;
   amount_holding: number;
+  usdc_balance: number | null;
+  sol_balance: number | null;
+  balance_updated_at: number | null;
   source: string;
   first_seen_at: number | null;
   last_seen_at: number;
@@ -1266,6 +1360,9 @@ function mapOutsideTokenHolderRow(row: {
     ownership: row.account_type === 'managed' ? 'internal' : 'outside',
     firstSeenAt: row.first_seen_at,
     updatedAt: row.last_seen_at,
+    usdcBalance: row.usdc_balance,
+    solBalance: row.sol_balance,
+    balanceUpdatedAt: row.balance_updated_at,
   };
 }
 
@@ -1302,6 +1399,9 @@ async function dbListOutsideTokenHoldersPageFromFinal(
     firstSeenAt: 'tha.first_seen_at',
     lastSeenAt: 'tha.last_seen_at',
     walletAddress: 'tha.wallet_address',
+    usdcBalance: 'tha.wallet_usdc_balance',
+    solBalance: 'tha.wallet_sol_balance',
+    balanceUpdatedAt: 'tha.wallet_balance_updated_at',
   });
 
   const rows = await db
@@ -1310,6 +1410,9 @@ async function dbListOutsideTokenHoldersPageFromFinal(
        SELECT
          tha.wallet_address,
          tha.amount_holding,
+         tha.wallet_usdc_balance AS usdc_balance,
+         tha.wallet_sol_balance AS sol_balance,
+         tha.wallet_balance_updated_at AS balance_updated_at,
          tha.source,
          tha.first_seen_at,
          tha.last_seen_at,
@@ -1340,6 +1443,9 @@ async function dbListOutsideTokenHoldersPageFromFinal(
     .all<{
       wallet_address: string;
       amount_holding: number;
+      usdc_balance: number | null;
+      sol_balance: number | null;
+      balance_updated_at: number | null;
       source: string;
       first_seen_at: number | null;
       last_seen_at: number;
@@ -1404,6 +1510,9 @@ async function dbListOutsideTokenHoldersPageFromStage(
     firstSeenAt: 'first_seen_at',
     lastSeenAt: 'last_seen_at',
     walletAddress: 'hr.wallet_address',
+    usdcBalance: 'tha.wallet_usdc_balance',
+    solBalance: 'tha.wallet_sol_balance',
+    balanceUpdatedAt: 'tha.wallet_balance_updated_at',
   });
 
   const rows = await db
@@ -1421,6 +1530,9 @@ async function dbListOutsideTokenHoldersPageFromStage(
        SELECT
          hr.wallet_address,
          hr.amount_holding,
+         tha.wallet_usdc_balance AS usdc_balance,
+         tha.wallet_sol_balance AS sol_balance,
+         tha.wallet_balance_updated_at AS balance_updated_at,
          'rpc_owner_prefix_shards' AS source,
          COALESCE(tha.first_seen_at, hr.updated_at) AS first_seen_at,
          hr.updated_at AS last_seen_at,
@@ -1454,6 +1566,9 @@ async function dbListOutsideTokenHoldersPageFromStage(
     .all<{
       wallet_address: string;
       amount_holding: number;
+      usdc_balance: number | null;
+      sol_balance: number | null;
+      balance_updated_at: number | null;
       source: string;
       first_seen_at: number | null;
       last_seen_at: number;

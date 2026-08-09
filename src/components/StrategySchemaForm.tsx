@@ -1,6 +1,8 @@
 import React from 'react';
 import { Controller, useForm } from 'react-hook-form';
 
+import type { StrategyPlanPreview } from '../app/types';
+import { api } from '../app/utils';
 import type {
   StrategyMacroObjective,
   StrategyVersionDocument,
@@ -117,6 +119,13 @@ function formatNumber(value: number | null | undefined): string {
   return new Intl.NumberFormat('en-US').format(value);
 }
 
+function formatPlannerTime(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) {
+    return 'Unavailable';
+  }
+  return new Date(value).toLocaleTimeString();
+}
+
 function humanizeList(values: string[]): string {
   if (values.length === 0) {
     return 'None configured';
@@ -228,6 +237,11 @@ export default function StrategySchemaForm({
   const objective = formData.execution?.macroObjective ?? 'accumulation';
   const activeTactic = tacticConfig[objective];
   const draftSignature = React.useMemo(() => JSON.stringify(draft), [draft]);
+  const planPreviewSignature = React.useMemo(() => JSON.stringify(formData), [formData]);
+  const previewDocument = React.useMemo(
+    () => formData as StrategyVersionDocument,
+    [planPreviewSignature],
+  );
   const contractOptions = React.useMemo(() => {
     const options = tradableTokens
       .filter((token) => token.network === 'solana' && token.isActive)
@@ -276,6 +290,38 @@ export default function StrategySchemaForm({
       ) ?? null,
     [selectedPairValue, tradableTokens],
   );
+  const [planPreview, setPlanPreview] = React.useState<StrategyPlanPreview | null>(null);
+  const [planPreviewLoading, setPlanPreviewLoading] = React.useState(false);
+  const [planPreviewError, setPlanPreviewError] = React.useState('');
+  const previewRequestIdRef = React.useRef(0);
+
+  const loadPlanPreview = React.useCallback(async (previewDocument: StrategyVersionDocument) => {
+    const requestId = previewRequestIdRef.current + 1;
+    previewRequestIdRef.current = requestId;
+    setPlanPreviewLoading(true);
+    try {
+      const preview = await api<StrategyPlanPreview>('/api/strategy/plan-preview', {
+        method: 'POST',
+        body: JSON.stringify(previewDocument),
+      });
+      if (previewRequestIdRef.current !== requestId) {
+        return;
+      }
+      setPlanPreview(preview);
+      setPlanPreviewError('');
+    } catch (err: unknown) {
+      if (previewRequestIdRef.current !== requestId) {
+        return;
+      }
+      setPlanPreviewError(
+        err instanceof Error ? err.message : 'Failed to generate planner preview',
+      );
+    } finally {
+      if (previewRequestIdRef.current === requestId) {
+        setPlanPreviewLoading(false);
+      }
+    }
+  }, []);
 
   React.useEffect(() => {
     const currentSignature = JSON.stringify(getValues());
@@ -315,6 +361,25 @@ export default function StrategySchemaForm({
       },
     });
   }, [formData, reset, selectedRegistryToken]);
+
+  React.useEffect(() => {
+    const baseTokenAddress = formData.parameters?.baseTokenAddress?.trim() ?? '';
+    const quoteTokenAddress = formData.parameters?.quoteTokenAddress?.trim() ?? '';
+    if (!baseTokenAddress || !quoteTokenAddress) {
+      setPlanPreview(null);
+      setPlanPreviewError('Select a base/quote pair to generate a planner preview.');
+      setPlanPreviewLoading(false);
+      return;
+    }
+
+    const timerId = window.setTimeout(() => {
+      void loadPlanPreview(previewDocument);
+    }, 500);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [loadPlanPreview, planPreviewSignature, previewDocument]);
 
   const summaryItems = [
     {
@@ -848,6 +913,142 @@ export default function StrategySchemaForm({
             </div>
             <p className="mt-3 text-sm text-slate-300">Max concurrency: {formatNumber(formData.riskControls?.maxConcurrentOrders)}</p>
             <p className="mt-1 text-sm text-slate-300">Max slippage: {formatPercentFromBps(formData.parameters?.maxSlippageBps)}</p>
+          </div>
+
+          <div className="mt-6 rounded-2xl border border-slate-700 bg-slate-900/70 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Planner Preview</p>
+                <p className="mt-1 text-sm text-slate-400">Generated from the current draft and current enabled account balances.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadPlanPreview(previewDocument)}
+                disabled={planPreviewLoading}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {planPreviewLoading ? 'Refreshing...' : 'Refresh'}
+              </button>
+            </div>
+
+            {planPreviewError ? (
+              <div className="mt-4 rounded-xl border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                {planPreviewError}
+              </div>
+            ) : null}
+
+            {planPreviewLoading && !planPreview ? (
+              <div className="mt-4 rounded-xl border border-slate-700 bg-slate-800/80 px-3 py-3 text-sm text-slate-300">
+                Generating planner preview...
+              </div>
+            ) : null}
+
+            {planPreview ? (
+              <>
+                <div className={`mt-4 rounded-xl border px-4 py-3 text-sm ${planPreview.sufficientBuyCapacity ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100' : 'border-rose-500/20 bg-rose-500/10 text-rose-100'}`}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] opacity-80">Buy Capacity</p>
+                  <p className="mt-2 text-lg font-semibold">
+                    {formatCurrency(planPreview.availableBuyAmount)} / {formatCurrency(planPreview.requiredBuyAmount)} {planPreview.quoteLabel}
+                  </p>
+                  <p className="mt-1 text-xs opacity-80">
+                    {planPreview.eligibleAccountCount}/{planPreview.enabledAccountCount} eligible enabled account(s), capability skipped {planPreview.skippedForCapabilityCount}, low-SOL skipped {planPreview.skippedForSolReserveCount}
+                  </p>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-sm text-slate-200">
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Plan Snapshot</p>
+                  <p className="mt-2">Pair: {contractPreview(planPreview.pair.baseTokenAddress)} / {contractPreview(planPreview.pair.quoteTokenAddress)}</p>
+                  <p className="mt-1">Objective: {titleCase(planPreview.macroObjective)}</p>
+                  <p className="mt-1">Generated: {formatPlannerTime(planPreview.generatedAt)}</p>
+                </div>
+
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Account Allocation</p>
+                  <div className="mt-2 space-y-2">
+                    {planPreview.accounts.length > 0 ? (
+                      planPreview.accounts.map((account) => (
+                        <div
+                          key={account.accountId}
+                          className={`rounded-xl border px-3 py-3 text-sm ${account.isBuyOverAllocated ? 'border-rose-500/30 bg-rose-500/10 text-rose-100' : 'border-slate-700 bg-slate-800/70 text-slate-200'}`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="font-medium text-white">{account.label}</p>
+                              <p className="mt-1 font-mono text-xs text-slate-400">{contractPreview(account.walletAddress)}</p>
+                            </div>
+                            <div className="text-right text-xs text-slate-400">
+                              <p>Buy {formatCurrency(account.plannedBuyVolumeUsd)}</p>
+                              <p className="mt-1">Sell {formatCurrency(account.plannedSellVolumeUsd)}</p>
+                            </div>
+                          </div>
+                          {account.isBuyOverAllocated ? (
+                            <div className="mt-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
+                              Planned buy allocation exceeds current quote balance by {formatCurrency(account.buyOverAllocationUsd)}.
+                            </div>
+                          ) : (
+                            <div className="mt-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
+                              Remaining quote balance after planned buys: {formatCurrency(account.buyRemainingQuoteUsd)}.
+                            </div>
+                          )}
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                            <span className={`rounded-full px-2.5 py-1 ${account.eligibleForBuy ? 'bg-emerald-500/15 text-emerald-200' : 'bg-slate-700 text-slate-300'}`}>
+                              Buy balance {formatNumber(account.quoteAvailableAmount)}
+                            </span>
+                            <span className={`rounded-full px-2.5 py-1 ${account.eligibleForSell ? 'bg-amber-500/15 text-amber-200' : 'bg-slate-700 text-slate-300'}`}>
+                              Base balance {formatNumber(account.baseTokenAmount)}
+                            </span>
+                            <span className={`rounded-full px-2.5 py-1 ${account.solBalance >= 0.01 ? 'bg-blue-500/15 text-blue-200' : 'bg-rose-500/15 text-rose-200'}`}>
+                              SOL {formatNumber(account.solBalance)}
+                            </span>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-slate-700 px-3 py-3 text-sm text-slate-500">
+                        No enabled managed accounts available for this planner preview.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Planned Tasks</p>
+                  <div className="mt-2 max-h-80 space-y-2 overflow-y-auto pr-1">
+                    {planPreview.tasks.map((task) => (
+                      <div key={task.taskId} className="rounded-xl border border-slate-700 bg-slate-800/70 px-3 py-3 text-sm text-slate-200">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-medium text-white">{task.side.toUpperCase()} {formatCurrency(task.totalVolumeUsd)}</p>
+                            <p className="mt-1 text-xs text-slate-400">Pulse {task.pulse ?? 'base'} · Order {task.orderIndex}/{task.totalOrders}</p>
+                          </div>
+                          <p className="text-xs text-slate-400">{formatPlannerTime(task.scheduledAt)}</p>
+                        </div>
+                        <div className="mt-2 space-y-1">
+                          {task.allocations.length > 0 ? (
+                            task.allocations.map((allocation) => (
+                              <div
+                                key={`${task.taskId}-${allocation.accountId}`}
+                                className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-xs ${allocation.accountBuyOverAllocated ? 'bg-rose-500/10 text-rose-100' : 'bg-slate-900/70 text-slate-300'}`}
+                              >
+                                <span>{allocation.label} · {contractPreview(allocation.walletAddress)}</span>
+                                <span>
+                                  {formatCurrency(allocation.plannedVolumeUsd)}
+                                  {allocation.accountBuyOverAllocated ? ` · Over by ${formatCurrency(allocation.accountBuyOverAllocationUsd)}` : ''}
+                                </span>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="rounded-lg bg-slate-900/70 px-3 py-2 text-xs text-rose-200">
+                              No eligible account can take this task with the current balances.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : null}
           </div>
 
           <button

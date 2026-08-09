@@ -12,6 +12,7 @@ import { executeSwap } from '../services/jupiterSwapService';
 import { getActiveAccounts } from '../services/accountPoolService';
 import { distributeVolumeAcrossAccounts } from '../services/tradeMath';
 import { analyzeTradeDirection } from '../services/webhookParser';
+import { listManagedAccountsWithBalances } from '../userStore';
 
 const STORAGE_KEY = 'strategy-engine-state';
 const MAX_DEDUPED_TX_HASHES = 256;
@@ -628,15 +629,47 @@ export class StrategyEngineDurableObject {
       );
     }
 
+    const fundedAccounts = await listManagedAccountsWithBalances(
+      this.env.TRADINGBOT_DB,
+      config.userId,
+      {
+        envRpcUrl: this.env.SOLANA_RPC_URL,
+        pair: {
+          baseMint: config.strategyDocument.parameters.baseTokenAddress.trim(),
+          quoteMint: config.strategyDocument.parameters.quoteTokenAddress.trim(),
+        },
+      },
+    );
+    const eligibleWallets = new Set(
+      fundedAccounts
+        .filter((account) =>
+          account.pairCompatible &&
+          account.hasSolReserve &&
+          (task.side === 'buy'
+            ? account.quoteAvailableAmount > 0
+            : account.baseTokenAmount > 0),
+        )
+        .map((account) => account.address),
+    );
+    const executableAccounts = activeAccounts.filter((account) =>
+      eligibleWallets.has(account.publicKey),
+    );
+    if (executableAccounts.length === 0) {
+      throw new ApiError(
+        409,
+        'No active managed accounts available for strategy execution',
+      );
+    }
+
     const slices = distributeVolumeAcrossAccounts(
       task.amountUsd,
-      activeAccounts.length,
+      executableAccounts.length,
     );
     let executedVolumeUsd = 0;
     let retryVolumeUsd = 0;
 
-    for (let index = 0; index < activeAccounts.length; index += 1) {
-      const account = activeAccounts[index];
+    for (let index = 0; index < executableAccounts.length; index += 1) {
+      const account = executableAccounts[index];
       const sliceVolumeUsd = slices[index] ?? 0;
       if (!Number.isFinite(sliceVolumeUsd) || sliceVolumeUsd <= 0) {
         continue;

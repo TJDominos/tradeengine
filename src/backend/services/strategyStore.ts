@@ -187,16 +187,21 @@ function isManualStrategyVersionDocument(
   return document.metadata.origin === 'manual';
 }
 
-export function buildStrategyRecordConfigFromVersion(
-  version: StrategyVersionRecord,
+export function buildStrategyRecordConfigFromDocument(
+  documentInput: StrategyVersionDocument,
   userId: number,
+  options?: {
+    strategyVersionId?: number | null;
+    strategyVersionNo?: number | null;
+    strategyType?: StrategyVersionRecord['strategyType'];
+  },
 ): StrategyRecordConfig {
-  const document = normalizeStrategyDocument(version.document);
+  const document = normalizeStrategyDocument(documentInput);
   return {
     userId,
-    strategyVersionId: version.id,
-    strategyVersionNo: version.versionNo,
-    strategyType: version.strategyType,
+    strategyVersionId: options?.strategyVersionId ?? null,
+    strategyVersionNo: options?.strategyVersionNo ?? null,
+    strategyType: options?.strategyType ?? DEFAULT_STRATEGY_TYPE,
     document,
     baseTokenAddress: document.parameters.baseTokenAddress,
     quoteTokenAddress: document.parameters.quoteTokenAddress,
@@ -221,6 +226,17 @@ export function buildStrategyRecordConfigFromVersion(
     distributionChunkDelayJitterMs:
       DEFAULT_SERIAL_STRATEGY_DISTRIBUTION_DELAY_JITTER_MS,
   };
+}
+
+export function buildStrategyRecordConfigFromVersion(
+  version: StrategyVersionRecord,
+  userId: number,
+): StrategyRecordConfig {
+  return buildStrategyRecordConfigFromDocument(version.document, userId, {
+    strategyVersionId: version.id,
+    strategyVersionNo: version.versionNo,
+    strategyType: version.strategyType,
+  });
 }
 
 export async function addStrategy(

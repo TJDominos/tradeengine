@@ -157,6 +157,9 @@ export interface OutsideTokenHolderRecord {
   ownership: 'internal' | 'outside';
   firstSeenAt: number | null;
   updatedAt: number;
+  usdcBalance: number | null;
+  solBalance: number | null;
+  balanceUpdatedAt: number | null;
 }
 export interface OutsideTokenHolderPageRecord {
   items: OutsideTokenHolderRecord[];
@@ -168,7 +171,7 @@ export interface OutsideTokenHolderPageRecord {
   latestChangedAddresses: string[];
   unchanged: boolean;
 }
-export type OutsideTokenHolderSort = 'newest' | 'largest';
+export type OutsideTokenHolderSort = 'newest' | 'largest' | 'usdc' | 'sol';
 export type TokenHolderSyncStatus = 'idle' | 'running' | 'completed' | 'failed';
 export interface TokenHolderSyncStateRecord {
   tokenId: number;

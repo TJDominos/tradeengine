@@ -69,6 +69,14 @@ import TradingSetupPage from './pages/TradingSetupPage';
 
 type InternalAccountSort = 'newest' | 'usdc' | 'sol' | 'token';
 
+type ManagedAccountPageResponse = {
+  items: EngineState['internalAccs'];
+  page: number;
+  pageSize: number;
+  totalItems: number;
+  balances: Record<string, WalletBalance>;
+};
+
 function createEmptyRecoveryPhrase(): string[] {
   return Array(MAX_RECOVERY_PHRASE_WORD_COUNT).fill('');
 }
@@ -94,7 +102,15 @@ export default function App() {
   const [activityLogSearchTerm, setActivityLogSearchTerm] = React.useState('');
   const [transactionLogCurrentPage, setTransactionLogCurrentPage] = React.useState(1);
   const [activityLogCurrentPage, setActivityLogCurrentPage] = React.useState(1);
-  const [outsideHolderSort, setOutsideHolderSort] = React.useState<'newest' | 'largest'>('newest');
+  const [outsideHolderSort, setOutsideHolderSort] = React.useState<'newest' | 'largest' | 'usdc' | 'sol'>('newest');
+  const [internalAccountPage, setInternalAccountPage] = React.useState<ManagedAccountPageResponse>({
+    items: [],
+    page: 1,
+    pageSize: ITEMS_PER_PAGE,
+    totalItems: 0,
+    balances: {},
+  });
+  const [internalAccountPageLoading, setInternalAccountPageLoading] = React.useState(false);
   const [outsideHolderPage, setOutsideHolderPage] = React.useState<OutsideTokenHolderPage>({
     items: [],
     page: 1,
@@ -118,7 +134,7 @@ export default function App() {
     netBuyinTarget: 0,
     timeRangeTarget: '24h',
     maxTransactions: 100,
-    maxSlippage: 1,
+    maxSlippage: 0.1,
     strategyNotes: '',
     managedKeyCount: 0,
   });
@@ -157,6 +173,13 @@ export default function App() {
   const activeBaseTokenAddress =
     settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
   const activeQuoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || '';
+  const internalAccountsSignature = React.useMemo(
+    () =>
+      engineState?.internalAccs
+        .map((account) => `${account.id}:${account.isActive ? 1 : 0}:${account.address}`)
+        .join('|') ?? '',
+    [engineState?.internalAccs],
+  );
   
   const settingsDirtyRef = React.useRef(false);
   const strategyDraftDirtyRef = React.useRef(false);
@@ -263,6 +286,66 @@ export default function App() {
     return state;
   }, [syncSettingsFromServer, syncStrategyDraftFromServer]);
 
+  const loadInternalAccountPage = React.useCallback(async () => {
+    if (!auth?.authenticated) {
+      setInternalAccountPage({
+        items: [],
+        page: 1,
+        pageSize: ITEMS_PER_PAGE,
+        totalItems: 0,
+        balances: {},
+      });
+      return;
+    }
+
+    setInternalAccountPageLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: String(internalPage),
+        pageSize: String(ITEMS_PER_PAGE),
+        sort: internalSort,
+      });
+      const trimmedSearch = accountSearchTerm.trim();
+      if (trimmedSearch) {
+        params.set('search', trimmedSearch);
+      }
+
+      const result = await api<ManagedAccountPageResponse>(`/api/accounts/managed?${params.toString()}`);
+      setInternalAccountPage(result);
+      setWalletBalances((current) => ({
+        ...current,
+        ...result.balances,
+      }));
+      setWalletBalanceErrors((current) => {
+        const next = { ...current };
+        for (const address of Object.keys(result.balances)) {
+          delete next[address];
+        }
+        return next;
+      });
+      setWalletBalancePending((current) => {
+        const next = { ...current };
+        for (const address of Object.keys(result.balances)) {
+          next[address] = false;
+        }
+        return next;
+      });
+    } catch (err: unknown) {
+      setInternalAccountPage({
+        items: [],
+        page: internalPage,
+        pageSize: ITEMS_PER_PAGE,
+        totalItems: 0,
+        balances: {},
+      });
+      setError(err instanceof Error ? err.message : 'Failed to load managed accounts');
+    } finally {
+      setInternalAccountPageLoading(false);
+    }
+  }, [accountSearchTerm, auth?.authenticated, internalPage, internalSort]);
+
+  const outsideHolderServerSort = outsideHolderSort;
+
   const loadOutsideHolderPage = React.useCallback(async () => {
     if (!auth?.authenticated || !activeBaseTokenAddress) {
       outsideHolderQueryMetaRef.current = {
@@ -291,7 +374,7 @@ export default function App() {
         outsiderPage,
         ITEMS_PER_PAGE,
         trimmedSearch.toLowerCase(),
-        outsideHolderSort,
+        outsideHolderServerSort,
       ].join('|');
       const previousMeta = outsideHolderQueryMetaRef.current;
       const canProbeIncrementally = previousMeta.signature === querySignature && previousMeta.changeToken !== '';
@@ -302,7 +385,7 @@ export default function App() {
       if (trimmedSearch) {
         params.set('search', trimmedSearch);
       }
-      params.set('sort', outsideHolderSort);
+      params.set('sort', outsideHolderServerSort);
       if (canProbeIncrementally) {
         params.set('changeToken', previousMeta.changeToken);
         if (previousMeta.latestUpdatedAt != null) {
@@ -320,8 +403,14 @@ export default function App() {
       if (result.unchanged) {
         const currentPage = outsideHolderPageRef.current;
         const missingBalanceAddresses = currentPage.items
-          .map((holder) => holder.address)
-          .filter((address) => !walletBalancesRef.current[address] && !walletBalancePendingRef.current[address]);
+          .filter(
+            (holder) =>
+              holder.usdcBalance == null &&
+              holder.solBalance == null &&
+              !walletBalancesRef.current[holder.address] &&
+              !walletBalancePendingRef.current[holder.address],
+          )
+          .map((holder) => holder.address);
         if (missingBalanceAddresses.length > 0) {
           void refreshWalletBalancesRef.current(missingBalanceAddresses);
         }
@@ -335,8 +424,14 @@ export default function App() {
         .map((holder) => holder.address)
         .filter((address) => !previousAddresses.has(address));
       const missingBalanceAddresses = result.items
-        .map((holder) => holder.address)
-        .filter((address) => !walletBalancesRef.current[address] && !walletBalancePendingRef.current[address]);
+        .filter(
+          (holder) =>
+            holder.usdcBalance == null &&
+            holder.solBalance == null &&
+            !walletBalancesRef.current[holder.address] &&
+            !walletBalancePendingRef.current[holder.address],
+        )
+        .map((holder) => holder.address);
       const addressesToRefresh = Array.from(
         new Set(
           canProbeIncrementally
@@ -348,6 +443,28 @@ export default function App() {
             : result.items.map((holder) => holder.address),
         ),
       );
+
+      setWalletBalances((current) => {
+        const next = { ...current };
+        for (const holder of result.items) {
+          if (holder.usdcBalance == null && holder.solBalance == null) {
+            continue;
+          }
+          const existing = next[holder.address];
+          const snapshotUpdatedAt = holder.balanceUpdatedAt ?? 0;
+          if (existing && existing.updatedAt > snapshotUpdatedAt) {
+            continue;
+          }
+          next[holder.address] = {
+            address: holder.address,
+            sol: String(holder.solBalance ?? 0),
+            usdc: String(holder.usdcBalance ?? 0),
+            tokens: existing?.tokens ?? [],
+            updatedAt: snapshotUpdatedAt || existing?.updatedAt || 0,
+          };
+        }
+        return next;
+      });
 
       setOutsideHolderPage(result);
       if (addressesToRefresh.length > 0) {
@@ -373,7 +490,7 @@ export default function App() {
     } finally {
       setOutsideHolderPageLoading(false);
     }
-  }, [accountSearchTerm, activeBaseTokenAddress, auth?.authenticated, outsideHolderSort, outsiderPage]);
+  }, [accountSearchTerm, activeBaseTokenAddress, auth?.authenticated, outsideHolderServerSort, outsiderPage]);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -509,13 +626,19 @@ export default function App() {
     await refreshWalletBalances(
       engineState.internalAccs.map((account) => account.address),
     );
-  }, [engineState, refreshWalletBalances]);
+    if (internalSort !== 'newest') {
+      await loadInternalAccountPage();
+    }
+  }, [engineState, internalSort, loadInternalAccountPage, refreshWalletBalances]);
 
   const refreshOutsideWalletBalances = React.useCallback(async () => {
     await refreshWalletBalances(
       outsideHolderPage.items.map((holder) => holder.address),
     );
-  }, [outsideHolderPage.items, refreshWalletBalances]);
+    if (outsideHolderSort === 'usdc' || outsideHolderSort === 'sol') {
+      await loadOutsideHolderPage();
+    }
+  }, [loadOutsideHolderPage, outsideHolderPage.items, outsideHolderSort, refreshWalletBalances]);
 
   useEffect(() => {
     if (!auth?.authenticated || !engineState) return;
@@ -697,6 +820,18 @@ export default function App() {
     if (activeTab !== 'accounts') {
       return;
     }
+    void loadInternalAccountPage();
+  }, [
+    activeTab,
+    loadInternalAccountPage,
+    internalAccountsSignature,
+    activeBaseTokenAddress,
+  ]);
+
+  useEffect(() => {
+    if (activeTab !== 'accounts') {
+      return;
+    }
     void loadOutsideHolderPage();
   }, [
     activeTab,
@@ -762,6 +897,13 @@ export default function App() {
         activeStrategyVersion: EngineState['activeStrategyVersion'];
         settings: SettingsState;
         marketSnapshot: TokenMarketSnapshot | null;
+        deploymentValidation: {
+          requiredBuyAmount: number;
+          availableBuyAmount: number;
+          quoteLabel: string;
+          enabledAccountCount: number;
+          eligibleAccountCount: number;
+        };
       }>('/api/strategy/active', {
         method: 'POST',
         body: JSON.stringify(strategyDraft),
@@ -780,7 +922,7 @@ export default function App() {
       );
       setNotice(
         response.activeStrategyVersion
-          ? `Strategy version v${response.activeStrategyVersion.versionNo} saved and activated.`
+          ? `Strategy version v${response.activeStrategyVersion.versionNo} saved and activated. Buy-capacity check passed: ${response.deploymentValidation.availableBuyAmount.toFixed(2)} ${response.deploymentValidation.quoteLabel} across ${response.deploymentValidation.eligibleAccountCount}/${response.deploymentValidation.enabledAccountCount} eligible enabled accounts for required ${response.deploymentValidation.requiredBuyAmount.toFixed(2)} ${response.deploymentValidation.quoteLabel}.`
           : 'Strategy configuration saved.',
       );
       await refresh();
@@ -1325,56 +1467,8 @@ export default function App() {
   }
 
   const internalSummary = summarizeAccounts(engineState.internalAccs, walletBalances);
-
-  const normalizedAccountSearchTerm = accountSearchTerm.toLowerCase();
-  const filteredInternal = engineState.internalAccs.filter(
-    (account) =>
-      account.address.toLowerCase().includes(normalizedAccountSearchTerm) ||
-      account.label.toLowerCase().includes(normalizedAccountSearchTerm),
-  );
-  filteredInternal.sort((left, right) => {
-    const byNewest = () => {
-      if (left.isActive !== right.isActive) {
-        return left.isActive ? -1 : 1;
-      }
-      const createdAtDelta = normalizeTimestampMs(right.createdAt) - normalizeTimestampMs(left.createdAt);
-      if (createdAtDelta !== 0) {
-        return createdAtDelta;
-      }
-      return right.id - left.id;
-    };
-
-    const compareNumeric = (leftValue: number, rightValue: number) => {
-      if (rightValue !== leftValue) {
-        return rightValue - leftValue;
-      }
-      return byNewest();
-    };
-
-    if (internalSort === 'usdc') {
-      return compareNumeric(
-        parseAmount(walletBalances[left.address]?.usdc),
-        parseAmount(walletBalances[right.address]?.usdc),
-      );
-    }
-    if (internalSort === 'sol') {
-      return compareNumeric(
-        parseAmount(walletBalances[left.address]?.sol),
-        parseAmount(walletBalances[right.address]?.sol),
-      );
-    }
-    if (internalSort === 'token') {
-      return compareNumeric(
-        activeBaseTokenAddress ? findWalletTokenAmount(walletBalances[left.address], activeBaseTokenAddress) : 0,
-        activeBaseTokenAddress ? findWalletTokenAmount(walletBalances[right.address], activeBaseTokenAddress) : 0,
-      );
-    }
-    return byNewest();
-  });
-  const internalCurrentSlice = filteredInternal.slice(
-    (internalPage - 1) * ITEMS_PER_PAGE,
-    internalPage * ITEMS_PER_PAGE,
-  );
+  const internalRows = internalAccountPage.items;
+  const internalRowsTotal = internalAccountPage.totalItems;
 
   const selectedRangeStartMs = hasDateRange ? toRangeStartMs(dateRange.from) : null;
   const selectedRangeEndMs = hasDateRange ? toRangeEndMs(dateRange.to) : null;
@@ -1639,8 +1733,8 @@ export default function App() {
         setOutsiderPage(1);
       }}
       internalSummary={internalSummary}
-      filteredInternal={filteredInternal}
-      internalCurrentSlice={internalCurrentSlice}
+      internalRows={internalRows}
+      internalRowsTotal={internalRowsTotal}
       internalSort={internalSort}
       onInternalSortChange={(value) => {
         setInternalSort(value);
@@ -1663,6 +1757,7 @@ export default function App() {
       walletBalances={walletBalances}
       walletBalanceErrors={walletBalanceErrors}
       walletBalancePending={walletBalancePending}
+      internalListLoading={internalAccountPageLoading}
       internalPage={internalPage}
       outsiderPage={outsiderPage}
       onInternalPageChange={setInternalPage}

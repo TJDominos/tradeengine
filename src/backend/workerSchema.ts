@@ -223,6 +223,9 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     token_id INTEGER NOT NULL,
     wallet_address TEXT NOT NULL,
     amount_holding REAL NOT NULL DEFAULT 0,
+    wallet_usdc_balance REAL,
+    wallet_sol_balance REAL,
+    wallet_balance_updated_at INTEGER,
     source TEXT NOT NULL DEFAULT 'rpc_scan',
     first_seen_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
@@ -324,6 +327,8 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_strategies_updated ON strategies(updated_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_wallet ON token_holder_addresses(token_id, wallet_address)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_amount ON token_holder_addresses(token_id, amount_holding DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_usdc ON token_holder_addresses(token_id, wallet_usdc_balance DESC, wallet_address ASC)',
+  'CREATE INDEX IF NOT EXISTS idx_token_holder_addresses_token_sol ON token_holder_addresses(token_id, wallet_sol_balance DESC, wallet_address ASC)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_transaction_deltas_token_sig ON token_holder_transaction_deltas(token_id, tx_signature)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_aggregates_updated ON token_holder_aggregates(updated_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_token_holder_sync_states_status_updated ON token_holder_sync_states(status, updated_at DESC)',
@@ -466,6 +471,24 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           'token_holder_addresses',
           'amount_holding',
           'REAL NOT NULL DEFAULT 0',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'token_holder_addresses',
+          'wallet_usdc_balance',
+          'REAL',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'token_holder_addresses',
+          'wallet_sol_balance',
+          'REAL',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'token_holder_addresses',
+          'wallet_balance_updated_at',
+          'INTEGER',
         );
         await dbEnsureTableColumn(
           db,
