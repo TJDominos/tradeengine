@@ -171,23 +171,12 @@ export default function AccountsPage({
         trackedTokenMint={activeTokenContractAddress}
         trackedTokenSymbol={activeTokenSymbol}
         emptyText="No internal accounts found."
+        sortValue={internalSort}
+        onSortChange={onInternalSortChange}
         onToggleTradingAccount={onToggleInternalAccountTrading}
         togglePendingAddress={managedAccountStatusUpdatingAddress}
         actionButton={
           <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-slate-300">
-              <span>Sort</span>
-              <select
-                value={internalSort}
-                onChange={(event) => onInternalSortChange(event.target.value as 'newest' | 'usdc' | 'sol' | 'token')}
-                className="bg-transparent text-xs font-semibold text-slate-100 outline-none"
-              >
-                <option value="newest">Newest</option>
-                <option value="usdc">USDC</option>
-                <option value="sol">SOL</option>
-                <option value="token">{activeTokenSymbol}</option>
-              </select>
-            </label>
             <button
               onClick={onRefreshInternalBalances}
               className="flex h-9 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm text-white hover:bg-slate-700"

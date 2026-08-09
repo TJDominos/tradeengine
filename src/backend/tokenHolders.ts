@@ -1063,6 +1063,7 @@ function buildOutsideTokenHolderChangeToken(
   snapshot: OutsideTokenHolderPageSnapshot,
 ): string {
   return [
+    'owner-address-v2',
     sourceKey,
     snapshot.totalItems,
     snapshot.latestUpdatedAt ?? 0,

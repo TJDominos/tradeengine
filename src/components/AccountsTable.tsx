@@ -18,6 +18,8 @@ type AccountsTableProps = {
   trackedTokenSymbol: string;
   emptyText: string;
   actionButton?: React.ReactNode;
+  sortValue?: 'newest' | 'usdc' | 'sol' | 'token';
+  onSortChange?: (value: 'newest' | 'usdc' | 'sol' | 'token') => void;
   onToggleTradingAccount?: (account: AccountRecord) => void;
   togglePendingAddress?: string | null;
   children?: React.ReactNode;
@@ -37,11 +39,33 @@ export default function AccountsTable({
   trackedTokenSymbol,
   emptyText,
   actionButton,
+  sortValue,
+  onSortChange,
   onToggleTradingAccount,
   togglePendingAddress,
   children,
 }: AccountsTableProps) {
   const showTradingControl = typeof onToggleTradingAccount === 'function';
+  const sortInteractive = typeof onSortChange === 'function';
+
+  const renderSortHeader = (
+    key: 'newest' | 'usdc' | 'sol' | 'token',
+    label: string,
+    align: 'left' | 'right' = 'right',
+    activeClass = 'text-blue-300',
+  ) => (
+    <button
+      type="button"
+      onClick={() => onSortChange?.(key)}
+      aria-pressed={sortValue === key}
+      className={`inline-flex w-full items-center gap-1 transition ${
+        align === 'right' ? 'justify-end' : 'justify-start'
+      } ${sortValue === key ? activeClass : 'text-slate-400 hover:text-slate-200'}`}
+    >
+      <span>{label}</span>
+      <span aria-hidden="true">↓</span>
+    </button>
+  );
 
   return (
     <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
@@ -60,11 +84,27 @@ export default function AccountsTable({
               <th className="px-4 py-3 font-medium">Status</th>
               <th className="px-4 py-3 font-medium">Label</th>
               <th className="px-4 py-3 font-medium">Wallet / Address</th>
-              <th className="px-4 py-3 text-right font-medium text-blue-400">USDC Bal</th>
-              <th className="px-4 py-3 text-right font-medium text-amber-400">SOL Bal</th>
-              <th className="px-4 py-3 text-right font-medium text-emerald-400">{trackedTokenSymbol} Amount</th>
+              <th className="px-4 py-3 text-right font-medium text-blue-400">
+                {sortInteractive
+                  ? renderSortHeader('usdc', 'USDC Bal', 'right', 'text-blue-300')
+                  : 'USDC Bal'}
+              </th>
+              <th className="px-4 py-3 text-right font-medium text-amber-400">
+                {sortInteractive
+                  ? renderSortHeader('sol', 'SOL Bal', 'right', 'text-amber-300')
+                  : 'SOL Bal'}
+              </th>
+              <th className="px-4 py-3 text-right font-medium text-emerald-400">
+                {sortInteractive
+                  ? renderSortHeader('token', `${trackedTokenSymbol} Amount`, 'right', 'text-emerald-300')
+                  : `${trackedTokenSymbol} Amount`}
+              </th>
               <th className="px-4 py-3 font-medium">Tracked Pairs</th>
-              <th className="px-4 py-3 text-right font-medium">Imported</th>
+              <th className="px-4 py-3 text-right font-medium">
+                {sortInteractive
+                  ? renderSortHeader('newest', 'Imported', 'right', 'text-slate-200')
+                  : 'Imported'}
+              </th>
               {showTradingControl ? <th className="px-4 py-3 text-right font-medium">Trading</th> : null}
             </tr>
           </thead>

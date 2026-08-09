@@ -74,6 +74,174 @@ function applyAmmPoolDirectionCorrection(
   return details;
 }
 
+type RpcTokenBalanceEntry = {
+  owner?: string;
+  mint?: string;
+  uiTokenAmount?: {
+    uiAmountString?: string;
+    amount?: string;
+    decimals?: number;
+  };
+};
+
+type RpcTransactionMeta = {
+  err?: unknown;
+  fee?: number;
+  preTokenBalances?: RpcTokenBalanceEntry[];
+  postTokenBalances?: RpcTokenBalanceEntry[];
+};
+
+function readRpcUiTokenAmount(balance: RpcTokenBalanceEntry): number | null {
+  if (balance.uiTokenAmount?.uiAmountString != null) {
+    const parsed = Number.parseFloat(balance.uiTokenAmount.uiAmountString);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (
+    typeof balance.uiTokenAmount?.amount === 'string' &&
+    typeof balance.uiTokenAmount?.decimals === 'number'
+  ) {
+    const parsed = Number.parseFloat(balance.uiTokenAmount.amount) / 10 ** balance.uiTokenAmount.decimals;
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+export function buildRpcSignalDetailsFromTransactionMeta(
+  meta: RpcTransactionMeta | null | undefined,
+  trackedContractAddress: string,
+  payloadDetails: Partial<StoredSignalTransactionDetails>,
+  solPriceUsd: number | null,
+): Partial<StoredSignalTransactionDetails> {
+  const deltaByOwner = new Map<string, { tracked: number; usdc: number }>();
+  const applyTokenBalances = (
+    balances: RpcTokenBalanceEntry[] | undefined,
+    sign: -1 | 1,
+  ) => {
+    for (const balance of balances ?? []) {
+      const owner = tryNormalizeSolanaPubkey(balance.owner);
+      const mint = tryNormalizeSolanaPubkey(balance.mint);
+      if (!owner || !mint) {
+        continue;
+      }
+      const uiAmount = readRpcUiTokenAmount(balance);
+      if (uiAmount == null || !Number.isFinite(uiAmount)) {
+        continue;
+      }
+      const current = deltaByOwner.get(owner) ?? { tracked: 0, usdc: 0 };
+      if (mint === trackedContractAddress) {
+        current.tracked += sign * uiAmount;
+      }
+      if (mint === SOLANA_USDC_MINT) {
+        current.usdc += sign * uiAmount;
+      }
+      deltaByOwner.set(owner, current);
+    }
+  };
+
+  applyTokenBalances(meta?.preTokenBalances, -1);
+  applyTokenBalances(meta?.postTokenBalances, 1);
+
+  const payloadPrimaryWalletAddress = tryNormalizeSolanaPubkey(payloadDetails.primaryWalletAddress);
+  const payloadFromWalletAddress = tryNormalizeSolanaPubkey(payloadDetails.fromWalletAddress);
+  const payloadToWalletAddress = tryNormalizeSolanaPubkey(payloadDetails.toWalletAddress);
+
+  const traderCandidates = uniqueSolanaPubkeys([
+    payloadPrimaryWalletAddress,
+    payloadToWalletAddress,
+    payloadFromWalletAddress,
+  ]);
+  let focusWallet: string | null = null;
+  let focusDelta: { tracked: number; usdc: number } | null = null;
+  for (const wallet of traderCandidates) {
+    const delta = deltaByOwner.get(wallet);
+    if (delta && delta.tracked !== 0) {
+      focusWallet = wallet;
+      focusDelta = delta;
+      break;
+    }
+  }
+
+  if (!focusWallet) {
+    const swapParties = [...deltaByOwner.entries()].filter(
+      ([, delta]) =>
+        delta.tracked !== 0 &&
+        ((delta.tracked > 0 && delta.usdc < 0) ||
+          (delta.tracked < 0 && delta.usdc > 0)),
+    );
+    if (swapParties.length === 1) {
+      focusWallet = swapParties[0][0];
+      focusDelta = swapParties[0][1];
+    }
+  }
+
+  const trackedPositiveEntries = [...deltaByOwner.entries()].filter(
+    ([, delta]) => delta.tracked > 0,
+  );
+  const trackedNegativeEntries = [...deltaByOwner.entries()].filter(
+    ([, delta]) => delta.tracked < 0,
+  );
+  const inferredFromWalletAddress = trackedNegativeEntries[0]?.[0] ?? null;
+  const inferredToWalletAddress = trackedPositiveEntries[0]?.[0] ?? null;
+  const inferredTrackedTransferAmount =
+    focusDelta && focusDelta.tracked !== 0
+      ? Math.abs(focusDelta.tracked)
+      : trackedPositiveEntries.length === 1 && trackedNegativeEntries.length === 1
+        ? Math.max(
+            Math.abs(trackedPositiveEntries[0][1].tracked),
+            Math.abs(trackedNegativeEntries[0][1].tracked),
+          )
+        : null;
+
+  const action: 'BUY' | 'SELL' | null =
+    focusDelta && focusDelta.tracked > 0
+      ? 'BUY'
+      : focusDelta && focusDelta.tracked < 0
+        ? 'SELL'
+        : null;
+  const fromWalletAddress =
+    (action === 'SELL' ? focusWallet : null) ??
+    inferredFromWalletAddress ??
+    payloadFromWalletAddress ??
+    null;
+  const toWalletAddress =
+    (action === 'BUY' ? focusWallet : null) ??
+    inferredToWalletAddress ??
+    payloadToWalletAddress ??
+    null;
+  const primaryWalletAddress =
+    focusWallet ??
+    (payloadPrimaryWalletAddress && deltaByOwner.has(payloadPrimaryWalletAddress)
+      ? payloadPrimaryWalletAddress
+      : null) ??
+    (payloadFromWalletAddress && deltaByOwner.has(payloadFromWalletAddress)
+      ? payloadFromWalletAddress
+      : null) ??
+    (payloadToWalletAddress && deltaByOwner.has(payloadToWalletAddress)
+      ? payloadToWalletAddress
+      : null) ??
+    fromWalletAddress ??
+    toWalletAddress ??
+    payloadPrimaryWalletAddress ??
+    null;
+
+  return {
+    tokenContractAddress: trackedContractAddress,
+    fromWalletAddress,
+    toWalletAddress,
+    primaryWalletAddress,
+    action,
+    usdcAmount: focusDelta && focusDelta.usdc !== 0 ? Math.abs(focusDelta.usdc) : null,
+    tokenAmount: inferredTrackedTransferAmount,
+    source: 'rpc_reconcile',
+    transactionStatus: meta?.err ? 'FAILED' : 'CONFIRMED',
+    detailSource: 'rpc',
+    feeAmountUsd:
+      typeof meta?.fee === 'number' && solPriceUsd != null
+        ? (meta.fee / 1_000_000_000) * solPriceUsd
+        : null,
+  };
+}
+
 export async function dbApplyTokenHolderTransactionDelta(
   db: D1Database,
   userId: number,
@@ -319,7 +487,7 @@ export async function reconcileWebhookTransactionDetailsInWindow(
         correctedDetails.fromWalletAddress,
         correctedDetails.toWalletAddress,
       ],
-      group.rows[0]?.wallet_address ?? null,
+      null,
     );
     correctedDetails.primaryWalletAddress = preferredWalletAddress;
     await dbUpdateSignalsByTxSignatureForUser(
@@ -571,7 +739,7 @@ export async function reconcileTokenTransactionsFromRpc(
         mergedDetails.fromWalletAddress,
         mergedDetails.toWalletAddress,
       ],
-      scannedWalletAddress,
+      null,
     );
     mergedDetails.primaryWalletAddress = preferredWalletAddress;
     const source = `rpc_reconcile:refresh:user:${userId}`;
@@ -778,6 +946,9 @@ export async function dbResolvePreferredSignalWalletAddress(
   if (normalizedCandidates.length === 0) {
     return fallbackWalletAddress;
   }
+  const normalizedFallbackWalletAddress = tryNormalizeSolanaPubkey(
+    fallbackWalletAddress,
+  );
   const rows = await db
     .prepare(
       `SELECT wallet_address, type
@@ -800,7 +971,9 @@ export async function dbResolvePreferredSignalWalletAddress(
   if (rows.results.length > 0) {
     return rows.results[0].wallet_address;
   }
-  return fallbackWalletAddress ?? normalizedCandidates[0] ?? null;
+  return normalizedCandidates.find(
+    (candidate) => candidate !== normalizedFallbackWalletAddress,
+  ) ?? normalizedFallbackWalletAddress ?? normalizedCandidates[0] ?? null;
 }
 export async function dbUpdateSignalTransactionDetails(
   db: D1Database,
@@ -830,154 +1003,17 @@ export async function fetchSolanaWebhookTransactionDetailsFromRpc(
       (await fetchJupiterTokenPrice(SOLANA_WRAPPED_SOL_MINT)) ??
       (await fetchJupiterPriceViaQuote(SOLANA_WRAPPED_SOL_MINT, 9));
     const transaction = await solanaRpc<{
-      meta?: {
-        err?: unknown;
-        fee?: number;
-        preTokenBalances?: Array<{
-          owner?: string;
-          mint?: string;
-          uiTokenAmount?: {
-            uiAmountString?: string;
-            amount?: string;
-            decimals?: number;
-          };
-        }>;
-        postTokenBalances?: Array<{
-          owner?: string;
-          mint?: string;
-          uiTokenAmount?: {
-            uiAmountString?: string;
-            amount?: string;
-            decimals?: number;
-          };
-        }>;
-      };
+      meta?: RpcTransactionMeta;
     }>(rpcUrls, 'getTransaction', [
       txSignature,
       { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
     ]);
-    const deltaByOwner = new Map<string, { tracked: number; usdc: number }>();
-    const applyTokenBalances = (
-      balances:
-        | Array<{
-            owner?: string;
-            mint?: string;
-            uiTokenAmount?: {
-              uiAmountString?: string;
-              amount?: string;
-              decimals?: number;
-            };
-          }>
-        | undefined,
-      sign: -1 | 1,
-    ) => {
-      for (const balance of balances ?? []) {
-        const owner = tryNormalizeSolanaPubkey(balance.owner);
-        const mint = tryNormalizeSolanaPubkey(balance.mint);
-        if (!owner || !mint) {
-          continue;
-        }
-        const uiAmount =
-          balance.uiTokenAmount?.uiAmountString != null
-            ? Number.parseFloat(balance.uiTokenAmount.uiAmountString)
-            : typeof balance.uiTokenAmount?.amount === 'string' && typeof balance.uiTokenAmount?.decimals === 'number'
-              ? Number.parseFloat(balance.uiTokenAmount.amount) / 10 ** balance.uiTokenAmount.decimals
-              : null;
-        if (uiAmount == null || !Number.isFinite(uiAmount)) {
-          continue;
-        }
-        const current = deltaByOwner.get(owner) ?? { tracked: 0, usdc: 0 };
-        if (mint === trackedContractAddress) {
-          current.tracked += sign * uiAmount;
-        }
-        if (mint === SOLANA_USDC_MINT) {
-          current.usdc += sign * uiAmount;
-        }
-        deltaByOwner.set(owner, current);
-      }
-    };
-    applyTokenBalances(transaction.meta?.preTokenBalances, -1);
-    applyTokenBalances(transaction.meta?.postTokenBalances, 1);
-    // For a WLT/USDC pair the trade direction is unambiguous from the monitored
-    // wallet's tracked-token balance change: received tracked token => BUY, sent
-    // tracked token => SELL. We deliberately do NOT require a matching USDC delta
-    // on the same owner, because routers/aggregators can settle the USDC leg
-    // through a different account, which previously left action = null and let an
-    // incorrect webhook payload label (e.g. SELL) stick.
-    const traderCandidates = uniqueSolanaPubkeys([
-      payloadDetails.primaryWalletAddress,
-      payloadDetails.toWalletAddress,
-      payloadDetails.fromWalletAddress,
-    ]);
-    let focusWallet: string | null = null;
-    let focusDelta: { tracked: number; usdc: number } | null = null;
-    for (const wallet of traderCandidates) {
-      const delta = deltaByOwner.get(wallet);
-      if (delta && delta.tracked !== 0) {
-        focusWallet = wallet;
-        focusDelta = delta;
-        break;
-      }
-    }
-    // Fallback: if no monitored wallet moved the tracked token, use the single
-    // wallet whose tracked and USDC balances moved in opposite directions (a
-    // genuine swap counterparty). Left null when ambiguous so we never overwrite
-    // an already-correct record with a guess.
-    if (!focusWallet) {
-      const swapParties = [...deltaByOwner.entries()].filter(
-        ([, delta]) =>
-          delta.tracked !== 0 &&
-          ((delta.tracked > 0 && delta.usdc < 0) ||
-            (delta.tracked < 0 && delta.usdc > 0)),
-      );
-      if (swapParties.length === 1) {
-        focusWallet = swapParties[0][0];
-        focusDelta = swapParties[0][1];
-      }
-    }
-    const action: 'BUY' | 'SELL' | null =
-      focusDelta && focusDelta.tracked > 0
-        ? 'BUY'
-        : focusDelta && focusDelta.tracked < 0
-          ? 'SELL'
-          : null;
-    const trackedPositiveWallets = [...deltaByOwner.entries()]
-      .filter(([, delta]) => delta.tracked > 0)
-      .map(([wallet]) => wallet);
-    const trackedNegativeWallets = [...deltaByOwner.entries()]
-      .filter(([, delta]) => delta.tracked < 0)
-      .map(([wallet]) => wallet);
-    const fromWalletAddress =
-      (action === 'SELL' ? focusWallet : null) ??
-      payloadDetails.fromWalletAddress ??
-      trackedNegativeWallets[0] ??
-      null;
-    const toWalletAddress =
-      (action === 'BUY' ? focusWallet : null) ??
-      payloadDetails.toWalletAddress ??
-      trackedPositiveWallets[0] ??
-      null;
-    return {
-      tokenContractAddress: trackedContractAddress,
-      fromWalletAddress,
-      toWalletAddress,
-      primaryWalletAddress:
-        focusWallet ??
-        payloadDetails.primaryWalletAddress ??
-        toWalletAddress ??
-        fromWalletAddress ??
-        null,
-      action,
-      usdcAmount: focusDelta && focusDelta.usdc !== 0 ? Math.abs(focusDelta.usdc) : null,
-      tokenAmount: focusDelta && focusDelta.tracked !== 0 ? Math.abs(focusDelta.tracked) : null,
-      source: 'rpc_reconcile',
-      transactionStatus: transaction.meta?.err ? 'FAILED' : 'CONFIRMED',
-      detailSource: 'rpc',
-      feeAmountUsd:
-        typeof transaction.meta?.fee === 'number' && solPriceUsd != null
-          ? (transaction.meta.fee / 1_000_000_000) * solPriceUsd
-          : null,
-    };
+    return buildRpcSignalDetailsFromTransactionMeta(
+      transaction.meta,
+      trackedContractAddress,
+      payloadDetails,
+      solPriceUsd,
+    );
   } catch (err: unknown) {
     console.warn(`Failed to enrich webhook transaction ${txSignature} from RPC:`, err);
     return {

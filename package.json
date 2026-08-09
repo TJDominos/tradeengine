@@ -15,6 +15,7 @@
     "check:strategy-do-completion-advance": "node scripts/check-strategy-do-completion-advance.mjs",
     "check:strategy-do-idempotency": "node scripts/check-strategy-do-idempotency.mjs",
     "check:max-lines": "node scripts/check-max-lines.mjs",
+    "cleanup:token-account-holders": "node scripts/cleanup-token-account-holders.mjs",
     "check:base-token-backfill:local": "wrangler d1 execute tradingbot --local --file ./scripts/check-base-token-backfill.sql",
     "check:base-token-backfill:remote": "wrangler d1 execute tradingbot --remote --file ./scripts/check-base-token-backfill.sql",
     "deploy": "npm run build && wrangler deploy --config dist/tradeengine/wrangler.json"

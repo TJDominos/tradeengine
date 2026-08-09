@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 
 import { analyzeTradeDirection } from '../src/backend/services/webhookParser.ts';
+import { buildRpcSignalDetailsFromTransactionMeta } from '../src/backend/services/signalStore.ts';
 import {
   extractStoredSignalContractAddresses,
   extractWebhookTransactionDetailsFromPayload,
@@ -159,5 +160,48 @@ assert.equal(ataOwnerDetails.fromWalletAddress, traderAddress);
 assert.equal(ataOwnerDetails.toWalletAddress, ammPoolAddress);
 assert.equal(ataOwnerDetails.primaryWalletAddress, traderAddress);
 assert.equal(ataOwnerDetails.tokenAmount, 7.25);
+
+const rpcTransferOnlyDetails = buildRpcSignalDetailsFromTransactionMeta(
+  {
+    fee: 5000,
+    preTokenBalances: [
+      {
+        owner: traderAddress,
+        mint: baseTokenAddress,
+        uiTokenAmount: { uiAmountString: '12.5' },
+      },
+      {
+        owner: ammPoolAddress,
+        mint: baseTokenAddress,
+        uiTokenAmount: { uiAmountString: '0' },
+      },
+    ],
+    postTokenBalances: [
+      {
+        owner: traderAddress,
+        mint: baseTokenAddress,
+        uiTokenAmount: { uiAmountString: '0' },
+      },
+      {
+        owner: ammPoolAddress,
+        mint: baseTokenAddress,
+        uiTokenAmount: { uiAmountString: '12.5' },
+      },
+    ],
+  },
+  baseTokenAddress,
+  {
+    primaryWalletAddress: 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+  },
+  null,
+);
+
+assert.equal(rpcTransferOnlyDetails.fromWalletAddress, traderAddress);
+assert.equal(rpcTransferOnlyDetails.toWalletAddress, ammPoolAddress);
+assert.equal(rpcTransferOnlyDetails.primaryWalletAddress, traderAddress);
+assert.equal(rpcTransferOnlyDetails.tokenAmount, 12.5);
+assert.equal(rpcTransferOnlyDetails.action, null);
+assert.equal(rpcTransferOnlyDetails.source, 'rpc_reconcile');
+assert.equal(rpcTransferOnlyDetails.detailSource, 'rpc');
 
 console.log('check-webhook-parser: OK');
