@@ -1151,6 +1151,10 @@ export function mergeStoredSignalTransactionDetails(
       details.detailSource === 'payload+rpc' ||
       details.source === 'rpc_reconcile';
 
+    if (details.source === 'rpc_reconcile') {
+      merged.source = 'rpc_reconcile';
+    }
+
     merged.tokenContractAddress ??= details.tokenContractAddress ?? null;
     if (preferDetails) {
       if (details.fromWalletAddress) {

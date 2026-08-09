@@ -928,6 +928,7 @@ export async function dbListWebhookTransactionLogs(
       .prepare(
         `SELECT
            id,
+           source,
            event_type,
            wallet_address,
            tx_signature,
@@ -944,6 +945,7 @@ export async function dbListWebhookTransactionLogs(
       .bind(`%:user:${userId}`)
       .all<{
         id: number;
+        source: string;
         event_type: string;
         wallet_address: string | null;
         tx_signature: string | null;
@@ -999,6 +1001,11 @@ export async function dbListWebhookTransactionLogs(
   return orderedKeys.slice(0, 50).map((key) => {
     const group = grouped.get(key) ?? [];
     const firstRow = group[0];
+    const derivedSource: WebhookTransactionLogRecord['source'] = group.some(
+      (row) => row.source.includes('rpc_reconcile'),
+    )
+      ? 'rpc_reconcile'
+      : 'webhook';
     const mergedDetails = mergeStoredSignalTransactionDetails(
       ...group.map((row) => parseStoredSignalTransactionDetails(row.details_json)),
       {
@@ -1008,6 +1015,7 @@ export async function dbListWebhookTransactionLogs(
             .find((address) => address !== SOLANA_USDC_MINT) ??
           group.flatMap((row) => extractStoredSignalContractAddresses(row.payload))[0] ??
           null,
+        source: derivedSource,
       },
     );
     const tokenContractAddress = mergedDetails.tokenContractAddress;
@@ -1049,8 +1057,14 @@ export async function dbListWebhookTransactionLogs(
             return null;
           })()
         : null;
+    const walletLpCorrectedAction: WebhookTransactionLogRecord['action'] =
+      tokenMeta?.ammPoolAddress && mergedDetails.fromWalletAddress === tokenMeta.ammPoolAddress
+        ? 'BUY'
+        : tokenMeta?.ammPoolAddress && mergedDetails.toWalletAddress === tokenMeta.ammPoolAddress
+          ? 'SELL'
+          : null;
     const normalizedAction: WebhookTransactionLogRecord['action'] =
-      lpCorrectedAction ?? mergedDetails.action ?? (
+      lpCorrectedAction ?? walletLpCorrectedAction ?? mergedDetails.action ?? (
         fromIsManaged && !toIsManaged
           ? 'SELL'
           : toIsManaged && !fromIsManaged
@@ -1065,11 +1079,30 @@ export async function dbListWebhookTransactionLogs(
                 ? 'BUY'
                 : null
       );
+    const lpParticipantWalletAddress =
+      tokenMeta?.ammPoolAddress && mergedDetails.fromWalletAddress === tokenMeta.ammPoolAddress
+        ? mergedDetails.toWalletAddress
+        : tokenMeta?.ammPoolAddress && mergedDetails.toWalletAddress === tokenMeta.ammPoolAddress
+          ? mergedDetails.fromWalletAddress
+          : null;
+    const normalizedPrimaryWalletAddress =
+      mergedDetails.primaryWalletAddress && mergedDetails.primaryWalletAddress !== tokenContractAddress
+        ? mergedDetails.primaryWalletAddress
+        : null;
+    const normalizedRowWalletAddress =
+      firstRow.wallet_address && firstRow.wallet_address !== tokenContractAddress
+        ? firstRow.wallet_address
+        : null;
     const normalizedWalletAddress = fromIsManaged
       ? mergedDetails.fromWalletAddress
       : toIsManaged
         ? mergedDetails.toWalletAddress
-        : mergedDetails.primaryWalletAddress ?? firstRow.wallet_address;
+        : lpParticipantWalletAddress ??
+          normalizedPrimaryWalletAddress ??
+          normalizedRowWalletAddress ??
+          mergedDetails.fromWalletAddress ??
+          mergedDetails.toWalletAddress ??
+          firstRow.wallet_address;
 
     return {
       id: firstRow.id,
@@ -1084,7 +1117,7 @@ export async function dbListWebhookTransactionLogs(
       usdcAmount: mergedDetails.usdcAmount,
       tokenAmount: mergedDetails.tokenAmount,
       feeAmountUsd: mergedDetails.feeAmountUsd,
-      source: mergedDetails.source,
+      source: derivedSource,
       eventType: firstRow.event_type,
       txSignature: firstRow.tx_signature,
       status,

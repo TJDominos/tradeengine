@@ -6,7 +6,7 @@ import {
 import { summarizeStrategyRuntime } from '../strategy/runtime';
 import { buildWebhookStrategyTrigger } from '../strategy/triggers';
 import { nowTs, normalizeTimestampMs } from '../time';
-import { dbResolveTradableTokenId } from '../tokenStore';
+import { dbFindTradableTokenById, dbResolveTradableTokenId } from '../tokenStore';
 import {
   dbAddAuditLog,
   dbListAccounts,
@@ -37,6 +37,43 @@ import {
 import { SOLANA_USDC_MINT, SOLANA_WRAPPED_SOL_MINT } from '../workerShared';
 import { runAndPersistStrategyEvaluation } from './strategyStore';
 import { syncTokenMarketSnapshotForUser } from './tokenMarketService';
+
+function applyAmmPoolDirectionCorrection(
+  details: StoredSignalTransactionDetails,
+  ammPoolAddress: string | null | undefined,
+): StoredSignalTransactionDetails {
+  const normalizedAmmPoolAddress = tryNormalizeSolanaPubkey(ammPoolAddress);
+  if (!normalizedAmmPoolAddress) {
+    return details;
+  }
+
+  if (
+    details.fromWalletAddress === normalizedAmmPoolAddress &&
+    details.toWalletAddress &&
+    details.toWalletAddress !== normalizedAmmPoolAddress
+  ) {
+    return {
+      ...details,
+      action: 'BUY',
+      primaryWalletAddress: details.toWalletAddress,
+    };
+  }
+
+  if (
+    details.toWalletAddress === normalizedAmmPoolAddress &&
+    details.fromWalletAddress &&
+    details.fromWalletAddress !== normalizedAmmPoolAddress
+  ) {
+    return {
+      ...details,
+      action: 'SELL',
+      primaryWalletAddress: details.fromWalletAddress,
+    };
+  }
+
+  return details;
+}
+
 export async function dbApplyTokenHolderTransactionDelta(
   db: D1Database,
   userId: number,
@@ -247,6 +284,9 @@ export async function reconcileWebhookTransactionDetailsInWindow(
   enrichedTransactions: number;
   completeTransactionsAfter: number;
 }> {
+  const tokenId = await dbResolveTradableTokenId(db, contractAddress);
+  const trackedToken = tokenId != null ? await dbFindTradableTokenById(db, tokenId) : null;
+  const ammPoolAddress = trackedToken?.ammPoolAddress ?? null;
   const groups = await dbListSignalGroupsForTokenWindow(
     db,
     userId,
@@ -267,26 +307,30 @@ export async function reconcileWebhookTransactionDetailsInWindow(
       group.mergedDetails,
       rpcDetails,
     );
+    const correctedDetails = applyAmmPoolDirectionCorrection(
+      mergedDetails,
+      ammPoolAddress,
+    );
     const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
       db,
       userId,
       [
-        mergedDetails.primaryWalletAddress,
-        mergedDetails.fromWalletAddress,
-        mergedDetails.toWalletAddress,
+        correctedDetails.primaryWalletAddress,
+        correctedDetails.fromWalletAddress,
+        correctedDetails.toWalletAddress,
       ],
       group.rows[0]?.wallet_address ?? null,
     );
-    mergedDetails.primaryWalletAddress = preferredWalletAddress;
+    correctedDetails.primaryWalletAddress = preferredWalletAddress;
     await dbUpdateSignalsByTxSignatureForUser(
       db,
       userId,
       group.txSignature!,
       preferredWalletAddress,
-      mergedDetails,
+      correctedDetails,
     );
     const detailsChanged =
-      JSON.stringify(group.mergedDetails) !== JSON.stringify(mergedDetails) ||
+      JSON.stringify(group.mergedDetails) !== JSON.stringify(correctedDetails) ||
       preferredWalletAddress !== (group.rows[0]?.wallet_address ?? null);
     if (detailsChanged) {
       enrichedTransactions += 1;
@@ -393,6 +437,9 @@ export async function reconcileTokenTransactionsFromRpc(
   duplicates: number;
   skippedIrrelevant: number;
 }> {
+  const tokenId = await dbResolveTradableTokenId(db, contractAddress);
+  const trackedToken = tokenId != null ? await dbFindTradableTokenById(db, tokenId) : null;
+  const ammPoolAddress = trackedToken?.ammPoolAddress ?? null;
   const perAddressLimit = options?.perAddressLimit ?? 100;
   const [managed, watched] = await Promise.all([
     dbListManagedAccountAddresses(db, userId),
@@ -484,23 +531,29 @@ export async function reconcileTokenTransactionsFromRpc(
       duplicates += 1;
       continue;
     }
+    const scannedWalletAddress = signatureMeta.address !== contractAddress
+      ? signatureMeta.address
+      : null;
     const rpcDetails = await fetchSolanaWebhookTransactionDetailsFromRpc(
       rpcUrls,
       txSignature,
       contractAddress,
       {
-        primaryWalletAddress: signatureMeta.address,
+        primaryWalletAddress: scannedWalletAddress,
       },
     );
-    const mergedDetails = mergeStoredSignalTransactionDetails(
-      {
-        tokenContractAddress: contractAddress,
-        primaryWalletAddress: signatureMeta.address,
-        source: 'rpc_reconcile',
-        transactionStatus: 'PENDING',
-        detailSource: 'unknown',
-      },
-      rpcDetails,
+    const mergedDetails = applyAmmPoolDirectionCorrection(
+      mergeStoredSignalTransactionDetails(
+        {
+          tokenContractAddress: contractAddress,
+          primaryWalletAddress: scannedWalletAddress,
+          source: 'rpc_reconcile',
+          transactionStatus: 'PENDING',
+          detailSource: 'unknown',
+        },
+        rpcDetails,
+      ),
+      ammPoolAddress,
     );
     const isRelevant =
       mergedDetails.action != null ||
@@ -518,7 +571,7 @@ export async function reconcileTokenTransactionsFromRpc(
         mergedDetails.fromWalletAddress,
         mergedDetails.toWalletAddress,
       ],
-      signatureMeta.address,
+      scannedWalletAddress,
     );
     mergedDetails.primaryWalletAddress = preferredWalletAddress;
     const source = `rpc_reconcile:refresh:user:${userId}`;
@@ -533,7 +586,8 @@ export async function reconcileTokenTransactionsFromRpc(
         type: 'rpc_reconcile',
         txSignature,
         contractAddress,
-        walletAddress: signatureMeta.address,
+        walletAddress: scannedWalletAddress,
+        scannedAddress: signatureMeta.address,
         blockTimeMs: signatureMeta.blockTimeMs,
       }),
       detailsJson: JSON.stringify(mergedDetails),

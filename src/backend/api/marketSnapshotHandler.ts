@@ -13,7 +13,7 @@ import { dbListOutsideTokenHoldersPage } from '../tokenHolders';
 import { dbGetTokenMarketSnapshotsByTimeRange, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
 import { dbAddAuditLog, dbLoadSettings } from '../userStore';
 import { buildTokenHolderSyncSummary, jsonResponse } from '../workerCore';
-import { TOKEN_HOLDER_SYNC_TOTAL_SHARDS, type Env, type SessionUser, type SettingsState, type TokenHolderSyncSummary, type TokenMarketSnapshot } from '../workerShared';
+import { TOKEN_HOLDER_SYNC_SHARDS_PER_REFRESH, TOKEN_HOLDER_SYNC_TOTAL_SHARDS, type Env, type SessionUser, type SettingsState, type TokenHolderSyncSummary, type TokenMarketSnapshot } from '../workerShared';
 import { requireAdmin } from '../services/accessControl';
 import {
   assertMarketRefreshLeaseActive,
@@ -33,6 +33,7 @@ import { summarizeStrategyRuntime } from '../strategy/runtime';
 const MANUAL_REFRESH_HOLDER_BACKFILL_ADDRESS_LIMIT = 50;
 const MANUAL_REFRESH_HOLDER_BACKFILL_SIGNATURE_LIMIT = 20;
 const MANUAL_REFRESH_HOLDER_BACKFILL_MAX_PAGES = 2;
+const MANUAL_REFRESH_HOLDER_SYNC_TIME_BUDGET_MS = 12_000;
 
 async function loadManualRefreshBackfillAddresses(
   db: D1Database,
@@ -86,9 +87,55 @@ async function runManualMarketRefreshWorkflow(
     contractAddress,
   );
   let holderBackfillAddresses: string[] = [];
-  let holderSyncSummary = buildTokenHolderSyncSummary(null);
   if (tokenId) {
     await ensureActive();
+    holderBackfillAddresses = await runWithFallback(
+      () => loadManualRefreshBackfillAddresses(env.TRADINGBOT_DB, user.id, tokenId),
+      `Failed to load holder backfill addresses for ${contractAddress}:`,
+      [],
+    );
+  }
+
+  const rpcReconciliation = await runWithFallback(
+    () =>
+      reconcileTokenTransactionsFromRpc(
+        env.TRADINGBOT_DB,
+        user.id,
+        contractAddress,
+        rpcUrls,
+        {
+          additionalAddresses: [marketSnapshot?.pairAddress ?? null],
+          backfillAddresses: holderBackfillAddresses,
+          backfillPerAddressLimit: MANUAL_REFRESH_HOLDER_BACKFILL_SIGNATURE_LIMIT,
+          backfillMaxPages: MANUAL_REFRESH_HOLDER_BACKFILL_MAX_PAGES,
+          startTimeMs,
+          endTimeMs,
+        },
+      ),
+    `RPC reconciliation failed for ${contractAddress}:`,
+    EMPTY_REFRESH_RPC_RECONCILIATION,
+  );
+
+  await ensureActive();
+
+  const windowCompleteness = await runWithFallback(
+    () =>
+      reconcileWebhookTransactionDetailsInWindow(
+        env.TRADINGBOT_DB,
+        user.id,
+        contractAddress,
+        rpcUrls,
+        startTimeMs,
+        endTimeMs,
+      ),
+    `Window detail reconciliation failed for ${contractAddress}:`,
+    EMPTY_REFRESH_WINDOW_COMPLETENESS,
+  );
+
+  await ensureActive();
+
+  let holderSyncSummary = buildTokenHolderSyncSummary(null);
+  if (tokenId) {
     try {
       holderSyncSummary = await syncSolanaTokenHolderBalancesPaged(
         env.TRADINGBOT_DB,
@@ -97,7 +144,9 @@ async function runManualMarketRefreshWorkflow(
         contractAddress,
         rpcUrls,
         {
-          maxShards: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
+          maxShards: TOKEN_HOLDER_SYNC_SHARDS_PER_REFRESH,
+          timeBudgetMs: MANUAL_REFRESH_HOLDER_SYNC_TIME_BUDGET_MS,
+          allowHeliusDasFullSync: false,
           ensureActive,
         },
       );
@@ -122,50 +171,7 @@ async function runManualMarketRefreshWorkflow(
     }
 
     await ensureActive();
-    holderBackfillAddresses = await runWithFallback(
-      () => loadManualRefreshBackfillAddresses(env.TRADINGBOT_DB, user.id, tokenId),
-      `Failed to load holder backfill addresses for ${contractAddress}:`,
-      [],
-    );
   }
-
-  const windowCompleteness = await runWithFallback(
-    () =>
-      reconcileWebhookTransactionDetailsInWindow(
-        env.TRADINGBOT_DB,
-        user.id,
-        contractAddress,
-        rpcUrls,
-        startTimeMs,
-        endTimeMs,
-      ),
-    `Window detail reconciliation failed for ${contractAddress}:`,
-    EMPTY_REFRESH_WINDOW_COMPLETENESS,
-  );
-
-  await ensureActive();
-
-  const rpcReconciliation = await runWithFallback(
-    () =>
-      reconcileTokenTransactionsFromRpc(
-        env.TRADINGBOT_DB,
-        user.id,
-        contractAddress,
-        rpcUrls,
-        {
-          additionalAddresses: [marketSnapshot?.pairAddress ?? null],
-          backfillAddresses: holderBackfillAddresses,
-          backfillPerAddressLimit: MANUAL_REFRESH_HOLDER_BACKFILL_SIGNATURE_LIMIT,
-          backfillMaxPages: MANUAL_REFRESH_HOLDER_BACKFILL_MAX_PAGES,
-          startTimeMs,
-          endTimeMs,
-        },
-      ),
-    `RPC reconciliation failed for ${contractAddress}:`,
-    EMPTY_REFRESH_RPC_RECONCILIATION,
-  );
-
-  await ensureActive();
 
   let strategyEvaluationSummary: string | null = null;
   let strategyEvaluationPayload: Record<string, unknown> | null = null;

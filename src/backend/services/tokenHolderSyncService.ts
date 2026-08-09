@@ -477,6 +477,7 @@ export async function syncSolanaTokenHolderBalancesPaged(
     maxShards?: number;
     continueUntilFirstStage?: boolean;
     timeBudgetMs?: number;
+    allowHeliusDasFullSync?: boolean;
     ensureActive?: () => Promise<void>;
   },
 ): Promise<TokenHolderSyncSummary> {
@@ -498,17 +499,19 @@ export async function syncSolanaTokenHolderBalancesPaged(
     return buildTokenHolderSyncSummary(failedState);
   }
 
-  const heliusDasSummary = await trySyncSolanaTokenHolderBalancesWithHeliusDas(
-    db,
-    userId,
-    tokenId,
-    mint,
-    rpcUrls,
-    decimals,
-    state,
-  );
-  if (heliusDasSummary) {
-    return heliusDasSummary;
+  if (options?.allowHeliusDasFullSync !== false) {
+    const heliusDasSummary = await trySyncSolanaTokenHolderBalancesWithHeliusDas(
+      db,
+      userId,
+      tokenId,
+      mint,
+      rpcUrls,
+      decimals,
+      state,
+    );
+    if (heliusDasSummary) {
+      return heliusDasSummary;
+    }
   }
 
   let currentState = state;
