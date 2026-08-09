@@ -1,5 +1,5 @@
 import React from 'react';
-import { RefreshCw, Search, Shield, Users, Wallet } from 'lucide-react';
+import { Copy, RefreshCw, Search, Shield, Users, Wallet } from 'lucide-react';
 
 import type {
   AccountRecord,
@@ -117,6 +117,14 @@ export default function AccountsPage({
         : 'Unavailable';
   const tokenAmountSortActive = outsideHolderSort === 'largest';
   const newestSortActive = outsideHolderSort === 'newest';
+
+  const handleCopyAddress = async (address: string) => {
+    try {
+      await navigator.clipboard.writeText(address);
+    } catch {
+      // Ignore clipboard failures; the full address remains visible via the cell title.
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -262,7 +270,20 @@ export default function AccountsPage({
                       {holderTypeLabel}
                     </td>
                     <td className="px-4 py-2 text-xs font-bold text-slate-200">{holder.label ?? '-'}</td>
-                    <td className="px-4 py-2 font-mono text-xs text-slate-400">{compactAddress(holder.address)}</td>
+                    <td className="px-4 py-2 font-mono text-xs text-slate-400">
+                      <div className="flex items-center gap-1.5">
+                        <span title={holder.address}>{compactAddress(holder.address)}</span>
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyAddress(holder.address)}
+                          className="rounded border border-slate-700 bg-slate-950 p-1 text-slate-500 transition hover:border-slate-500 hover:text-slate-200"
+                          title="Copy address"
+                          aria-label={`Copy ${holder.address}`}
+                        >
+                          <Copy size={10} />
+                        </button>
+                      </div>
+                    </td>
                     <td className="px-4 py-2 text-right text-xs font-medium text-slate-200">
                       {formatNum(holder.amountHolding)} {activeTokenSymbol}
                     </td>

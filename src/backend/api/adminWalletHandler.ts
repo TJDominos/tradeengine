@@ -27,7 +27,6 @@ import { DEFAULT_SOLANA_DERIVATION_PATH } from '../workerShared';
 import type { Env } from '../workerShared';
 import { requireAdmin, requireUser } from '../services/accessControl';
 import { buildStrategyTaskExecutionContext } from '../services/strategyAutomationService';
-import { dbUserOwnsAccount } from '../services/strategyStore';
 
 const DEFAULT_RECOVERY_PHRASE_DERIVED_ACCOUNT_COUNT = 20;
 const MAX_RECOVERY_PHRASE_DERIVED_ACCOUNT_COUNT = 100;
@@ -329,14 +328,6 @@ export async function handleAdminWalletRoutes(
     const user = await requireUser(request, env);
     const addressPath = decodeURIComponent(url.pathname.split('/')[3] ?? '');
     const address = normalizePubkey(addressPath);
-    const ownsAccount = await dbUserOwnsAccount(
-      env.TRADINGBOT_DB,
-      user.id,
-      address,
-    );
-    if (!ownsAccount) {
-      throw new ApiError(404, 'Wallet not found for the current user');
-    }
     const [settings, tradableTokens] = await Promise.all([
       dbLoadSettings(env.TRADINGBOT_DB, user.id),
       dbListTradableTokens(env.TRADINGBOT_DB),
