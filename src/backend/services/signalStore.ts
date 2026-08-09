@@ -381,6 +381,9 @@ export async function reconcileTokenTransactionsFromRpc(
   options?: {
     perAddressLimit?: number;
     additionalAddresses?: Array<string | null | undefined>;
+    backfillAddresses?: Array<string | null | undefined>;
+    backfillPerAddressLimit?: number;
+    backfillMaxPages?: number;
     startTimeMs?: number | null;
     endTimeMs?: number | null;
   },
@@ -401,7 +404,13 @@ export async function reconcileTokenTransactionsFromRpc(
     ...managed,
     ...watched.map((account) => account.address),
   ]);
-  if (candidateAddresses.length === 0) {
+  const baseAddressSet = new Set(candidateAddresses);
+  const backfillAddresses = dedupeStrings(
+    (options?.backfillAddresses ?? []).filter(
+      (address): address is string => typeof address === 'string',
+    ),
+  ).filter((address) => !baseAddressSet.has(address));
+  if (candidateAddresses.length === 0 && backfillAddresses.length === 0) {
     return {
       scannedSignatures: 0,
       insertedSignals: 0,
@@ -409,28 +418,46 @@ export async function reconcileTokenTransactionsFromRpc(
       skippedIrrelevant: 0,
     };
   }
+
+  const addressScanPlans = [
+    {
+      addresses: candidateAddresses,
+      pageSize: perAddressLimit,
+      maxPages: 10,
+    },
+  ];
+  if (backfillAddresses.length > 0) {
+    addressScanPlans.push({
+      addresses: backfillAddresses,
+      pageSize: options?.backfillPerAddressLimit ?? 20,
+      maxPages: options?.backfillMaxPages ?? 2,
+    });
+  }
+
   const signaturePool = new Map<string, { address: string; blockTimeMs: number | null }>();
-  for (const address of candidateAddresses) {
-    try {
-      const signatures = await fetchSolanaSignaturesForAddressInWindow(
-        rpcUrls,
-        address,
-        {
-          pageSize: perAddressLimit,
-          maxPages: 10,
-          startTimeMs: options?.startTimeMs,
-          endTimeMs: options?.endTimeMs,
-        },
-      );
-      for (const entry of signatures) {
-        if (!entry.signature || signaturePool.has(entry.signature)) continue;
-        signaturePool.set(entry.signature, {
+  for (const plan of addressScanPlans) {
+    for (const address of plan.addresses) {
+      try {
+        const signatures = await fetchSolanaSignaturesForAddressInWindow(
+          rpcUrls,
           address,
-          blockTimeMs: signatureBlockTimeToMs(entry.blockTime),
-        });
+          {
+            pageSize: plan.pageSize,
+            maxPages: plan.maxPages,
+            startTimeMs: options?.startTimeMs,
+            endTimeMs: options?.endTimeMs,
+          },
+        );
+        for (const entry of signatures) {
+          if (!entry.signature || signaturePool.has(entry.signature)) continue;
+          signaturePool.set(entry.signature, {
+            address,
+            blockTimeMs: signatureBlockTimeToMs(entry.blockTime),
+          });
+        }
+      } catch (err: unknown) {
+        console.warn(`Failed to fetch signatures for ${address}:`, err);
       }
-    } catch (err: unknown) {
-      console.warn(`Failed to fetch signatures for ${address}:`, err);
     }
   }
   let insertedSignals = 0;

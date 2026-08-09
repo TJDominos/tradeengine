@@ -370,6 +370,21 @@ function compactAddressParticipant(value: unknown): Record<string, unknown> | nu
   return address ? { address } : null;
 }
 
+function extractTokenTransferContractAddresses(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return uniqueSolanaPubkeys(
+    value.flatMap((item) => {
+      if (!isRecord(item)) {
+        return [];
+      }
+      return [item.mint, item.tokenAddress, item.contractAddress];
+    }),
+  );
+}
+
 function buildCompactAlchemyLogPayload(
   logValue: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
@@ -413,12 +428,16 @@ function buildCompactAlchemyActivityPayload(
         return compactDefinedRecord([
           ['mint', readNonEmptyString(record.mint)],
           ['tokenAddress', readNonEmptyString(record.tokenAddress)],
+          ['contractAddress', readNonEmptyString(record.contractAddress)],
           ['sender', readNonEmptyString(record.sender)],
           ['receiver', readNonEmptyString(record.receiver)],
           ['sourceOwner', readNonEmptyString(record.sourceOwner)],
           ['destinationOwner', readNonEmptyString(record.destinationOwner)],
           ['fromAddress', readNonEmptyString(record.fromAddress)],
           ['toAddress', readNonEmptyString(record.toAddress)],
+          ['amount', record.amount],
+          ['value', record.value],
+          ['tokenAmount', record.tokenAmount],
         ]);
       })
     : null;
@@ -512,6 +531,7 @@ function deriveAlchemySignalsFromPayload(
         item.tokenAddress,
         item.mint,
         log?.address,
+        ...extractTokenTransferContractAddresses(item.tokenTransfers),
       ]);
       return [
         {

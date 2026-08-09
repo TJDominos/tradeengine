@@ -178,6 +178,17 @@ function readNormalizedAddress(value: unknown): string | null {
   return tryNormalizeSolanaPubkey(value);
 }
 
+function collectNormalizedAddresses(values: unknown[]): string[] {
+  const addresses = new Set<string>();
+  for (const value of values) {
+    const normalized = readNormalizedAddress(value);
+    if (normalized) {
+      addresses.add(normalized);
+    }
+  }
+  return [...addresses];
+}
+
 export function analyzeTradeDirection(
   webhookPayload: unknown,
   config: StrategyConfig,
@@ -199,21 +210,23 @@ export function analyzeTradeDirection(
       continue;
     }
 
-    const sender =
-      readNormalizedAddress(transfer.sender) ??
-      readNormalizedAddress(transfer.sourceOwner) ??
-      readNormalizedAddress(transfer.fromOwner) ??
-      readNormalizedAddress(transfer.fromAddress);
-    const receiver =
-      readNormalizedAddress(transfer.receiver) ??
-      readNormalizedAddress(transfer.destinationOwner) ??
-      readNormalizedAddress(transfer.toOwner) ??
-      readNormalizedAddress(transfer.toAddress);
+    const senders = collectNormalizedAddresses([
+      transfer.sender,
+      transfer.sourceOwner,
+      transfer.fromOwner,
+      transfer.fromAddress,
+    ]);
+    const receivers = collectNormalizedAddresses([
+      transfer.receiver,
+      transfer.destinationOwner,
+      transfer.toOwner,
+      transfer.toAddress,
+    ]);
 
-    if (sender === normalizedAmmPoolAddress) {
+    if (senders.includes(normalizedAmmPoolAddress)) {
       return 'BUY';
     }
-    if (receiver === normalizedAmmPoolAddress) {
+    if (receivers.includes(normalizedAmmPoolAddress)) {
       return 'SELL';
     }
   }

@@ -156,6 +156,7 @@ export default function App() {
   const activeSubmissionRef = React.useRef<string | null>(null);
   const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
   const lastWalletBalanceRefreshStatusKeyRef = React.useRef<string | null>(null);
+  const dashboardStatePollInFlightRef = React.useRef(false);
 
   const dateFilterReady = dateRange.from !== '' && dateRange.to !== '';
   const hasDateRange = dateFilterActive && dateFilterReady;
@@ -287,6 +288,39 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (!auth?.authenticated || activeTab !== 'dashboard' || marketRefreshRunning) {
+      return;
+    }
+
+    let cancelled = false;
+    const pollDashboardState = async () => {
+      if (dashboardStatePollInFlightRef.current || document.visibilityState !== 'visible') {
+        return;
+      }
+
+      dashboardStatePollInFlightRef.current = true;
+      try {
+        await loadState();
+      } catch (err: unknown) {
+        if (!cancelled) {
+          console.warn('Failed to poll dashboard state:', err);
+        }
+      } finally {
+        dashboardStatePollInFlightRef.current = false;
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void pollDashboardState();
+    }, 10_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeTab, auth?.authenticated, loadState, marketRefreshRunning]);
 
   const refreshWalletBalances = React.useCallback(async (addresses?: string[]) => {
     if (!auth?.authenticated) return;

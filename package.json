@@ -9,7 +9,7 @@
     "preview": "npm run build && wrangler dev --config dist/tradeengine/wrangler.json",
     "clean": "rm -rf dist rust-backend/target",
     "lint": "tsc --noEmit",
-    "check:webhook-parser": "node scripts/check-webhook-parser.mjs",
+    "check:webhook-parser": "npx --yes tsx scripts/check-webhook-parser.mjs",
     "check:strategy-queue-recovery": "node scripts/check-strategy-queue-recovery.mjs",
     "check:strategy-do-lifecycle": "node scripts/check-strategy-do-lifecycle.mjs",
     "check:strategy-do-completion-advance": "node scripts/check-strategy-do-completion-advance.mjs",

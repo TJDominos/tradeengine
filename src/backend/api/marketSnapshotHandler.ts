@@ -9,6 +9,7 @@ import {
   type RefreshWindowCompleteness,
 } from '../marketRefresh';
 import { nowMs, nowTs, normalizeTimestampMs } from '../time';
+import { dbListOutsideTokenHoldersPage } from '../tokenHolders';
 import { dbGetTokenMarketSnapshotsByTimeRange, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
 import { dbAddAuditLog, dbLoadSettings } from '../userStore';
 import { buildTokenHolderSyncSummary, jsonResponse } from '../workerCore';
@@ -28,6 +29,23 @@ import { loadStoredMarketSnapshotByContractAddress, syncTokenMarketSnapshotForUs
 import { syncSolanaTokenHolderBalancesPaged } from '../services/tokenHolderSyncService';
 import { buildManualRefreshStrategyTrigger } from '../strategy/triggers';
 import { summarizeStrategyRuntime } from '../strategy/runtime';
+
+const MANUAL_REFRESH_HOLDER_BACKFILL_ADDRESS_LIMIT = 50;
+const MANUAL_REFRESH_HOLDER_BACKFILL_SIGNATURE_LIMIT = 20;
+const MANUAL_REFRESH_HOLDER_BACKFILL_MAX_PAGES = 2;
+
+async function loadManualRefreshBackfillAddresses(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+): Promise<string[]> {
+  const holderPage = await dbListOutsideTokenHoldersPage(db, userId, tokenId, {
+    page: 1,
+    pageSize: MANUAL_REFRESH_HOLDER_BACKFILL_ADDRESS_LIMIT,
+    sort: 'newest',
+  });
+  return holderPage.items.map((holder) => holder.address);
+}
 
 async function runManualMarketRefreshWorkflow(
   env: Env,
@@ -67,6 +85,7 @@ async function runManualMarketRefreshWorkflow(
     env.TRADINGBOT_DB,
     contractAddress,
   );
+  let holderBackfillAddresses: string[] = [];
   let holderSyncSummary = buildTokenHolderSyncSummary(null);
   if (tokenId) {
     await ensureActive();
@@ -101,6 +120,13 @@ async function runManualMarketRefreshWorkflow(
         lastCompletedAt: null,
       });
     }
+
+    await ensureActive();
+    holderBackfillAddresses = await runWithFallback(
+      () => loadManualRefreshBackfillAddresses(env.TRADINGBOT_DB, user.id, tokenId),
+      `Failed to load holder backfill addresses for ${contractAddress}:`,
+      [],
+    );
   }
 
   const windowCompleteness = await runWithFallback(
@@ -128,6 +154,9 @@ async function runManualMarketRefreshWorkflow(
         rpcUrls,
         {
           additionalAddresses: [marketSnapshot?.pairAddress ?? null],
+          backfillAddresses: holderBackfillAddresses,
+          backfillPerAddressLimit: MANUAL_REFRESH_HOLDER_BACKFILL_SIGNATURE_LIMIT,
+          backfillMaxPages: MANUAL_REFRESH_HOLDER_BACKFILL_MAX_PAGES,
           startTimeMs,
           endTimeMs,
         },

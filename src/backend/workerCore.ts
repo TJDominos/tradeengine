@@ -941,6 +941,62 @@ export function toFiniteNumber(value: unknown): number | null {
   return null;
 }
 
+function readTokenTransferContractAddress(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  return (
+    tryNormalizeSolanaPubkey(value.mint) ??
+    tryNormalizeSolanaPubkey(value.tokenAddress) ??
+    tryNormalizeSolanaPubkey(value.contractAddress) ??
+    (isRecord(value.rawContract)
+      ? tryNormalizeSolanaPubkey(value.rawContract.address)
+      : null)
+  );
+}
+
+function extractTokenTransferContractAddresses(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return uniqueSolanaPubkeys(
+    value.flatMap((item) => {
+      if (!isRecord(item)) {
+        return [];
+      }
+      return [
+        item.mint,
+        item.tokenAddress,
+        item.contractAddress,
+        isRecord(item.rawContract) ? item.rawContract.address : null,
+      ];
+    }),
+  );
+}
+
+function readTokenTransferWalletAddress(
+  value: unknown,
+  direction: 'from' | 'to',
+): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  return direction === 'from'
+    ? tryNormalizeSolanaPubkey(value.sourceOwner) ??
+        tryNormalizeSolanaPubkey(value.sender) ??
+        tryNormalizeSolanaPubkey(value.fromOwner) ??
+        tryNormalizeSolanaPubkey(value.fromAddress) ??
+        null
+    : tryNormalizeSolanaPubkey(value.destinationOwner) ??
+        tryNormalizeSolanaPubkey(value.receiver) ??
+        tryNormalizeSolanaPubkey(value.toOwner) ??
+        tryNormalizeSolanaPubkey(value.toAddress) ??
+        null;
+}
+
 export function extractStoredSignalContractAddresses(payloadText: string): string[] {
   let payload: unknown;
   try {
@@ -957,8 +1013,17 @@ export function extractStoredSignalContractAddresses(payloadText: string): strin
   const rawContract = activity && isRecord(activity.rawContract)
     ? activity.rawContract
     : null;
+  const payloadTokenTransfers = Array.isArray(payload.tokenTransfers)
+    ? payload.tokenTransfers
+    : [];
+  const activityTokenTransfers = activity && Array.isArray(activity.tokenTransfers)
+    ? activity.tokenTransfers
+    : [];
   const log = isRecord(payload.log) ? payload.log : null;
   const event = isRecord(payload.event) ? payload.event : null;
+  const eventTokenTransfers = event && Array.isArray(event.tokenTransfers)
+    ? event.tokenTransfers
+    : [];
   const firstActivity =
     event && Array.isArray(event.activity)
       ? event.activity.find((item): item is Record<string, unknown> => isRecord(item)) ?? null
@@ -966,6 +1031,10 @@ export function extractStoredSignalContractAddresses(payloadText: string): strin
   const firstRawContract = firstActivity && isRecord(firstActivity.rawContract)
     ? firstActivity.rawContract
     : null;
+  const firstActivityTokenTransfers =
+    firstActivity && Array.isArray(firstActivity.tokenTransfers)
+      ? firstActivity.tokenTransfers
+      : [];
   const data = event && isRecord(event.data) ? event.data : null;
   const block = data && isRecord(data.block) ? data.block : null;
   const firstLog =
@@ -978,6 +1047,10 @@ export function extractStoredSignalContractAddresses(payloadText: string): strin
 
   return uniqueSolanaPubkeys([
     ...explicitContractAddresses,
+    ...extractTokenTransferContractAddresses(payloadTokenTransfers),
+    ...extractTokenTransferContractAddresses(eventTokenTransfers),
+    ...extractTokenTransferContractAddresses(activityTokenTransfers),
+    ...extractTokenTransferContractAddresses(firstActivityTokenTransfers),
     rawContract?.address,
     activity?.contractAddress,
     activity?.tokenAddress,
@@ -1193,13 +1266,30 @@ export function extractWebhookTransactionDetailsFromPayload(
   const rawContract = activity && isRecord(activity.rawContract)
     ? activity.rawContract
     : null;
+  const activityTokenTransfers = Array.isArray(activity?.tokenTransfers)
+    ? activity.tokenTransfers.filter((item): item is Record<string, unknown> => isRecord(item))
+    : [];
+  const trackedTokenTransfer =
+    activityTokenTransfers.find(
+      (transfer) => readTokenTransferContractAddress(transfer) === trackedContractAddress,
+    ) ?? null;
+  const trackedTokenTransferContractAddress =
+    readTokenTransferContractAddress(trackedTokenTransfer);
+  const activityTransferContractAddress =
+    trackedTokenTransferContractAddress ??
+    activityTokenTransfers
+      .map((transfer) => readTokenTransferContractAddress(transfer))
+      .find((address) => address != null && address !== SOLANA_USDC_MINT) ??
+    null;
 
   const fromWalletAddress =
     tryNormalizeSolanaPubkey(activity?.fromAddress) ??
+    readTokenTransferWalletAddress(trackedTokenTransfer, 'from') ??
     tryNormalizeSolanaPubkey(from?.address) ??
     null;
   const toWalletAddress =
     tryNormalizeSolanaPubkey(activity?.toAddress) ??
+    readTokenTransferWalletAddress(trackedTokenTransfer, 'to') ??
     tryNormalizeSolanaPubkey(to?.address) ??
     null;
 
@@ -1208,6 +1298,7 @@ export function extractWebhookTransactionDetailsFromPayload(
     tryNormalizeSolanaPubkey(activity?.contractAddress) ??
     tryNormalizeSolanaPubkey(activity?.tokenAddress) ??
     tryNormalizeSolanaPubkey(activity?.mint) ??
+    activityTransferContractAddress ??
     null;
   const logContractAddress =
     tryNormalizeSolanaPubkey(log?.contractAddress) ??
@@ -1216,12 +1307,21 @@ export function extractWebhookTransactionDetailsFromPayload(
     tryNormalizeSolanaPubkey(log?.address) ??
     null;
   const tokenContractAddress =
-    [activityContractAddress, logContractAddress, trackedContractAddress]
+    [trackedTokenTransferContractAddress, activityContractAddress, logContractAddress, trackedContractAddress]
       .find((address) => address != null && address !== SOLANA_USDC_MINT) ??
     trackedContractAddress;
   const isTrackedTokenActivity =
     activityContractAddress === trackedContractAddress ||
-    logContractAddress === trackedContractAddress;
+    logContractAddress === trackedContractAddress ||
+    activityTokenTransfers.some(
+      (transfer) => readTokenTransferContractAddress(transfer) === trackedContractAddress,
+    );
+
+  const trackedTransferAmount =
+    trackedTokenTransfer != null
+      ? toFiniteNumber(trackedTokenTransfer.tokenAmount) ??
+        toFiniteNumber(trackedTokenTransfer.amount)
+      : null;
 
   const amountCandidate =
     toFiniteNumber(activity?.amount) ??
@@ -1229,7 +1329,8 @@ export function extractWebhookTransactionDetailsFromPayload(
     toFiniteNumber(activity?.tokenAmount) ??
     toFiniteNumber(log?.amount) ??
     toFiniteNumber(log?.value) ??
-    toFiniteNumber(log?.tokenAmount);
+    toFiniteNumber(log?.tokenAmount) ??
+    trackedTransferAmount;
 
   const symbolHint = readNonEmptyString(activity?.asset)?.toUpperCase() ?? '';
   const action = isTrackedTokenActivity
