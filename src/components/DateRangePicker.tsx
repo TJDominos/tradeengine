@@ -152,21 +152,26 @@ export default function DateRangePicker({
               }}
             />
           </div>
-          <button
-            type="button"
-            aria-pressed={effectiveDateFilterActive}
-            onClick={onDateFilterToggle}
-            disabled={!dateFilterReady}
-            className={`flex h-10 items-center rounded-md border px-3 text-xs font-semibold uppercase tracking-wider shadow-sm transition ${
-              effectiveDateFilterActive
-                ? 'border-blue-500/30 bg-blue-500/15 text-white hover:bg-blue-500/20'
-                : dateFilterReady
-                  ? 'border-slate-600 bg-slate-950 text-slate-200 hover:border-slate-500 hover:bg-slate-900'
-                  : 'cursor-not-allowed border-slate-800 bg-slate-950 text-slate-500'
-            }`}
-          >
-            {effectiveDateFilterActive ? 'Time Filter Active' : dateFilterReady ? 'Enable Time Filter' : 'Select Date Range'}
-          </button>
+          <div className="flex flex-col gap-1.5">
+            <button
+              type="button"
+              aria-pressed={effectiveDateFilterActive}
+              onClick={onDateFilterToggle}
+              disabled={!dateFilterReady}
+              className={`flex h-10 items-center rounded-md border px-3 text-xs font-semibold uppercase tracking-wider shadow-sm transition ${
+                effectiveDateFilterActive
+                  ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/20'
+                  : dateFilterReady
+                    ? 'border-slate-600 bg-slate-950 text-slate-200 hover:border-slate-500 hover:bg-slate-900'
+                    : 'cursor-not-allowed border-slate-800 bg-slate-950 text-slate-500'
+              }`}
+            >
+              {effectiveDateFilterActive ? 'Time Filter: On' : dateFilterReady ? 'Enable Time Filter' : 'Select Date Range'}
+            </button>
+            <span className={`text-[11px] ${effectiveDateFilterActive ? 'text-emerald-300' : 'text-slate-500'}`}>
+              Default window on load: last 7 days.
+            </span>
+          </div>
         </div>
         {children ? <div className="flex min-w-[300px] flex-1 justify-end">{children}</div> : null}
       </div>

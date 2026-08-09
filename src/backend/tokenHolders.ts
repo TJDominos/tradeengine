@@ -17,6 +17,26 @@ import {
 
 const D1_BATCH_WRITE_CHUNK_SIZE = 100;
 
+const ACCOUNT_LOOKUP_CTE = `account_lookup AS (
+  SELECT
+    wallet_address,
+    CASE
+      WHEN MAX(CASE WHEN type = 'managed' THEN 1 ELSE 0 END) = 1 THEN 'managed'
+      WHEN MAX(CASE WHEN type = 'watch' THEN 1 ELSE 0 END) = 1 THEN 'watch'
+      ELSE NULL
+    END AS account_type,
+    COALESCE(
+      MAX(CASE WHEN type = 'managed' THEN label END),
+      MAX(CASE WHEN type = 'watch' THEN label END)
+    ) AS account_label,
+    MAX(CASE WHEN type = 'managed' THEN 1 ELSE 0 END) AS is_managed,
+    MAX(CASE WHEN type = 'watch' THEN 1 ELSE 0 END) AS is_watch
+  FROM accounts
+  WHERE user_id = ?1
+    AND type IN ('managed', 'watch')
+  GROUP BY wallet_address
+)`;
+
 async function dbRunBatchesInChunks(
   db: D1Database,
   statements: D1PreparedStatement[],
@@ -626,18 +646,17 @@ export async function dbRecomputeTokenHolderAggregate(
 ): Promise<TokenHolderAggregateRecord> {
   const row = await db
     .prepare(
-      `SELECT
+      `WITH ${ACCOUNT_LOOKUP_CTE}
+       SELECT
          COUNT(CASE WHEN tha.amount_holding > 0 THEN 1 END) AS active_holder_count,
-         COUNT(CASE WHEN tha.amount_holding > 0 AND a.type = 'managed' THEN 1 END) AS internal_holder_count,
-         COUNT(CASE WHEN tha.amount_holding > 0 AND a.type = 'watch' THEN 1 END) AS watched_holder_count,
+         COUNT(CASE WHEN tha.amount_holding > 0 AND a.is_managed = 1 THEN 1 END) AS internal_holder_count,
+         COUNT(CASE WHEN tha.amount_holding > 0 AND a.is_managed = 0 AND a.is_watch = 1 THEN 1 END) AS watched_holder_count,
          COALESCE(SUM(CASE WHEN tha.amount_holding > 0 THEN tha.amount_holding ELSE 0 END), 0) AS total_amount_holding,
-         COALESCE(SUM(CASE WHEN tha.amount_holding > 0 AND a.type = 'managed' THEN tha.amount_holding ELSE 0 END), 0) AS internal_amount_holding,
-         COALESCE(SUM(CASE WHEN tha.amount_holding > 0 AND a.type = 'watch' THEN tha.amount_holding ELSE 0 END), 0) AS watched_amount_holding
+         COALESCE(SUM(CASE WHEN tha.amount_holding > 0 AND a.is_managed = 1 THEN tha.amount_holding ELSE 0 END), 0) AS internal_amount_holding,
+         COALESCE(SUM(CASE WHEN tha.amount_holding > 0 AND a.is_managed = 0 AND a.is_watch = 1 THEN tha.amount_holding ELSE 0 END), 0) AS watched_amount_holding
        FROM token_holder_addresses tha
-       LEFT JOIN accounts a
+       LEFT JOIN account_lookup a
          ON a.wallet_address = tha.wallet_address
-        AND a.user_id = ?1
-        AND a.type IN ('managed', 'watch')
        WHERE tha.token_id = ?2`,
     )
     .bind(userId, tokenId)
@@ -875,18 +894,18 @@ export async function dbListOutsideTokenHoldersFromFinal(
   tokenId: number,
   limit: number | null = 200,
 ): Promise<OutsideTokenHolderRecord[]> {
-  const baseQuery = `SELECT
+  const baseQuery = `WITH ${ACCOUNT_LOOKUP_CTE}
+   SELECT
      tha.wallet_address,
      tha.amount_holding,
      tha.source,
       tha.first_seen_at,
      tha.last_seen_at,
-     a.type AS account_type,
-     a.label AS account_label
+     a.account_type,
+     a.account_label
    FROM token_holder_addresses tha
-   LEFT JOIN accounts a
-     ON a.user_id = ?1
-    AND a.wallet_address = tha.wallet_address
+   LEFT JOIN account_lookup a
+     ON a.wallet_address = tha.wallet_address
    WHERE tha.token_id = ?2
      AND tha.amount_holding > 0
    ORDER BY tha.amount_holding DESC, tha.last_seen_at DESC, tha.wallet_address ASC`;
@@ -933,7 +952,7 @@ export async function dbListOutsideTokenHoldersFromStage(
   runId: string,
   limit: number | null = 200,
 ): Promise<OutsideTokenHolderRecord[]> {
-  const baseQuery = `WITH holder_rows AS (
+  const baseQuery = `WITH ${ACCOUNT_LOOKUP_CTE}, holder_rows AS (
      SELECT
        wallet_address,
        SUM(amount_holding) AS amount_holding,
@@ -948,15 +967,14 @@ export async function dbListOutsideTokenHoldersFromStage(
      hr.amount_holding,
      COALESCE(tha.first_seen_at, hr.updated_at) AS first_seen_at,
      hr.updated_at,
-     a.type AS account_type,
-     a.label AS account_label
+     a.account_type,
+     a.account_label
    FROM holder_rows hr
    LEFT JOIN token_holder_addresses tha
      ON tha.token_id = ?2
     AND tha.wallet_address = hr.wallet_address
-   LEFT JOIN accounts a
-     ON a.user_id = ?1
-    AND a.wallet_address = hr.wallet_address
+   LEFT JOIN account_lookup a
+     ON a.wallet_address = hr.wallet_address
    ORDER BY hr.amount_holding DESC, hr.updated_at DESC, hr.wallet_address ASC`;
   const rows = limit == null
     ? await db
@@ -997,6 +1015,16 @@ type OutsideTokenHolderPageOptions = {
   pageSize: number;
   searchTerm?: string | null;
   sort?: OutsideTokenHolderSort;
+  knownChangeToken?: string | null;
+  knownLatestUpdatedAt?: number | null;
+  deltaLimit?: number;
+};
+
+type OutsideTokenHolderPageSnapshot = {
+  totalItems: number;
+  latestUpdatedAt: number | null;
+  updatedAtSum: number;
+  amountChecksum: number;
 };
 
 function normalizeOutsideTokenHolderPageOptions(
@@ -1007,7 +1035,202 @@ function normalizeOutsideTokenHolderPageOptions(
     pageSize: Math.max(1, options?.pageSize ?? 20),
     searchTerm: (options?.searchTerm ?? '').trim().toLowerCase(),
     sort: options?.sort === 'largest' ? 'largest' : 'newest',
+    knownChangeToken: (options?.knownChangeToken ?? '').trim(),
+    knownLatestUpdatedAt:
+      typeof options?.knownLatestUpdatedAt === 'number' && Number.isFinite(options.knownLatestUpdatedAt)
+        ? Math.max(0, Math.floor(options.knownLatestUpdatedAt))
+        : null,
+    deltaLimit: Math.min(Math.max(options?.deltaLimit ?? 50, 1), 100),
   };
+}
+
+function mapOutsideTokenHolderSnapshotRow(row: {
+  total_items: number;
+  latest_updated_at: number | null;
+  updated_at_sum: number | null;
+  amount_checksum: number | null;
+} | null): OutsideTokenHolderPageSnapshot {
+  return {
+    totalItems: row?.total_items ?? 0,
+    latestUpdatedAt: row?.latest_updated_at ?? null,
+    updatedAtSum: row?.updated_at_sum ?? 0,
+    amountChecksum: row?.amount_checksum ?? 0,
+  };
+}
+
+function buildOutsideTokenHolderChangeToken(
+  sourceKey: string,
+  snapshot: OutsideTokenHolderPageSnapshot,
+): string {
+  return [
+    sourceKey,
+    snapshot.totalItems,
+    snapshot.latestUpdatedAt ?? 0,
+    snapshot.updatedAtSum,
+    snapshot.amountChecksum,
+  ].join(':');
+}
+
+async function dbGetOutsideTokenHolderPageSnapshotFromFinal(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  searchTerm: string,
+): Promise<OutsideTokenHolderPageSnapshot> {
+  const likeSearch = `%${searchTerm}%`;
+  const row = await db
+    .prepare(
+      `WITH ${ACCOUNT_LOOKUP_CTE}
+       SELECT
+         COUNT(*) AS total_items,
+         MAX(tha.last_seen_at) AS latest_updated_at,
+         COALESCE(SUM(tha.last_seen_at), 0) AS updated_at_sum,
+         COALESCE(SUM(CAST(ROUND(tha.amount_holding * 1000000) AS INTEGER)), 0) AS amount_checksum
+       FROM token_holder_addresses tha
+       LEFT JOIN account_lookup a
+         ON a.wallet_address = tha.wallet_address
+       WHERE tha.token_id = ?2
+         AND tha.amount_holding > 0
+         AND (a.account_type IS NULL OR a.account_type != 'managed')
+         AND (
+           ?3 = ''
+           OR LOWER(tha.wallet_address) LIKE ?4
+           OR LOWER(COALESCE(a.account_label, '')) LIKE ?4
+         )`,
+    )
+    .bind(userId, tokenId, searchTerm, likeSearch)
+    .first<{
+      total_items: number;
+      latest_updated_at: number | null;
+      updated_at_sum: number | null;
+      amount_checksum: number | null;
+    }>();
+
+  return mapOutsideTokenHolderSnapshotRow(row);
+}
+
+async function dbGetOutsideTokenHolderPageSnapshotFromStage(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  runId: string,
+  searchTerm: string,
+): Promise<OutsideTokenHolderPageSnapshot> {
+  const likeSearch = `%${searchTerm}%`;
+  const row = await db
+    .prepare(
+      `WITH holder_rows AS (
+         SELECT
+           wallet_address,
+           SUM(amount_holding) AS amount_holding,
+           MAX(updated_at) AS updated_at
+         FROM token_holder_sync_stage
+         WHERE token_id = ?2 AND run_id = ?3
+         GROUP BY wallet_address
+         HAVING SUM(amount_holding) > 0
+       ), ${ACCOUNT_LOOKUP_CTE}
+       SELECT
+         COUNT(*) AS total_items,
+         MAX(hr.updated_at) AS latest_updated_at,
+         COALESCE(SUM(hr.updated_at), 0) AS updated_at_sum,
+         COALESCE(SUM(CAST(ROUND(hr.amount_holding * 1000000) AS INTEGER)), 0) AS amount_checksum
+       FROM holder_rows hr
+       LEFT JOIN account_lookup a
+         ON a.wallet_address = hr.wallet_address
+       WHERE
+         (a.account_type IS NULL OR a.account_type != 'managed')
+         AND (
+           ?4 = ''
+           OR LOWER(hr.wallet_address) LIKE ?5
+           OR LOWER(COALESCE(a.account_label, '')) LIKE ?5
+         )`,
+    )
+    .bind(userId, tokenId, runId, searchTerm, likeSearch)
+    .first<{
+      total_items: number;
+      latest_updated_at: number | null;
+      updated_at_sum: number | null;
+      amount_checksum: number | null;
+    }>();
+
+  return mapOutsideTokenHolderSnapshotRow(row);
+}
+
+async function dbListLatestChangedOutsideTokenAddressesFromFinal(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  searchTerm: string,
+  sinceUpdatedAt: number,
+  limit: number,
+): Promise<string[]> {
+  const likeSearch = `%${searchTerm}%`;
+  const rows = await db
+    .prepare(
+      `WITH ${ACCOUNT_LOOKUP_CTE}
+       SELECT tha.wallet_address
+       FROM token_holder_addresses tha
+       LEFT JOIN account_lookup a
+         ON a.wallet_address = tha.wallet_address
+       WHERE tha.token_id = ?2
+         AND tha.amount_holding > 0
+         AND (a.account_type IS NULL OR a.account_type != 'managed')
+         AND tha.last_seen_at >= ?3
+         AND (
+           ?4 = ''
+           OR LOWER(tha.wallet_address) LIKE ?5
+           OR LOWER(COALESCE(a.account_label, '')) LIKE ?5
+         )
+       ORDER BY tha.last_seen_at DESC, tha.amount_holding DESC, tha.wallet_address ASC
+       LIMIT ?6`,
+    )
+    .bind(userId, tokenId, sinceUpdatedAt, searchTerm, likeSearch, limit)
+    .all<{ wallet_address: string }>();
+
+  return rows.results.map((row) => row.wallet_address);
+}
+
+async function dbListLatestChangedOutsideTokenAddressesFromStage(
+  db: D1Database,
+  userId: number,
+  tokenId: number,
+  runId: string,
+  searchTerm: string,
+  sinceUpdatedAt: number,
+  limit: number,
+): Promise<string[]> {
+  const likeSearch = `%${searchTerm}%`;
+  const rows = await db
+    .prepare(
+      `WITH holder_rows AS (
+         SELECT
+           wallet_address,
+           SUM(amount_holding) AS amount_holding,
+           MAX(updated_at) AS updated_at
+         FROM token_holder_sync_stage
+         WHERE token_id = ?2 AND run_id = ?3
+         GROUP BY wallet_address
+         HAVING SUM(amount_holding) > 0
+       ), ${ACCOUNT_LOOKUP_CTE}
+       SELECT hr.wallet_address
+       FROM holder_rows hr
+       LEFT JOIN account_lookup a
+         ON a.wallet_address = hr.wallet_address
+       WHERE
+         (a.account_type IS NULL OR a.account_type != 'managed')
+         AND hr.updated_at >= ?4
+         AND (
+           ?5 = ''
+           OR LOWER(hr.wallet_address) LIKE ?6
+           OR LOWER(COALESCE(a.account_label, '')) LIKE ?6
+         )
+       ORDER BY hr.updated_at DESC, hr.amount_holding DESC, hr.wallet_address ASC
+       LIMIT ?7`,
+    )
+    .bind(userId, tokenId, runId, sinceUpdatedAt, searchTerm, likeSearch, limit)
+    .all<{ wallet_address: string }>();
+
+  return rows.results.map((row) => row.wallet_address);
 }
 
 function buildOutsideTokenHolderOrderBy(
@@ -1054,6 +1277,25 @@ async function dbListOutsideTokenHoldersPageFromFinal(
   const normalized = normalizeOutsideTokenHolderPageOptions(options);
   const offset = (normalized.page - 1) * normalized.pageSize;
   const likeSearch = `%${normalized.searchTerm}%`;
+  const snapshot = await dbGetOutsideTokenHolderPageSnapshotFromFinal(
+    db,
+    userId,
+    tokenId,
+    normalized.searchTerm,
+  );
+  const changeToken = buildOutsideTokenHolderChangeToken('final', snapshot);
+  if (normalized.knownChangeToken && normalized.knownChangeToken === changeToken) {
+    return {
+      items: [],
+      page: normalized.page,
+      pageSize: normalized.pageSize,
+      totalItems: snapshot.totalItems,
+      latestUpdatedAt: snapshot.latestUpdatedAt,
+      changeToken,
+      latestChangedAddresses: [],
+      unchanged: true,
+    };
+  }
   const orderBy = buildOutsideTokenHolderOrderBy(normalized.sort, {
     amountHolding: 'tha.amount_holding',
     firstSeenAt: 'tha.first_seen_at',
@@ -1061,46 +1303,27 @@ async function dbListOutsideTokenHoldersPageFromFinal(
     walletAddress: 'tha.wallet_address',
   });
 
-  const countRow = await db
-    .prepare(
-      `SELECT COUNT(*) AS cnt
-       FROM token_holder_addresses tha
-       LEFT JOIN accounts a
-         ON a.user_id = ?1
-        AND a.wallet_address = tha.wallet_address
-       WHERE tha.token_id = ?2
-         AND tha.amount_holding > 0
-           AND (a.type IS NULL OR a.type != 'managed')
-         AND (
-           ?3 = ''
-           OR LOWER(tha.wallet_address) LIKE ?4
-           OR LOWER(COALESCE(a.label, '')) LIKE ?4
-         )`,
-    )
-    .bind(userId, tokenId, normalized.searchTerm, likeSearch)
-    .first<{ cnt: number }>();
-
   const rows = await db
     .prepare(
-      `SELECT
+      `WITH ${ACCOUNT_LOOKUP_CTE}
+       SELECT
          tha.wallet_address,
          tha.amount_holding,
          tha.source,
          tha.first_seen_at,
          tha.last_seen_at,
-         a.type AS account_type,
-         a.label AS account_label
+         a.account_type,
+         a.account_label
        FROM token_holder_addresses tha
-       LEFT JOIN accounts a
-         ON a.user_id = ?1
-        AND a.wallet_address = tha.wallet_address
+       LEFT JOIN account_lookup a
+         ON a.wallet_address = tha.wallet_address
        WHERE tha.token_id = ?2
          AND tha.amount_holding > 0
-         AND (a.type IS NULL OR a.type != 'managed')
+         AND (a.account_type IS NULL OR a.account_type != 'managed')
          AND (
            ?3 = ''
            OR LOWER(tha.wallet_address) LIKE ?4
-           OR LOWER(COALESCE(a.label, '')) LIKE ?4
+           OR LOWER(COALESCE(a.account_label, '')) LIKE ?4
          )
        ORDER BY ${orderBy}
        LIMIT ?5 OFFSET ?6`,
@@ -1127,7 +1350,21 @@ async function dbListOutsideTokenHoldersPageFromFinal(
     items: rows.results.map(mapOutsideTokenHolderRow),
     page: normalized.page,
     pageSize: normalized.pageSize,
-    totalItems: countRow?.cnt ?? 0,
+    totalItems: snapshot.totalItems,
+    latestUpdatedAt: snapshot.latestUpdatedAt,
+    changeToken,
+    latestChangedAddresses:
+      normalized.knownLatestUpdatedAt != null
+        ? await dbListLatestChangedOutsideTokenAddressesFromFinal(
+            db,
+            userId,
+            tokenId,
+            normalized.searchTerm,
+            normalized.knownLatestUpdatedAt,
+            normalized.deltaLimit,
+          )
+        : [],
+    unchanged: false,
   };
 }
 
@@ -1141,40 +1378,32 @@ async function dbListOutsideTokenHoldersPageFromStage(
   const normalized = normalizeOutsideTokenHolderPageOptions(options);
   const offset = (normalized.page - 1) * normalized.pageSize;
   const likeSearch = `%${normalized.searchTerm}%`;
+  const snapshot = await dbGetOutsideTokenHolderPageSnapshotFromStage(
+    db,
+    userId,
+    tokenId,
+    runId,
+    normalized.searchTerm,
+  );
+  const changeToken = buildOutsideTokenHolderChangeToken(`stage:${runId}`, snapshot);
+  if (normalized.knownChangeToken && normalized.knownChangeToken === changeToken) {
+    return {
+      items: [],
+      page: normalized.page,
+      pageSize: normalized.pageSize,
+      totalItems: snapshot.totalItems,
+      latestUpdatedAt: snapshot.latestUpdatedAt,
+      changeToken,
+      latestChangedAddresses: [],
+      unchanged: true,
+    };
+  }
   const orderBy = buildOutsideTokenHolderOrderBy(normalized.sort, {
     amountHolding: 'hr.amount_holding',
     firstSeenAt: 'first_seen_at',
     lastSeenAt: 'last_seen_at',
     walletAddress: 'hr.wallet_address',
   });
-
-  const countRow = await db
-    .prepare(
-      `WITH holder_rows AS (
-         SELECT
-           wallet_address,
-           SUM(amount_holding) AS amount_holding,
-           MAX(updated_at) AS updated_at
-         FROM token_holder_sync_stage
-         WHERE token_id = ?2 AND run_id = ?3
-         GROUP BY wallet_address
-         HAVING SUM(amount_holding) > 0
-       )
-       SELECT COUNT(*) AS cnt
-       FROM holder_rows hr
-       LEFT JOIN accounts a
-         ON a.user_id = ?1
-        AND a.wallet_address = hr.wallet_address
-       WHERE
-         (a.type IS NULL OR a.type != 'managed')
-         AND (
-           ?4 = ''
-           OR LOWER(hr.wallet_address) LIKE ?5
-           OR LOWER(COALESCE(a.label, '')) LIKE ?5
-         )`,
-    )
-    .bind(userId, tokenId, runId, normalized.searchTerm, likeSearch)
-    .first<{ cnt: number }>();
 
   const rows = await db
     .prepare(
@@ -1187,28 +1416,27 @@ async function dbListOutsideTokenHoldersPageFromStage(
          WHERE token_id = ?2 AND run_id = ?3
          GROUP BY wallet_address
          HAVING SUM(amount_holding) > 0
-       )
+       ), ${ACCOUNT_LOOKUP_CTE}
        SELECT
          hr.wallet_address,
          hr.amount_holding,
          'rpc_owner_prefix_shards' AS source,
          COALESCE(tha.first_seen_at, hr.updated_at) AS first_seen_at,
          hr.updated_at AS last_seen_at,
-         a.type AS account_type,
-         a.label AS account_label
+         a.account_type,
+         a.account_label
        FROM holder_rows hr
        LEFT JOIN token_holder_addresses tha
          ON tha.token_id = ?2
         AND tha.wallet_address = hr.wallet_address
-       LEFT JOIN accounts a
-         ON a.user_id = ?1
-        AND a.wallet_address = hr.wallet_address
+       LEFT JOIN account_lookup a
+         ON a.wallet_address = hr.wallet_address
        WHERE
-         (a.type IS NULL OR a.type != 'managed')
+         (a.account_type IS NULL OR a.account_type != 'managed')
          AND (
            ?4 = ''
            OR LOWER(hr.wallet_address) LIKE ?5
-           OR LOWER(COALESCE(a.label, '')) LIKE ?5
+           OR LOWER(COALESCE(a.account_label, '')) LIKE ?5
          )
        ORDER BY ${orderBy}
        LIMIT ?6 OFFSET ?7`,
@@ -1236,7 +1464,22 @@ async function dbListOutsideTokenHoldersPageFromStage(
     items: rows.results.map(mapOutsideTokenHolderRow),
     page: normalized.page,
     pageSize: normalized.pageSize,
-    totalItems: countRow?.cnt ?? 0,
+    totalItems: snapshot.totalItems,
+    latestUpdatedAt: snapshot.latestUpdatedAt,
+    changeToken,
+    latestChangedAddresses:
+      normalized.knownLatestUpdatedAt != null
+        ? await dbListLatestChangedOutsideTokenAddressesFromStage(
+            db,
+            userId,
+            tokenId,
+            runId,
+            normalized.searchTerm,
+            normalized.knownLatestUpdatedAt,
+            normalized.deltaLimit,
+          )
+        : [],
+    unchanged: false,
   };
 }
 
@@ -1258,7 +1501,7 @@ export async function dbListOutsideTokenHoldersPage(
       syncState.runId,
       options,
     );
-    if (stagePage.totalItems > 0) {
+    if (stagePage.totalItems > 0 || stagePage.unchanged) {
       return stagePage;
     }
   }

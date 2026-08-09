@@ -24,7 +24,6 @@ import AuthPanel from './components/AuthPanel';
 import DashboardLogsSection from './components/DashboardLogsSection';
 import PageTabs from './components/PageTabs';
 import {
-  CONTRACT_ADDRESS,
   ITEMS_PER_PAGE,
   MAX_RECOVERY_PHRASE_WORD_COUNT,
   RECOVERY_PHRASE_WORD_COUNTS,
@@ -68,6 +67,8 @@ import DashboardPage from './pages/DashboardPage';
 import HistoricalSetupsPage from './pages/HistoricalSetupsPage';
 import TradingSetupPage from './pages/TradingSetupPage';
 
+type InternalAccountSort = 'newest' | 'usdc' | 'sol' | 'token';
+
 function createEmptyRecoveryPhrase(): string[] {
   return Array(MAX_RECOVERY_PHRASE_WORD_COUNT).fill('');
 }
@@ -85,6 +86,7 @@ export default function App() {
   const [dateRange, setDateRange] = React.useState<DateRangeState>(() => createDefaultDateRange());
   const [dateFilterActive, setDateFilterActive] = React.useState(true);
   const [accountSearchTerm, setAccountSearchTerm] = React.useState('');
+  const [internalSort, setInternalSort] = React.useState<InternalAccountSort>('newest');
   const [internalPage, setInternalPage] = React.useState(1);
   const [outsiderPage, setOutsiderPage] = React.useState(1);
   const [dashboardLogTab, setDashboardLogTab] = React.useState<DashboardLogTab>('transaction');
@@ -98,6 +100,10 @@ export default function App() {
     page: 1,
     pageSize: ITEMS_PER_PAGE,
     totalItems: 0,
+    latestUpdatedAt: null,
+    changeToken: '',
+    latestChangedAddresses: [],
+    unchanged: false,
   });
   const [outsideHolderPageLoading, setOutsideHolderPageLoading] = React.useState(false);
 
@@ -129,6 +135,7 @@ export default function App() {
   const [walletBalances, setWalletBalances] = React.useState<Record<string, WalletBalance>>({});
   const [walletBalanceErrors, setWalletBalanceErrors] = React.useState<Record<string, string>>({});
   const [walletBalancePending, setWalletBalancePending] = React.useState<Record<string, boolean>>({});
+  const [managedAccountStatusAddress, setManagedAccountStatusAddress] = React.useState<string | null>(null);
 
   const [isAdminModalOpen, setIsAdminModalOpen] = React.useState(false);
   const [adminTab, setAdminTab] = React.useState<'password' | 'import' | 'list'>('password');
@@ -157,11 +164,36 @@ export default function App() {
   const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
   const lastWalletBalanceRefreshStatusKeyRef = React.useRef<string | null>(null);
   const dashboardStatePollInFlightRef = React.useRef(false);
+  const outsideHolderPageRef = React.useRef(outsideHolderPage);
+  const refreshWalletBalancesRef = React.useRef<(addresses?: string[]) => Promise<void>>(async () => {});
+  const walletBalancesRef = React.useRef(walletBalances);
+  const walletBalancePendingRef = React.useRef(walletBalancePending);
+  const outsideHolderQueryMetaRef = React.useRef<{
+    signature: string;
+    changeToken: string;
+    latestUpdatedAt: number | null;
+  }>({
+    signature: '',
+    changeToken: '',
+    latestUpdatedAt: null,
+  });
 
   const dateFilterReady = dateRange.from !== '' && dateRange.to !== '';
   const hasDateRange = dateFilterActive && dateFilterReady;
   const marketRefreshRunning = engineState?.marketRefreshStatus?.status === 'running';
   const isRefreshPending = submitting === 'refresh' || marketRefreshRunning;
+
+  useEffect(() => {
+    outsideHolderPageRef.current = outsideHolderPage;
+  }, [outsideHolderPage]);
+
+  useEffect(() => {
+    walletBalancesRef.current = walletBalances;
+  }, [walletBalances]);
+
+  useEffect(() => {
+    walletBalancePendingRef.current = walletBalancePending;
+  }, [walletBalancePending]);
 
   useEffect(() => {
     const status = engineState?.marketRefreshStatus;
@@ -233,34 +265,109 @@ export default function App() {
 
   const loadOutsideHolderPage = React.useCallback(async () => {
     if (!auth?.authenticated || !activeBaseTokenAddress) {
+      outsideHolderQueryMetaRef.current = {
+        signature: '',
+        changeToken: '',
+        latestUpdatedAt: null,
+      };
       setOutsideHolderPage({
         items: [],
         page: 1,
         pageSize: ITEMS_PER_PAGE,
         totalItems: 0,
+        latestUpdatedAt: null,
+        changeToken: '',
+        latestChangedAddresses: [],
+        unchanged: false,
       });
       return;
     }
 
     setOutsideHolderPageLoading(true);
     try {
+      const trimmedSearch = accountSearchTerm.trim();
+      const querySignature = [
+        activeBaseTokenAddress,
+        outsiderPage,
+        ITEMS_PER_PAGE,
+        trimmedSearch.toLowerCase(),
+        outsideHolderSort,
+      ].join('|');
+      const previousMeta = outsideHolderQueryMetaRef.current;
+      const canProbeIncrementally = previousMeta.signature === querySignature && previousMeta.changeToken !== '';
       const params = new URLSearchParams({
         page: String(outsiderPage),
         pageSize: String(ITEMS_PER_PAGE),
       });
-      const trimmedSearch = accountSearchTerm.trim();
       if (trimmedSearch) {
         params.set('search', trimmedSearch);
       }
       params.set('sort', outsideHolderSort);
+      if (canProbeIncrementally) {
+        params.set('changeToken', previousMeta.changeToken);
+        if (previousMeta.latestUpdatedAt != null) {
+          params.set('latestUpdatedAt', String(previousMeta.latestUpdatedAt));
+        }
+      }
       const result = await api<OutsideTokenHolderPage>(`/api/token-holders?${params.toString()}`);
+
+      outsideHolderQueryMetaRef.current = {
+        signature: querySignature,
+        changeToken: result.changeToken,
+        latestUpdatedAt: result.latestUpdatedAt,
+      };
+
+      if (result.unchanged) {
+        const currentPage = outsideHolderPageRef.current;
+        const missingBalanceAddresses = currentPage.items
+          .map((holder) => holder.address)
+          .filter((address) => !walletBalancesRef.current[address] && !walletBalancePendingRef.current[address]);
+        if (missingBalanceAddresses.length > 0) {
+          void refreshWalletBalancesRef.current(missingBalanceAddresses);
+        }
+        return;
+      }
+
+      const previousAddresses = new Set(
+        canProbeIncrementally ? outsideHolderPageRef.current.items.map((holder) => holder.address) : [],
+      );
+      const addedAddresses = result.items
+        .map((holder) => holder.address)
+        .filter((address) => !previousAddresses.has(address));
+      const missingBalanceAddresses = result.items
+        .map((holder) => holder.address)
+        .filter((address) => !walletBalancesRef.current[address] && !walletBalancePendingRef.current[address]);
+      const addressesToRefresh = Array.from(
+        new Set(
+          canProbeIncrementally
+            ? [
+                ...result.latestChangedAddresses,
+                ...addedAddresses,
+                ...missingBalanceAddresses,
+              ]
+            : result.items.map((holder) => holder.address),
+        ),
+      );
+
       setOutsideHolderPage(result);
+      if (addressesToRefresh.length > 0) {
+        void refreshWalletBalancesRef.current(addressesToRefresh);
+      }
     } catch (err: unknown) {
+      outsideHolderQueryMetaRef.current = {
+        signature: '',
+        changeToken: '',
+        latestUpdatedAt: null,
+      };
       setOutsideHolderPage({
         items: [],
         page: outsiderPage,
         pageSize: ITEMS_PER_PAGE,
         totalItems: 0,
+        latestUpdatedAt: null,
+        changeToken: '',
+        latestChangedAddresses: [],
+        unchanged: false,
       });
       setError(err instanceof Error ? err.message : 'Failed to load outside holders');
     } finally {
@@ -393,6 +500,8 @@ export default function App() {
     });
   }, [auth?.authenticated, engineState]);
 
+  refreshWalletBalancesRef.current = refreshWalletBalances;
+
   const refreshInternalWalletBalances = React.useCallback(async () => {
     if (!engineState) {
       return;
@@ -417,13 +526,6 @@ export default function App() {
   }, [auth?.authenticated, engineState, activeTab, isAdminModalOpen, refreshWalletBalances]);
 
   useEffect(() => {
-    if (!auth?.authenticated || activeTab !== 'accounts' || outsideHolderPage.items.length === 0) {
-      return;
-    }
-    void refreshOutsideWalletBalances();
-  }, [auth?.authenticated, activeTab, outsideHolderPage.items, refreshOutsideWalletBalances]);
-
-  useEffect(() => {
     if (!auth?.authenticated) {
       return;
     }
@@ -437,10 +539,7 @@ export default function App() {
     }
     lastWalletBalanceRefreshStatusKeyRef.current = statusKey;
     void refreshWalletBalances();
-    if (activeTab === 'accounts') {
-      void refreshOutsideWalletBalances();
-    }
-  }, [auth?.authenticated, activeTab, engineState?.marketRefreshStatus, refreshOutsideWalletBalances, refreshWalletBalances]);
+  }, [auth?.authenticated, engineState?.marketRefreshStatus, refreshWalletBalances]);
 
   const submitWithFeedback = async (name: string, action: () => Promise<void>) => {
     if (activeSubmissionRef.current) {
@@ -492,6 +591,11 @@ export default function App() {
       setEngineState(null);
       setStrategyDraft(null);
       setWalletBalances({});
+      outsideHolderQueryMetaRef.current = {
+        signature: '',
+        changeToken: '',
+        latestUpdatedAt: null,
+      };
       setNotice('Logged out.');
       await refresh();
     });
@@ -1094,6 +1198,45 @@ export default function App() {
     }
   };
 
+  const handleManagedAccountTradingToggle = async (address: string, isActive: boolean) => {
+    if (managedAccountStatusAddress) {
+      return;
+    }
+
+    setManagedAccountStatusAddress(address);
+    setError('');
+    setNotice('');
+    try {
+      const response = await fetch(`/api/admin/private-keys/${address}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          isActive,
+          adminPassword: adminImportForm.password || undefined,
+        }),
+      });
+      const data = (await response.json()) as { error?: string; message?: string };
+      if (!response.ok) {
+        const message = data.error || 'Failed to update managed wallet trading status';
+        setError(message);
+        setAdminMsg({ type: 'error', text: message });
+        return;
+      }
+
+      await loadState();
+      const message = data.message || `${isActive ? 'Enabled' : 'Disabled'} trading successfully`;
+      setNotice(message);
+      setAdminMsg({ type: 'success', text: message });
+    } catch {
+      const message = 'Network error';
+      setError(message);
+      setAdminMsg({ type: 'error', text: message });
+    } finally {
+      setManagedAccountStatusAddress(null);
+    }
+  };
+
   const previewDerivedAccounts = React.useCallback(async () => {
     const phraseWords = adminImportForm.recoveryPhrase
       .slice(0, adminImportForm.wordCount)
@@ -1156,7 +1299,7 @@ export default function App() {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-slate-950 text-slate-400">
         <Server className="animate-pulse" size={32} />
-        <p className="font-mono text-sm uppercase tracking-wider">Initializing WLT Core Engine...</p>
+        <p className="font-mono text-sm uppercase tracking-wider">Initializing Execution Engine...</p>
       </div>
     );
   }
@@ -1183,11 +1326,51 @@ export default function App() {
 
   const internalSummary = summarizeAccounts(engineState.internalAccs, walletBalances);
 
+  const normalizedAccountSearchTerm = accountSearchTerm.toLowerCase();
   const filteredInternal = engineState.internalAccs.filter(
     (account) =>
-      account.address.toLowerCase().includes(accountSearchTerm.toLowerCase()) ||
-      account.label.toLowerCase().includes(accountSearchTerm.toLowerCase()),
+      account.address.toLowerCase().includes(normalizedAccountSearchTerm) ||
+      account.label.toLowerCase().includes(normalizedAccountSearchTerm),
   );
+  filteredInternal.sort((left, right) => {
+    const byNewest = () => {
+      if (left.isActive !== right.isActive) {
+        return left.isActive ? -1 : 1;
+      }
+      const createdAtDelta = normalizeTimestampMs(right.createdAt) - normalizeTimestampMs(left.createdAt);
+      if (createdAtDelta !== 0) {
+        return createdAtDelta;
+      }
+      return right.id - left.id;
+    };
+
+    const compareNumeric = (leftValue: number, rightValue: number) => {
+      if (rightValue !== leftValue) {
+        return rightValue - leftValue;
+      }
+      return byNewest();
+    };
+
+    if (internalSort === 'usdc') {
+      return compareNumeric(
+        parseAmount(walletBalances[left.address]?.usdc),
+        parseAmount(walletBalances[right.address]?.usdc),
+      );
+    }
+    if (internalSort === 'sol') {
+      return compareNumeric(
+        parseAmount(walletBalances[left.address]?.sol),
+        parseAmount(walletBalances[right.address]?.sol),
+      );
+    }
+    if (internalSort === 'token') {
+      return compareNumeric(
+        activeBaseTokenAddress ? findWalletTokenAmount(walletBalances[left.address], activeBaseTokenAddress) : 0,
+        activeBaseTokenAddress ? findWalletTokenAmount(walletBalances[right.address], activeBaseTokenAddress) : 0,
+      );
+    }
+    return byNewest();
+  });
   const internalCurrentSlice = filteredInternal.slice(
     (internalPage - 1) * ITEMS_PER_PAGE,
     internalPage * ITEMS_PER_PAGE,
@@ -1320,7 +1503,7 @@ export default function App() {
       (!activeQuoteTokenAddress || token.quoteTokenAddress === activeQuoteTokenAddress),
   );
   const activeTokenSymbol =
-    activeTrackedToken?.symbol ?? dashboardSnapshot?.tokenSymbol ?? engineState.marketSnapshot?.tokenSymbol ?? 'WLT';
+    activeTrackedToken?.symbol ?? dashboardSnapshot?.tokenSymbol ?? engineState.marketSnapshot?.tokenSymbol ?? 'Token';
   const activeTokenName =
     dashboardSnapshot?.tokenName ?? engineState.marketSnapshot?.tokenName ?? activeTrackedToken?.name ?? activeTokenSymbol;
   const marketSnapshotSubtitle = dashboardSnapshot?.fetchedAt
@@ -1425,6 +1608,7 @@ export default function App() {
       onUseToken={(contractAddress, quoteTokenAddress) => void handleUseToken(contractAddress, quoteTokenAddress)}
       totalInternalTokenAmount={totalInternalTokenAmount}
       managedAccountsCount={engineState.stats.managedAccounts}
+      internalAccountsCount={engineState.internalAccs.length}
       profitUsdc={engineState.profitUsdc}
       dashboardSnapshot={dashboardSnapshot}
       tokenHolderAggregate={engineState.tokenHolderAggregate}
@@ -1457,6 +1641,11 @@ export default function App() {
       internalSummary={internalSummary}
       filteredInternal={filteredInternal}
       internalCurrentSlice={internalCurrentSlice}
+      internalSort={internalSort}
+      onInternalSortChange={(value) => {
+        setInternalSort(value);
+        setInternalPage(1);
+      }}
       outsideHolderRows={outsideHolderPage.items}
       outsideHolderRowsTotal={outsideHolderPage.totalItems}
       outsideHolderSort={outsideHolderSort}
@@ -1481,6 +1670,8 @@ export default function App() {
       onOpenAdmin={() => setIsAdminModalOpen(true)}
       onRefreshInternalBalances={() => void refreshInternalWalletBalances()}
       onRefreshOutsideBalances={() => void refreshOutsideWalletBalances()}
+      onToggleInternalAccountTrading={(account) => void handleManagedAccountTradingToggle(account.address, !account.isActive)}
+      managedAccountStatusUpdatingAddress={managedAccountStatusAddress}
       itemsPerPage={ITEMS_PER_PAGE}
     />
   );
@@ -1516,7 +1707,6 @@ export default function App() {
   return (
     <div className="flex min-h-screen flex-col bg-slate-950 p-4 font-sans text-slate-200 md:p-6">
       <AppHeader
-        contractAddress={activeBaseTokenAddress || CONTRACT_ADDRESS}
         lastUpdated={lastUpdated}
         isTradingActive={isTradingActive}
         isRefreshing={isRefreshPending}
@@ -1560,6 +1750,8 @@ export default function App() {
         walletBalances={walletBalances}
         onPasswordChange={() => void handleAdminPasswordChange()}
         onImport={() => void handleAdminImport()}
+        onToggleActive={(address, isActive) => void handleManagedAccountTradingToggle(address, isActive)}
+        statusUpdatingAddress={managedAccountStatusAddress}
         onDelete={(address) => void handleAdminDelete(address)}
       />
     </div>

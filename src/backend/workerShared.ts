@@ -76,6 +76,7 @@ export interface AccountRecord {
   capabilityBaseMint?: string | null;
   capabilityQuoteMint?: string | null;
   createdAt: number;
+  isActive: boolean;
 }
 export interface AuditLog {
   id: number;
@@ -162,6 +163,10 @@ export interface OutsideTokenHolderPageRecord {
   page: number;
   pageSize: number;
   totalItems: number;
+  latestUpdatedAt: number | null;
+  changeToken: string;
+  latestChangedAddresses: string[];
+  unchanged: boolean;
 }
 export type OutsideTokenHolderSort = 'newest' | 'largest';
 export type TokenHolderSyncStatus = 'idle' | 'running' | 'completed' | 'failed';

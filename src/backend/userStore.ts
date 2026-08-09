@@ -39,7 +39,6 @@ const ACCOUNT_TRADE_COOLDOWN_MS = 45_000;
 const ACCOUNT_MIN_SOL_RESERVE = 0.01;
 
 export interface AvailableAccountRecord extends AccountRecord {
-  isActive: boolean;
   lastTradedAt: number | null;
   walletBalance: WalletBalanceResponse;
 }
@@ -53,6 +52,7 @@ function mapAccountRow(
     capability_base_mint?: string | null;
     capability_quote_mint?: string | null;
     created_at: number;
+    is_active?: number | null;
   },
 ): AccountRecord {
   return {
@@ -63,6 +63,7 @@ function mapAccountRow(
     capabilityBaseMint: row.capability_base_mint ?? null,
     capabilityQuoteMint: row.capability_quote_mint ?? null,
     createdAt: row.created_at,
+    isActive: row.is_active !== 0,
   };
 }
 
@@ -464,7 +465,8 @@ export async function dbListAccounts(
 ): Promise<AccountRecord[]> {
   const rows = await db
     .prepare(
-      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at
+      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+              COALESCE(is_active, 1) AS is_active
        FROM accounts
        WHERE user_id = ?1 AND type = ?2
        ORDER BY created_at DESC, id DESC`,
@@ -478,6 +480,7 @@ export async function dbListAccounts(
       capability_base_mint: string | null;
       capability_quote_mint: string | null;
       created_at: number;
+      is_active: number;
     }>();
   return rows.results.map((row) => mapAccountRow(row));
 }
@@ -485,10 +488,19 @@ export async function dbListAccounts(
 export async function dbListManagedAccountAddresses(
   db: D1Database,
   userId: number,
+  options?: {
+    activeOnly?: boolean;
+  },
 ): Promise<string[]> {
+  const activeOnlyClause = options?.activeOnly
+    ? " AND COALESCE(is_active, 1) = 1"
+    : '';
   const rows = await db
     .prepare(
-      "SELECT wallet_address FROM accounts WHERE user_id = ?1 AND type = 'managed' ORDER BY created_at DESC, id DESC",
+      `SELECT wallet_address
+       FROM accounts
+       WHERE user_id = ?1 AND type = 'managed'${activeOnlyClause}
+       ORDER BY created_at DESC, id DESC`,
     )
     .bind(userId)
     .all<{ wallet_address: string }>();
@@ -502,7 +514,8 @@ export async function dbGetManagedAccountById(
 ): Promise<AccountRecord> {
   const row = await db
     .prepare(
-      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at
+      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+              COALESCE(is_active, 1) AS is_active
        FROM accounts
        WHERE user_id = ?1 AND id = ?2 AND type = 'managed' AND COALESCE(is_active, 1) = 1
        LIMIT 1`,
@@ -516,6 +529,7 @@ export async function dbGetManagedAccountById(
       capability_base_mint: string | null;
       capability_quote_mint: string | null;
       created_at: number;
+      is_active: number;
     }>();
   if (!row) {
     throw new ApiError(404, `Managed account ${accountId} was not found for the current user`);
@@ -531,7 +545,8 @@ export async function dbGetManagedAccountByAddress(
   const normalizedAddress = normalizePubkey(walletAddress);
   const row = await db
     .prepare(
-      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at
+      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+              COALESCE(is_active, 1) AS is_active
        FROM accounts
        WHERE user_id = ?1 AND wallet_address = ?2 AND type = 'managed' AND COALESCE(is_active, 1) = 1
        LIMIT 1`,
@@ -545,11 +560,53 @@ export async function dbGetManagedAccountByAddress(
       capability_base_mint: string | null;
       capability_quote_mint: string | null;
       created_at: number;
+      is_active: number;
     }>();
   if (!row) {
     throw new ApiError(404, `Managed wallet ${normalizedAddress} was not found for the current user`);
   }
   return mapAccountRow(row);
+}
+
+export async function dbSetManagedAccountActiveState(
+  db: D1Database,
+  userId: number,
+  addressInput: string,
+  isActive: boolean,
+): Promise<AccountRecord> {
+  const normalizedAddress = normalizePubkey(addressInput);
+  const row = await db
+    .prepare(
+      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+              COALESCE(is_active, 1) AS is_active
+       FROM accounts
+       WHERE user_id = ?1 AND wallet_address = ?2 AND type = 'managed'
+       LIMIT 1`,
+    )
+    .bind(userId, normalizedAddress)
+    .first<{
+      id: number;
+      label: string;
+      wallet_address: string;
+      type: string;
+      capability_base_mint: string | null;
+      capability_quote_mint: string | null;
+      created_at: number;
+      is_active: number;
+    }>();
+  if (!row) {
+    throw new ApiError(404, `Managed wallet ${normalizedAddress} was not found for the current user`);
+  }
+
+  await db
+    .prepare('UPDATE accounts SET is_active = ?1 WHERE id = ?2')
+    .bind(isActive ? 1 : 0, row.id)
+    .run();
+
+  return mapAccountRow({
+    ...row,
+    is_active: isActive ? 1 : 0,
+  });
 }
 
 export async function dbLoadManagedKeypairBytesByAccountId(
@@ -671,7 +728,6 @@ export async function getAvailableAccount(
 
     return {
       ...mapAccountRow(candidate),
-      isActive: candidate.is_active !== 0,
       lastTradedAt: lastTradedAtMs,
       walletBalance,
     };
@@ -715,6 +771,7 @@ export async function dbImportWatchAccount(
     address,
     type: 'watch',
     createdAt,
+    isActive: true,
   };
 }
 
@@ -773,6 +830,7 @@ export async function dbImportManagedKeyBytes(
     address,
     type: 'managed',
     createdAt,
+    isActive: true,
   };
 }
 

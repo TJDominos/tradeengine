@@ -1,7 +1,6 @@
 import { Activity, Clock, Lock, RefreshCw, Shield } from 'lucide-react';
 
 type AppHeaderProps = {
-  contractAddress: string;
   lastUpdated: string;
   isTradingActive: boolean;
   isRefreshing: boolean;
@@ -12,7 +11,6 @@ type AppHeaderProps = {
 };
 
 export default function AppHeader({
-  contractAddress,
   lastUpdated,
   isTradingActive,
   isRefreshing,
@@ -25,13 +23,9 @@ export default function AppHeader({
     <div className="mb-6 flex flex-col items-start justify-between gap-4 md:flex-row md:items-center">
       <div>
         <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight text-white">
-          <Activity className="text-blue-500" /> WLT Execution Engine
+          <Activity className="text-blue-500" /> Execution Engine
         </h1>
         <p className="mt-1.5 flex items-center gap-2 text-sm text-slate-400">
-          <span className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 font-mono text-blue-400">
-            {contractAddress || 'Not Configured'}
-          </span>
-          <span className="text-slate-700">|</span>
           <Clock size={14} /> Time Updated: {lastUpdated}
         </p>
       </div>

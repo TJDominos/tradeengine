@@ -1287,13 +1287,13 @@ export function extractWebhookTransactionDetailsFromPayload(
     null;
 
   const fromWalletAddress =
-    tryNormalizeSolanaPubkey(activity?.fromAddress) ??
     readTokenTransferWalletAddress(trackedTokenTransfer, 'from') ??
+    tryNormalizeSolanaPubkey(activity?.fromAddress) ??
     tryNormalizeSolanaPubkey(from?.address) ??
     null;
   const toWalletAddress =
-    tryNormalizeSolanaPubkey(activity?.toAddress) ??
     readTokenTransferWalletAddress(trackedTokenTransfer, 'to') ??
+    tryNormalizeSolanaPubkey(activity?.toAddress) ??
     tryNormalizeSolanaPubkey(to?.address) ??
     null;
 

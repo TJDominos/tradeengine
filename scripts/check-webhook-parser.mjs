@@ -95,6 +95,26 @@ const alchemyActivityPayload = {
   },
 };
 
+const alchemyActivityPayloadWithAtaAddresses = JSON.stringify({
+  activity: {
+    fromAddress: 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+    toAddress: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
+    rawContract: {
+      address: baseTokenAddress,
+    },
+    tokenTransfers: [
+      {
+        mint: baseTokenAddress,
+        sender: 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+        receiver: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
+        sourceOwner: traderAddress,
+        destinationOwner: ammPoolAddress,
+        tokenAmount: 7.25,
+      },
+    ],
+  },
+});
+
 assert.equal(analyzeTradeDirection(buyPayload, config), 'BUY');
 assert.equal(analyzeTradeDirection(sellPayload, config), 'SELL');
 assert.equal(analyzeTradeDirection(sellPayloadWithTokenAccounts, config), 'SELL');
@@ -129,5 +149,15 @@ assert.equal(transferOnlyDetails.primaryWalletAddress, traderAddress);
 assert.equal(transferOnlyDetails.tokenAmount, 12.5);
 assert.equal(transferOnlyDetails.source, 'webhook');
 assert.equal(transferOnlyDetails.detailSource, 'payload');
+
+const ataOwnerDetails = extractWebhookTransactionDetailsFromPayload(
+  alchemyActivityPayloadWithAtaAddresses,
+  baseTokenAddress,
+);
+
+assert.equal(ataOwnerDetails.fromWalletAddress, traderAddress);
+assert.equal(ataOwnerDetails.toWalletAddress, ammPoolAddress);
+assert.equal(ataOwnerDetails.primaryWalletAddress, traderAddress);
+assert.equal(ataOwnerDetails.tokenAmount, 7.25);
 
 console.log('check-webhook-parser: OK');

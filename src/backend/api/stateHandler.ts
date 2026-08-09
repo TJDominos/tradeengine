@@ -320,6 +320,8 @@ export async function handleStateRoutes(
       };
     }
 
+    const enabledManagedAccounts = internalAccs.filter((account) => account.isActive);
+
     return jsonResponse({
       auth: { username: user.username, role: user.role },
       settings,
@@ -342,7 +344,7 @@ export async function handleStateRoutes(
       marketSnapshotHistory: [],
       profitUsdc,
       stats: {
-        managedAccounts: internalAccs.length,
+        managedAccounts: enabledManagedAccounts.length,
         tradeExecutionEnabled: false,
       },
       system: {
@@ -359,7 +361,16 @@ export async function handleStateRoutes(
     const normalizedContractAddress =
       settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
     if (!normalizedContractAddress) {
-      return jsonResponse({ items: [], page: 1, pageSize: 20, totalItems: 0 });
+      return jsonResponse({
+        items: [],
+        page: 1,
+        pageSize: 20,
+        totalItems: 0,
+        latestUpdatedAt: null,
+        changeToken: '',
+        latestChangedAddresses: [],
+        unchanged: false,
+      });
     }
 
     const tokenId = await dbResolveTradableTokenId(
@@ -367,13 +378,27 @@ export async function handleStateRoutes(
       normalizedContractAddress,
     );
     if (!tokenId) {
-      return jsonResponse({ items: [], page: 1, pageSize: 20, totalItems: 0 });
+      return jsonResponse({
+        items: [],
+        page: 1,
+        pageSize: 20,
+        totalItems: 0,
+        latestUpdatedAt: null,
+        changeToken: '',
+        latestChangedAddresses: [],
+        unchanged: false,
+      });
     }
 
     const page = Number.parseInt(url.searchParams.get('page') ?? '1', 10);
     const pageSize = Number.parseInt(url.searchParams.get('pageSize') ?? '20', 10);
     const searchTerm = url.searchParams.get('search') ?? '';
     const sortParam = url.searchParams.get('sort');
+    const knownChangeToken = url.searchParams.get('changeToken') ?? '';
+    const knownLatestUpdatedAtParam = Number.parseInt(
+      url.searchParams.get('latestUpdatedAt') ?? '',
+      10,
+    );
     const sort: OutsideTokenHolderSort = sortParam === 'largest' ? 'largest' : 'newest';
 
     const result = await dbListOutsideTokenHoldersPage(
@@ -385,6 +410,10 @@ export async function handleStateRoutes(
         pageSize: Math.min(Math.max(Number.isFinite(pageSize) ? pageSize : 20, 1), 20),
         searchTerm,
         sort,
+        knownChangeToken,
+        knownLatestUpdatedAt: Number.isFinite(knownLatestUpdatedAtParam)
+          ? knownLatestUpdatedAtParam
+          : null,
       },
     );
 

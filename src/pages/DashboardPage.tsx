@@ -42,6 +42,7 @@ type DashboardPageProps = {
   onUseToken: (contractAddress: string, quoteTokenAddress: string) => void;
   totalInternalTokenAmount: number;
   managedAccountsCount: number;
+  internalAccountsCount: number;
   profitUsdc: number;
   dashboardSnapshot: TokenMarketSnapshot | null;
   tokenHolderAggregate: TokenHolderAggregate | null;
@@ -69,6 +70,7 @@ export default function DashboardPage({
   onUseToken,
   totalInternalTokenAmount,
   managedAccountsCount,
+  internalAccountsCount,
   profitUsdc,
   dashboardSnapshot,
   tokenHolderAggregate,
@@ -110,9 +112,9 @@ export default function DashboardPage({
   const internalHolderSubtitle = !hasActiveToken
     ? 'Set an active pair to load holder data.'
     : tokenHolderAggregateLoading
-      ? 'Loading holder counts and token total...'
-      : internalAmountHolding != null
-        ? `Token total ${formatNum(internalAmountHolding)} ${activeTokenSymbol}`
+      ? 'Loading internal accounts that hold the selected pair token...'
+      : internalHolderCount != null
+        ? `Internal accounts with a positive ${activeTokenSymbol} balance for the selected pair.`
         : 'Holder aggregate unavailable';
   const outsideHolderSubtitle = !hasActiveToken
     ? 'Set an active pair to load holder data.'
@@ -168,10 +170,10 @@ export default function DashboardPage({
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-              Active Tracked Pair
+              Select Trading Pair
             </p>
             <p className="mt-1 text-sm text-slate-500">
-              Switch the live dashboard pair directly from the tracked-pair registry.
+              Switch the live execution pair and keep token-specific addresses scoped here.
             </p>
           </div>
           <div className="w-full lg:max-w-xl">
@@ -210,7 +212,7 @@ export default function DashboardPage({
         <StatCard
           title={`Total ${activeTokenSymbol} Amount (Internal)`}
           value={activeTokenContractAddress ? formatNum(totalInternalTokenAmount) : 'Not Configured'}
-          subtitle={`${managedAccountsCount} internal wallet(s)`}
+          subtitle={`${managedAccountsCount} enabled trading wallet(s) / ${internalAccountsCount} total internal`}
         />
         <StatCard title="Profit (USDC)" value={formatUSD(profitUsdc)} />
         <StatCard title="FDV" value={formatOptionalUsd(dashboardSnapshot?.fdv)} subtitle={marketSnapshotSubtitle} />

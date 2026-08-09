@@ -7,6 +7,7 @@ import {
   dbImportManagedKey,
   dbImportManagedKeyBytes,
   dbLoadSettings,
+  dbSetManagedAccountActiveState,
   dbVerifyUserPassword,
 } from '../userStore';
 import {
@@ -352,6 +353,58 @@ export async function handleAdminWalletRoutes(
       rpcUrls,
     );
     return jsonResponse(balance);
+  }
+
+  if (method === 'PATCH' && pathname.startsWith('/api/admin/private-keys/')) {
+    const user = await requireAdmin(request, env);
+    const addressPath = decodeURIComponent(url.pathname.split('/').pop() ?? '');
+    if (!addressPath) {
+      throw new ApiError(400, 'Wallet address is required');
+    }
+
+    const body = await request.json<{
+      isActive?: unknown;
+      adminPassword?: unknown;
+    }>();
+
+    if (typeof body.isActive !== 'boolean') {
+      throw new ApiError(400, 'isActive must be a boolean');
+    }
+
+    if (typeof body.adminPassword === 'string' && body.adminPassword.trim()) {
+      const passwordValid = await dbVerifyUserPassword(
+        env.TRADINGBOT_DB,
+        user.id,
+        body.adminPassword,
+      );
+      if (!passwordValid) {
+        throw new ApiError(401, 'Admin password is incorrect');
+      }
+    }
+
+    const account = await dbSetManagedAccountActiveState(
+      env.TRADINGBOT_DB,
+      user.id,
+      addressPath,
+      body.isActive,
+    );
+
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      user.id,
+      body.isActive ? 'admin.private_key_enabled' : 'admin.private_key_disabled',
+      account.address,
+      `${body.isActive ? 'Enabled' : 'Disabled'} managed key '${account.label}' for trading`,
+    );
+
+    return jsonResponse(
+      {
+        success: true,
+        message: `${body.isActive ? 'Enabled' : 'Disabled'} trading for ${account.label}`,
+        account,
+      },
+      200,
+    );
   }
 
   if (method === 'DELETE' && pathname.startsWith('/api/admin/private-keys/')) {

@@ -725,9 +725,11 @@ async function executeManagedTradeTask(
   }
 
   if (!resolvedSignerAddress) {
-    const managed = await dbListManagedAccountAddresses(env.TRADINGBOT_DB, userId);
+    const managed = await dbListManagedAccountAddresses(env.TRADINGBOT_DB, userId, {
+      activeOnly: true,
+    });
     if (managed.length === 0) {
-      throw new ApiError(400, 'No managed wallet imported — import a private key first');
+      throw new ApiError(400, 'No enabled managed wallet available — import and enable a private key first');
     }
     resolvedSignerAddress = managed[0];
   }

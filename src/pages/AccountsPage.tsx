@@ -31,6 +31,8 @@ type AccountsPageProps = {
   internalSummary: AccountSummary;
   filteredInternal: AccountRecord[];
   internalCurrentSlice: AccountRecord[];
+  internalSort: 'newest' | 'usdc' | 'sol' | 'token';
+  onInternalSortChange: (value: 'newest' | 'usdc' | 'sol' | 'token') => void;
   outsideHolderRows: OutsideTokenHolder[];
   outsideHolderRowsTotal: number;
   outsideHolderSort: 'newest' | 'largest';
@@ -52,6 +54,8 @@ type AccountsPageProps = {
   onOpenAdmin: () => void;
   onRefreshInternalBalances: () => void;
   onRefreshOutsideBalances: () => void;
+  onToggleInternalAccountTrading: (account: AccountRecord) => void;
+  managedAccountStatusUpdatingAddress: string | null;
   itemsPerPage: number;
 };
 
@@ -67,6 +71,8 @@ export default function AccountsPage({
   internalSummary,
   filteredInternal,
   internalCurrentSlice,
+  internalSort,
+  onInternalSortChange,
   outsideHolderRows,
   outsideHolderRowsTotal,
   outsideHolderSort,
@@ -88,6 +94,8 @@ export default function AccountsPage({
   onOpenAdmin,
   onRefreshInternalBalances,
   onRefreshOutsideBalances,
+  onToggleInternalAccountTrading,
+  managedAccountStatusUpdatingAddress,
   itemsPerPage,
 }: AccountsPageProps) {
   const outsideHolderCountValue = outsideHolderSummaryLoading
@@ -122,7 +130,7 @@ export default function AccountsPage({
       >
         <div className="flex w-full flex-col gap-1.5 md:w-[400px]">
           <label className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-            Global Address Search
+            Managed / Outside Address Search
           </label>
           <div className="relative">
             <Search size={16} className="absolute left-3 top-2.5 text-slate-500" />
@@ -163,8 +171,23 @@ export default function AccountsPage({
         trackedTokenMint={activeTokenContractAddress}
         trackedTokenSymbol={activeTokenSymbol}
         emptyText="No internal accounts found."
+        onToggleTradingAccount={onToggleInternalAccountTrading}
+        togglePendingAddress={managedAccountStatusUpdatingAddress}
         actionButton={
           <div className="flex items-center gap-3">
+            <label className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-slate-300">
+              <span>Sort</span>
+              <select
+                value={internalSort}
+                onChange={(event) => onInternalSortChange(event.target.value as 'newest' | 'usdc' | 'sol' | 'token')}
+                className="bg-transparent text-xs font-semibold text-slate-100 outline-none"
+              >
+                <option value="newest">Newest</option>
+                <option value="usdc">USDC</option>
+                <option value="sol">SOL</option>
+                <option value="token">{activeTokenSymbol}</option>
+              </select>
+            </label>
             <button
               onClick={onRefreshInternalBalances}
               className="flex h-9 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm text-white hover:bg-slate-700"

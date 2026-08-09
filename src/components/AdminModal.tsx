@@ -1,5 +1,5 @@
 import React from 'react';
-import { Key, Shield, Trash2 } from 'lucide-react';
+import { Key, Search, Shield, Trash2 } from 'lucide-react';
 
 import {
   MAX_RECOVERY_PHRASE_WORD_COUNT,
@@ -49,6 +49,8 @@ type AdminModalProps = {
   walletBalances: Record<string, WalletBalance>;
   onPasswordChange: () => void;
   onImport: () => void;
+  onToggleActive: (address: string, isActive: boolean) => void;
+  statusUpdatingAddress: string | null;
   onDelete: (address: string) => void;
 };
 
@@ -71,8 +73,30 @@ export default function AdminModal({
   walletBalances,
   onPasswordChange,
   onImport,
+  onToggleActive,
+  statusUpdatingAddress,
   onDelete,
 }: AdminModalProps) {
+  const [manageSearchTerm, setManageSearchTerm] = React.useState('');
+
+  React.useEffect(() => {
+    if (!open) {
+      setManageSearchTerm('');
+    }
+  }, [open]);
+
+  const filteredManagedWallets = React.useMemo(() => {
+    const trimmed = manageSearchTerm.trim().toLowerCase();
+    if (!trimmed) {
+      return managedWallets;
+    }
+    return managedWallets.filter(
+      (account) =>
+        account.label.toLowerCase().includes(trimmed) ||
+        account.address.toLowerCase().includes(trimmed),
+    );
+  }, [manageSearchTerm, managedWallets]);
+
   if (!open) return null;
 
   return (
@@ -273,19 +297,34 @@ export default function AdminModal({
           {adminTab === 'list' ? (
             <div className="space-y-4">
               <label className="block space-y-1.5">
-                <span className="text-xs font-semibold uppercase text-slate-400">Admin Password (Required for deletion)</span>
+                <span className="text-xs font-semibold uppercase text-slate-400">Admin Password (Required only for deletion)</span>
                 <input type="password" value={adminImportForm.password} onChange={(event) => setAdminImportForm({ ...adminImportForm, password: event.target.value })} className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
+              </label>
+              <label className="block space-y-1.5">
+                <span className="text-xs font-semibold uppercase text-slate-400">Search Managed Wallets</span>
+                <div className="relative">
+                  <Search size={14} className="absolute left-3 top-2.5 text-slate-500" />
+                  <input
+                    type="text"
+                    value={manageSearchTerm}
+                    onChange={(event) => setManageSearchTerm(event.target.value)}
+                    placeholder="Search by label or wallet address"
+                    className="w-full rounded border border-slate-800 bg-slate-950 py-2 pl-9 pr-3 text-sm outline-none focus:border-amber-500"
+                  />
+                </div>
               </label>
               <div className="mt-4 overflow-hidden rounded-md border border-slate-800 bg-slate-950/50">
                 <div className="flex justify-between border-b border-slate-800 bg-slate-900/50 p-3 text-xs font-semibold text-slate-400">
                   <span>Imported Wallets</span>
-                  <span>{managedWallets.length}</span>
+                  <span>{filteredManagedWallets.length} / {managedWallets.length}</span>
                 </div>
                 <div className="max-h-60 space-y-2 overflow-y-auto p-2">
-                  {managedWallets.length === 0 ? (
-                    <div className="py-4 text-center text-xs text-slate-500">No imported wallets found.</div>
+                  {filteredManagedWallets.length === 0 ? (
+                    <div className="py-4 text-center text-xs text-slate-500">
+                      {managedWallets.length === 0 ? 'No imported wallets found.' : 'No managed wallets match this search.'}
+                    </div>
                   ) : (
-                    managedWallets.map((account, index) => (
+                    filteredManagedWallets.map((account, index) => (
                       <div key={account.address} className="rounded border border-slate-800 bg-slate-900 p-2">
                         <div className="flex items-center justify-between gap-3">
                           <div className="flex items-center gap-2">
@@ -293,11 +332,32 @@ export default function AdminModal({
                             <div>
                               <div className="text-xs font-semibold text-slate-200">{account.label}</div>
                               <div className="w-40 truncate font-mono text-xs text-slate-300" title={account.address}>{account.address}</div>
+                              <div className={`mt-1 text-[10px] ${account.isActive ? 'text-emerald-300' : 'text-slate-500'}`}>
+                                {account.isActive ? 'Trading Enabled' : 'Trading Disabled'}
+                              </div>
                             </div>
                           </div>
-                          <button onClick={() => onDelete(account.address)} className="flex items-center gap-1 rounded bg-rose-500/10 p-1.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/20" title="Delete Key">
-                            <Trash2 size={14} /> Delete
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => onToggleActive(account.address, !account.isActive)}
+                              disabled={statusUpdatingAddress === account.address}
+                              className={`rounded border px-2 py-1 text-xs font-semibold transition ${
+                                account.isActive
+                                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+                                  : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
+                              } disabled:cursor-not-allowed disabled:opacity-60`}
+                            >
+                              {statusUpdatingAddress === account.address
+                                ? 'Updating...'
+                                : account.isActive
+                                  ? 'Disable Trading'
+                                  : 'Enable Trading'}
+                            </button>
+                            <button onClick={() => onDelete(account.address)} className="flex items-center gap-1 rounded bg-rose-500/10 p-1.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/20" title="Delete Key">
+                              <Trash2 size={14} /> Delete
+                            </button>
+                          </div>
                         </div>
                         <div className="mt-2 text-[11px] text-slate-400">
                           {walletBalanceErrors[account.address] ? <span className="text-rose-400">{walletBalanceErrors[account.address]}</span> : <BalanceBadges balance={walletBalances[account.address]} />}

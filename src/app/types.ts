@@ -34,6 +34,7 @@ export type AccountRecord = {
   capabilityBaseMint?: string | null;
   capabilityQuoteMint?: string | null;
   createdAt: number;
+  isActive: boolean;
 };
 
 export type DerivedAccountPreview = {
@@ -172,6 +173,10 @@ export type OutsideTokenHolderPage = {
   page: number;
   pageSize: number;
   totalItems: number;
+  latestUpdatedAt: number | null;
+  changeToken: string;
+  latestChangedAddresses: string[];
+  unchanged: boolean;
 };
 
 export type TradableToken = {
