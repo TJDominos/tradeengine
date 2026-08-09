@@ -12,6 +12,7 @@ import { executeSwap } from '../services/jupiterSwapService';
 import { getActiveAccounts } from '../services/accountPoolService';
 import { distributeVolumeAcrossAccounts } from '../services/tradeMath';
 import { analyzeTradeDirection } from '../services/webhookParser';
+import { dbTableHasColumn } from '../workerSchema';
 
 const STORAGE_KEY = 'strategy-engine-state';
 const MAX_DEDUPED_TX_HASHES = 256;
@@ -703,9 +704,17 @@ export class StrategyEngineDurableObject {
       };
     }
 
+    const tokenAddressColumn = await dbTableHasColumn(
+      this.env.TRADINGBOT_DB,
+      'tradable_tokens',
+      'contract_address',
+    )
+      ? 'contract_address'
+      : 'base_token_address';
+
     const tokenRow = await this.env.TRADINGBOT_DB
       .prepare(
-        'SELECT decimals FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2 LIMIT 1',
+        `SELECT decimals FROM tradable_tokens WHERE network = ?1 AND ${tokenAddressColumn} = ?2 LIMIT 1`,
       )
       .bind('solana', baseToken)
       .first<{ decimals: number | null }>();

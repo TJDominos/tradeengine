@@ -41,7 +41,7 @@ import {
   type StrategyTaskExecutionContext,
   type StrategyTaskExecutionResult,
 } from '../workerCore';
-import { parseJsonBody } from '../workerSchema';
+import { dbTableHasColumn, parseJsonBody } from '../workerSchema';
 import { SOLANA_USDC_MINT } from '../workerShared';
 import { dbGetLatestHistoricalSetupId } from './historyMetricsService';
 import { sendSolanaTransaction, signSolanaTransaction } from './solanaTradeService';
@@ -200,9 +200,17 @@ async function resolveMintDecimals(
     return fallbackDecimals;
   }
 
+  const tokenAddressColumn = await dbTableHasColumn(
+    env.TRADINGBOT_DB,
+    'tradable_tokens',
+    'contract_address',
+  )
+    ? 'contract_address'
+    : 'base_token_address';
+
   const tokenRecord = await env.TRADINGBOT_DB
     .prepare(
-      'SELECT decimals FROM tradable_tokens WHERE network = ?1 AND contract_address = ?2 LIMIT 1',
+      `SELECT decimals FROM tradable_tokens WHERE network = ?1 AND ${tokenAddressColumn} = ?2 LIMIT 1`,
     )
     .bind('solana', mint)
     .first<{ decimals: number | null }>();

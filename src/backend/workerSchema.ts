@@ -62,6 +62,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS tradable_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     network TEXT NOT NULL DEFAULT 'solana',
+    contract_address TEXT NOT NULL,
     base_token_address TEXT NOT NULL,
     quote_token_address TEXT NOT NULL DEFAULT '${SOLANA_USDC_MINT}',
     amm_pool_address TEXT,
@@ -360,6 +361,35 @@ export async function dbTableHasColumn(
   return rows.results.some((row) => row.name === columnName);
 }
 
+async function dbGetTableSql(
+  db: D1Database,
+  tableName: string,
+): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT sql
+       FROM sqlite_master
+       WHERE type = 'table' AND name = ?1
+       LIMIT 1`,
+    )
+    .bind(tableName)
+    .first<{ sql: string | null }>();
+  return row?.sql ?? null;
+}
+
+export async function dbTradableTokensUseLegacyContractUniqueness(
+  db: D1Database,
+): Promise<boolean> {
+  const sql = await dbGetTableSql(db, 'tradable_tokens');
+  if (!sql) {
+    return false;
+  }
+
+  const normalizedSql = sql.replace(/\s+/g, ' ').toLowerCase();
+  return normalizedSql.includes('unique(network, contract_address)')
+    && !normalizedSql.includes('unique(network, base_token_address, quote_token_address)');
+}
+
 async function dbBackfillRenamedColumn(
   db: D1Database,
   tableName: string,
@@ -401,7 +431,7 @@ export async function dbEnsureTableColumn(
 async function dbUpgradeTradableTokensToPairRegistry(
   db: D1Database,
 ): Promise<void> {
-  if (!(await dbTableHasColumn(db, 'tradable_tokens', 'contract_address'))) {
+  if (!(await dbTradableTokensUseLegacyContractUniqueness(db))) {
     return;
   }
 
@@ -412,6 +442,7 @@ async function dbUpgradeTradableTokensToPairRegistry(
       `CREATE TABLE tradable_tokens_pair_registry_upgrade (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         network TEXT NOT NULL DEFAULT 'solana',
+        contract_address TEXT NOT NULL,
         base_token_address TEXT NOT NULL,
         quote_token_address TEXT NOT NULL DEFAULT '${SOLANA_USDC_MINT}',
         amm_pool_address TEXT,
@@ -431,6 +462,7 @@ async function dbUpgradeTradableTokensToPairRegistry(
       `INSERT INTO tradable_tokens_pair_registry_upgrade (
          id,
          network,
+        contract_address,
          base_token_address,
          quote_token_address,
          amm_pool_address,
@@ -446,6 +478,7 @@ async function dbUpgradeTradableTokensToPairRegistry(
        SELECT
          id,
          network,
+         COALESCE(NULLIF(TRIM(contract_address), ''), NULLIF(TRIM(base_token_address), ''), base_token_address),
          COALESCE(NULLIF(TRIM(base_token_address), ''), NULLIF(TRIM(contract_address), ''), contract_address),
          COALESCE(NULLIF(TRIM(quote_token_address), ''), '${SOLANA_USDC_MINT}'),
          amm_pool_address,
@@ -535,6 +568,12 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
         await dbEnsureTableColumn(
           db,
           'tradable_tokens',
+          'contract_address',
+          'TEXT',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'tradable_tokens',
           'base_token_address',
           'TEXT',
         );
@@ -574,6 +613,15 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           'contract_address',
           'base_token_address',
         );
+        await db
+          .prepare(
+            `UPDATE tradable_tokens
+             SET contract_address = base_token_address
+             WHERE (contract_address IS NULL OR TRIM(contract_address) = '')
+               AND base_token_address IS NOT NULL
+               AND TRIM(base_token_address) <> ''`,
+          )
+          .run();
         await dbBackfillRenamedColumn(
           db,
           'token_market_snapshots',

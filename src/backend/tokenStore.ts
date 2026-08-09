@@ -1,7 +1,7 @@
 import { ApiError } from './errors';
 import { fetchJupiterTokenMetadata } from './jupiter';
 import { nowTs, normalizeTimestampMs } from './time';
-import { dbTableHasColumn } from './workerSchema';
+import { dbTableHasColumn, dbTradableTokensUseLegacyContractUniqueness } from './workerSchema';
 import {
   dedupeStrings,
   isHeliusRpcUrl,
@@ -251,11 +251,14 @@ export async function dbCreateTradableToken(
     // non-fatal
   }
 
-  const hasLegacyContractAddressColumn = await dbTableHasColumn(
+  const hasContractAddressColumn = await dbTableHasColumn(
     db,
     'tradable_tokens',
     'contract_address',
   );
+  const usesLegacyContractAddressUniqueness = hasContractAddressColumn
+    ? await dbTradableTokensUseLegacyContractUniqueness(db)
+    : false;
 
   const findExistingTokenId = async (): Promise<number | null> => {
     const pairRow = await db
@@ -270,7 +273,7 @@ export async function dbCreateTradableToken(
     if (pairRow?.id != null) {
       return pairRow.id;
     }
-    if (!hasLegacyContractAddressColumn) {
+    if (!usesLegacyContractAddressUniqueness) {
       return null;
     }
     const legacyRow = await db
@@ -286,7 +289,7 @@ export async function dbCreateTradableToken(
   };
 
   const persistExistingToken = async (tokenId: number): Promise<void> => {
-    const statement = hasLegacyContractAddressColumn
+    const statement = hasContractAddressColumn
       ? db.prepare(
           `UPDATE tradable_tokens
            SET contract_address = ?2,
@@ -334,7 +337,7 @@ export async function dbCreateTradableToken(
   };
 
   const insertNewToken = async (): Promise<void> => {
-    const statement = hasLegacyContractAddressColumn
+    const statement = hasContractAddressColumn
       ? db.prepare(
           `INSERT INTO tradable_tokens (
              network,
@@ -855,11 +858,19 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
   endTime: number,
   limit: number = 100,
 ): Promise<TokenMarketSnapshot[]> {
+  const marketSnapshotAddressColumn = await dbTableHasColumn(
+    db,
+    'token_market_snapshots',
+    'contract_address',
+  )
+    ? 'contract_address'
+    : 'base_token_address';
+
   const rows = await db
     .prepare(
       `SELECT
          network,
-         contract_address,
+         ${marketSnapshotAddressColumn} AS base_token_address,
          token_name,
          token_symbol,
          price_usd,
