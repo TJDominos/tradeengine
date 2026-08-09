@@ -35,6 +35,18 @@ const MANUAL_REFRESH_HOLDER_BACKFILL_SIGNATURE_LIMIT = 20;
 const MANUAL_REFRESH_HOLDER_BACKFILL_MAX_PAGES = 2;
 const MANUAL_REFRESH_HOLDER_SYNC_TIME_BUDGET_MS = 12_000;
 
+function mergeRpcReconciliation(
+  left: RefreshRpcReconciliation,
+  right: RefreshRpcReconciliation,
+): RefreshRpcReconciliation {
+  return {
+    scannedSignatures: left.scannedSignatures + right.scannedSignatures,
+    insertedSignals: left.insertedSignals + right.insertedSignals,
+    duplicates: left.duplicates + right.duplicates,
+    skippedIrrelevant: left.skippedIrrelevant + right.skippedIrrelevant,
+  };
+}
+
 async function loadManualRefreshBackfillAddresses(
   db: D1Database,
   userId: number,
@@ -96,7 +108,7 @@ async function runManualMarketRefreshWorkflow(
     );
   }
 
-  const rpcReconciliation = await runWithFallback(
+  let rpcReconciliation = await runWithFallback(
     () =>
       reconcileTokenTransactionsFromRpc(
         env.TRADINGBOT_DB,
@@ -171,6 +183,38 @@ async function runManualMarketRefreshWorkflow(
     }
 
     await ensureActive();
+
+    const postSyncBackfillAddresses = await runWithFallback(
+      () => loadManualRefreshBackfillAddresses(env.TRADINGBOT_DB, user.id, tokenId),
+      `Failed to reload holder backfill addresses after holder sync for ${contractAddress}:`,
+      [],
+    );
+
+    if (postSyncBackfillAddresses.length > 0) {
+      const postSyncRpcReconciliation = await runWithFallback(
+        () =>
+          reconcileTokenTransactionsFromRpc(
+            env.TRADINGBOT_DB,
+            user.id,
+            contractAddress,
+            rpcUrls,
+            {
+              additionalAddresses: [marketSnapshot?.pairAddress ?? null],
+              backfillAddresses: postSyncBackfillAddresses,
+              backfillPerAddressLimit: MANUAL_REFRESH_HOLDER_BACKFILL_SIGNATURE_LIMIT,
+              backfillMaxPages: MANUAL_REFRESH_HOLDER_BACKFILL_MAX_PAGES,
+              startTimeMs,
+              endTimeMs,
+            },
+          ),
+        `Post-sync RPC reconciliation failed for ${contractAddress}:`,
+        EMPTY_REFRESH_RPC_RECONCILIATION,
+      );
+      rpcReconciliation = mergeRpcReconciliation(
+        rpcReconciliation,
+        postSyncRpcReconciliation,
+      );
+    }
   }
 
   let strategyEvaluationSummary: string | null = null;

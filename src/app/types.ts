@@ -35,6 +35,11 @@ export type AccountRecord = {
   capabilityQuoteMint?: string | null;
   createdAt: number;
   isActive: boolean;
+  walletUsdcBalance?: number | null;
+  walletSolBalance?: number | null;
+  walletActiveTokenMint?: string | null;
+  walletActiveTokenBalance?: number | null;
+  walletBalanceUpdatedAt?: number | null;
 };
 
 export type DerivedAccountPreview = {

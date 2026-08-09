@@ -446,6 +446,11 @@ export async function dbEnsureSchema(db: D1Database): Promise<void> {
         );
         await dbEnsureTableColumn(db, 'accounts', 'capability_base_mint', 'TEXT');
         await dbEnsureTableColumn(db, 'accounts', 'capability_quote_mint', 'TEXT');
+        await dbEnsureTableColumn(db, 'accounts', 'wallet_usdc_balance', 'REAL');
+        await dbEnsureTableColumn(db, 'accounts', 'wallet_sol_balance', 'REAL');
+        await dbEnsureTableColumn(db, 'accounts', 'wallet_active_token_mint', 'TEXT');
+        await dbEnsureTableColumn(db, 'accounts', 'wallet_active_token_balance', 'REAL');
+        await dbEnsureTableColumn(db, 'accounts', 'wallet_balance_updated_at', 'INTEGER');
       })
       .catch((err) => {
         schemaInitPromise = undefined;

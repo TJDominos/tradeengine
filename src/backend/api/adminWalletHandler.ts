@@ -8,6 +8,7 @@ import {
   dbImportManagedKey,
   dbImportManagedKeyBytes,
   dbLoadSettings,
+  dbUpdateManagedAccountWalletBalanceSnapshot,
   dbSetManagedAccountActiveState,
   dbVerifyUserPassword,
 } from '../userStore';
@@ -16,11 +17,13 @@ import {
   deriveSolanaKeypairsFromRecoveryPhrase,
   executeTradeTask,
   hashPassword,
+  invalidateWalletBalanceCacheForAddress,
   jsonResponse,
   loadWalletBalance,
   normalizePubkey,
   sessionTokenFromCookie,
   solanaPubkeyFromKeypairBytes,
+  uniqueSolanaPubkeys,
   validatePassword,
   verifyPassword,
 } from '../workerCore';
@@ -37,6 +40,10 @@ type DerivedManagedAccountCandidate = {
   derivationPath: string;
   keypairBytes: Uint8Array;
   address: string;
+};
+
+type WalletBalanceRefreshRequest = {
+  addresses: string[];
 };
 
 function clampDerivedAccountCount(value: number | undefined): number {
@@ -77,13 +84,120 @@ async function deriveRecoveryPhraseAccounts(
   return candidates;
 }
 
+function parseWalletBalanceRefreshRequest(body: unknown): WalletBalanceRefreshRequest {
+  if (body == null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new ApiError(400, 'Wallet balance refresh request must be a JSON object');
+  }
+  const rawAddresses = (body as { addresses?: unknown }).addresses;
+  if (!Array.isArray(rawAddresses)) {
+    throw new ApiError(400, 'addresses must be an array');
+  }
+  const addresses = uniqueSolanaPubkeys(
+    rawAddresses.filter((value): value is string => typeof value === 'string'),
+  );
+  if (addresses.length === 0) {
+    throw new ApiError(400, 'At least one wallet address is required');
+  }
+  if (addresses.length > 100) {
+    throw new ApiError(400, 'At most 100 wallet addresses can be refreshed per request');
+  }
+  return { addresses };
+}
+
+async function refreshWalletBalanceSnapshotsForAddresses(
+  env: Env,
+  userId: number,
+  addresses: string[],
+): Promise<void> {
+  const [settings, tradableTokens] = await Promise.all([
+    dbLoadSettings(env.TRADINGBOT_DB, userId),
+    dbListTradableTokens(env.TRADINGBOT_DB),
+  ]);
+  const rpcUrls = await dbResolveSolanaRpcUrls(
+    env.TRADINGBOT_DB,
+    userId,
+    env.SOLANA_RPC_URL,
+  );
+  const activeTokenMint = settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+  const batchSize = 5;
+
+  for (let index = 0; index < addresses.length; index += batchSize) {
+    const batch = addresses.slice(index, index + batchSize);
+    await Promise.allSettled(
+      batch.map(async (address) => {
+        invalidateWalletBalanceCacheForAddress(address);
+        const balance = await loadWalletBalance(
+          address,
+          settings,
+          tradableTokens,
+          rpcUrls,
+        );
+        const activeTokenBalance = activeTokenMint
+          ? Number.parseFloat(
+              balance.tokens.find((token) => token.mint === activeTokenMint)?.amount ?? '0',
+            ) || 0
+          : null;
+        await Promise.all([
+          dbUpdateManagedAccountWalletBalanceSnapshot(
+            env.TRADINGBOT_DB,
+            userId,
+            address,
+            {
+              usdcBalance: Number.parseFloat(balance.usdc) || 0,
+              solBalance: Number.parseFloat(balance.sol) || 0,
+              activeTokenMint: activeTokenMint || null,
+              activeTokenBalance,
+              updatedAt: balance.updatedAt,
+            },
+          ),
+          dbUpdateTokenHolderWalletBalanceSnapshotByAddress(
+            env.TRADINGBOT_DB,
+            address,
+            {
+              usdcBalance: Number.parseFloat(balance.usdc) || 0,
+              solBalance: Number.parseFloat(balance.sol) || 0,
+              updatedAt: balance.updatedAt,
+            },
+          ),
+        ]);
+      }),
+    );
+  }
+}
+
 export async function handleAdminWalletRoutes(
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const { method } = request;
   const { pathname } = url;
+
+  if (method === 'POST' && pathname === '/api/wallet-balances/refresh') {
+    const user = await requireUser(request, env);
+    const body = parseWalletBalanceRefreshRequest(
+      await parseJsonBody<unknown>(request),
+    );
+
+    ctx.waitUntil(
+      refreshWalletBalanceSnapshotsForAddresses(
+        env,
+        user.id,
+        body.addresses,
+      ).catch((err: unknown) => {
+        console.warn('Background wallet balance refresh failed:', err);
+      }),
+    );
+
+    return jsonResponse(
+      {
+        accepted: true,
+        addressCount: body.addresses.length,
+      },
+      202,
+    );
+  }
 
   if (
     method === 'POST' &&
@@ -343,6 +457,24 @@ export async function handleAdminWalletRoutes(
       settings,
       tradableTokens,
       rpcUrls,
+    );
+    const activeTokenMint = settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+    const activeTokenBalance = activeTokenMint
+      ? Number.parseFloat(
+          balance.tokens.find((token) => token.mint === activeTokenMint)?.amount ?? '0',
+        ) || 0
+      : null;
+    await dbUpdateManagedAccountWalletBalanceSnapshot(
+      env.TRADINGBOT_DB,
+      user.id,
+      address,
+      {
+        usdcBalance: Number.parseFloat(balance.usdc) || 0,
+        solBalance: Number.parseFloat(balance.sol) || 0,
+        activeTokenMint: activeTokenMint || null,
+        activeTokenBalance,
+        updatedAt: balance.updatedAt,
+      },
     );
     try {
       await dbUpdateTokenHolderWalletBalanceSnapshotByAddress(

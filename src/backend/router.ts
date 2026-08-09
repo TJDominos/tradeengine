@@ -23,7 +23,7 @@ async function handleApi(
       () => handleSettingsRoutes(request, env),
       () => handleStrategyRoutes(request, env, ctx),
       () => handleMarketSnapshotRoutes(request, env, ctx),
-      () => handleAdminWalletRoutes(request, env),
+      () => handleAdminWalletRoutes(request, env, ctx),
     ];
 
     for (const handle of handlers) {

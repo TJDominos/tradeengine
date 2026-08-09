@@ -77,6 +77,54 @@ type ManagedAccountPageResponse = {
   balances: Record<string, WalletBalance>;
 };
 
+function buildWalletBalanceFromAccountSnapshot(
+  account: EngineState['internalAccs'][number],
+  activeTokenMint: string,
+): WalletBalance | null {
+  const hasSnapshot =
+    account.walletBalanceUpdatedAt != null ||
+    account.walletUsdcBalance != null ||
+    account.walletSolBalance != null ||
+    account.walletActiveTokenBalance != null;
+  if (!hasSnapshot) {
+    return null;
+  }
+
+  return {
+    address: account.address,
+    sol: String(account.walletSolBalance ?? 0),
+    usdc: String(account.walletUsdcBalance ?? 0),
+    tokens:
+      activeTokenMint &&
+      account.walletActiveTokenMint === activeTokenMint &&
+      account.walletActiveTokenBalance != null
+        ? [{
+            mint: activeTokenMint,
+            symbol: 'Tracked',
+            network: 'solana',
+            amount: String(account.walletActiveTokenBalance),
+            decimals: null,
+          }]
+        : [],
+    updatedAt: account.walletBalanceUpdatedAt ?? 0,
+  };
+}
+
+function buildWalletBalancesFromAccountSnapshots(
+  accounts: EngineState['internalAccs'],
+  activeTokenMint: string,
+): Record<string, WalletBalance> {
+  const balances: Record<string, WalletBalance> = {};
+  for (const account of accounts) {
+    const balance = buildWalletBalanceFromAccountSnapshot(account, activeTokenMint);
+    if (!balance) {
+      continue;
+    }
+    balances[account.address] = balance;
+  }
+  return balances;
+}
+
 function createEmptyRecoveryPhrase(): string[] {
   return Array(MAX_RECOVERY_PHRASE_WORD_COUNT).fill('');
 }
@@ -185,12 +233,8 @@ export default function App() {
   const strategyDraftDirtyRef = React.useRef(false);
   const activeSubmissionRef = React.useRef<string | null>(null);
   const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
-  const lastWalletBalanceRefreshStatusKeyRef = React.useRef<string | null>(null);
   const dashboardStatePollInFlightRef = React.useRef(false);
   const outsideHolderPageRef = React.useRef(outsideHolderPage);
-  const refreshWalletBalancesRef = React.useRef<(addresses?: string[]) => Promise<void>>(async () => {});
-  const walletBalancesRef = React.useRef(walletBalances);
-  const walletBalancePendingRef = React.useRef(walletBalancePending);
   const outsideHolderQueryMetaRef = React.useRef<{
     signature: string;
     changeToken: string;
@@ -209,14 +253,6 @@ export default function App() {
   useEffect(() => {
     outsideHolderPageRef.current = outsideHolderPage;
   }, [outsideHolderPage]);
-
-  useEffect(() => {
-    walletBalancesRef.current = walletBalances;
-  }, [walletBalances]);
-
-  useEffect(() => {
-    walletBalancePendingRef.current = walletBalancePending;
-  }, [walletBalancePending]);
 
   useEffect(() => {
     const status = engineState?.marketRefreshStatus;
@@ -282,6 +318,11 @@ export default function App() {
     setEngineState(state);
     syncSettingsFromServer(state.settings);
     syncStrategyDraftFromServer(state, { preserveDraft: true });
+    const activeTokenMint = state.settings.activeBaseTokenAddress?.trim() || state.settings.baseTokenAddress.trim();
+    setWalletBalances((current) => ({
+      ...current,
+      ...buildWalletBalancesFromAccountSnapshots(state.internalAccs, activeTokenMint),
+    }));
     setLastUpdated(new Date().toLocaleString());
     return state;
   }, [syncSettingsFromServer, syncStrategyDraftFromServer]);
@@ -401,48 +442,8 @@ export default function App() {
       };
 
       if (result.unchanged) {
-        const currentPage = outsideHolderPageRef.current;
-        const missingBalanceAddresses = currentPage.items
-          .filter(
-            (holder) =>
-              holder.usdcBalance == null &&
-              holder.solBalance == null &&
-              !walletBalancesRef.current[holder.address] &&
-              !walletBalancePendingRef.current[holder.address],
-          )
-          .map((holder) => holder.address);
-        if (missingBalanceAddresses.length > 0) {
-          void refreshWalletBalancesRef.current(missingBalanceAddresses);
-        }
         return;
       }
-
-      const previousAddresses = new Set(
-        canProbeIncrementally ? outsideHolderPageRef.current.items.map((holder) => holder.address) : [],
-      );
-      const addedAddresses = result.items
-        .map((holder) => holder.address)
-        .filter((address) => !previousAddresses.has(address));
-      const missingBalanceAddresses = result.items
-        .filter(
-          (holder) =>
-            holder.usdcBalance == null &&
-            holder.solBalance == null &&
-            !walletBalancesRef.current[holder.address] &&
-            !walletBalancePendingRef.current[holder.address],
-        )
-        .map((holder) => holder.address);
-      const addressesToRefresh = Array.from(
-        new Set(
-          canProbeIncrementally
-            ? [
-                ...result.latestChangedAddresses,
-                ...addedAddresses,
-                ...missingBalanceAddresses,
-              ]
-            : result.items.map((holder) => holder.address),
-        ),
-      );
 
       setWalletBalances((current) => {
         const next = { ...current };
@@ -467,9 +468,6 @@ export default function App() {
       });
 
       setOutsideHolderPage(result);
-      if (addressesToRefresh.length > 0) {
-        void refreshWalletBalancesRef.current(addressesToRefresh);
-      }
     } catch (err: unknown) {
       outsideHolderQueryMetaRef.current = {
         signature: '',
@@ -546,25 +544,16 @@ export default function App() {
     };
   }, [activeTab, auth?.authenticated, loadState, marketRefreshRunning]);
 
-  const refreshWalletBalances = React.useCallback(async (addresses?: string[]) => {
-    if (!auth?.authenticated) return;
+  const queueWalletBalanceRefresh = React.useCallback(async (
+    addresses: string[],
+    scope: 'internal' | 'outside',
+  ) => {
+    if (!auth?.authenticated) {
+      return;
+    }
 
-    const targetAddresses = Array.from(
-      new Set(
-        (addresses ?? (
-          engineState
-            ? engineState.internalAccs.map((account) => account.address)
-            : []
-        )).filter(Boolean),
-      ),
-    );
-
+    const targetAddresses = Array.from(new Set(addresses.filter(Boolean)));
     if (targetAddresses.length === 0) {
-      if (!addresses) {
-        setWalletBalances({});
-        setWalletBalanceErrors({});
-        setWalletBalancePending({});
-      }
       return;
     }
 
@@ -576,93 +565,61 @@ export default function App() {
       return next;
     });
 
-    const results = await Promise.allSettled(
-      targetAddresses.map(async (address) => ({
-        address,
-        balance: await api<WalletBalance>(`/api/wallets/${encodeURIComponent(address)}/balance`),
-      })),
-    );
-
-    setWalletBalances((current) => {
-      const next = { ...current };
-      for (const result of results) {
-        if (result.status === 'fulfilled') {
-          next[result.value.address] = result.value.balance;
-        }
-      }
-      return next;
+    await api<{ accepted: boolean; addressCount: number }>('/api/wallet-balances/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ addresses: targetAddresses }),
     });
 
+    setNotice(`Queued background balance refresh for ${targetAddresses.length} wallet(s). Snapshot data will update shortly.`);
     setWalletBalanceErrors((current) => {
       const next = { ...current };
-      for (let index = 0; index < results.length; index += 1) {
-        const result = results[index];
-        const address = targetAddresses[index];
-        if (result.status === 'fulfilled') {
-          delete next[address];
-        } else {
-          next[address] =
-            result.reason instanceof Error ? result.reason.message : 'Failed to load balance';
-        }
-      }
-      return next;
-    });
-
-    setWalletBalancePending((current) => {
-      const next = { ...current };
       for (const address of targetAddresses) {
-        next[address] = false;
+        delete next[address];
       }
       return next;
     });
-  }, [auth?.authenticated, engineState]);
 
-  refreshWalletBalancesRef.current = refreshWalletBalances;
+    const reloadSnapshots = async () => {
+      if (scope === 'internal') {
+        await loadState();
+        await loadInternalAccountPage();
+        return;
+      }
+      await loadOutsideHolderPage();
+    };
+
+    window.setTimeout(() => {
+      void reloadSnapshots();
+    }, 1500);
+    window.setTimeout(() => {
+      void reloadSnapshots().finally(() => {
+        setWalletBalancePending((current) => {
+          const next = { ...current };
+          for (const address of targetAddresses) {
+            next[address] = false;
+          }
+          return next;
+        });
+      });
+    }, 4500);
+  }, [auth?.authenticated, loadInternalAccountPage, loadOutsideHolderPage, loadState]);
 
   const refreshInternalWalletBalances = React.useCallback(async () => {
-    if (!engineState) {
+    if (internalAccountPage.items.length === 0) {
       return;
     }
-    await refreshWalletBalances(
-      engineState.internalAccs.map((account) => account.address),
+    await queueWalletBalanceRefresh(
+      internalAccountPage.items.map((account) => account.address),
+      'internal',
     );
-    if (internalSort !== 'newest') {
-      await loadInternalAccountPage();
-    }
-  }, [engineState, internalSort, loadInternalAccountPage, refreshWalletBalances]);
+  }, [internalAccountPage.items, queueWalletBalanceRefresh]);
 
   const refreshOutsideWalletBalances = React.useCallback(async () => {
-    await refreshWalletBalances(
+    await queueWalletBalanceRefresh(
       outsideHolderPage.items.map((holder) => holder.address),
+      'outside',
     );
-    if (outsideHolderSort === 'usdc' || outsideHolderSort === 'sol') {
-      await loadOutsideHolderPage();
-    }
-  }, [loadOutsideHolderPage, outsideHolderPage.items, outsideHolderSort, refreshWalletBalances]);
-
-  useEffect(() => {
-    if (!auth?.authenticated || !engineState) return;
-    if (activeTab !== 'dashboard' && activeTab !== 'accounts' && !isAdminModalOpen) {
-      return;
-    }
-    void refreshWalletBalances();
-  }, [auth?.authenticated, engineState, activeTab, isAdminModalOpen, refreshWalletBalances]);
-
-  useEffect(() => {
-    if (!auth?.authenticated) {
-      return;
-    }
-    const status = engineState?.marketRefreshStatus;
-    if (!status || status.status !== 'completed') {
-      return;
-    }
-    const statusKey = `${status.requestId ?? 'none'}:${status.status}:${status.updatedAt}`;
-    if (lastWalletBalanceRefreshStatusKeyRef.current === statusKey) {
-      return;
-    }
-    lastWalletBalanceRefreshStatusKeyRef.current = statusKey;
-    void refreshWalletBalances();
-  }, [auth?.authenticated, engineState?.marketRefreshStatus, refreshWalletBalances]);
+  }, [outsideHolderPage.items, queueWalletBalanceRefresh]);
 
   const submitWithFeedback = async (name: string, action: () => Promise<void>) => {
     if (activeSubmissionRef.current) {
@@ -1299,7 +1256,8 @@ export default function App() {
       });
       setDerivedAccountPreview([]);
       await loadState();
-      await refreshWalletBalances();
+      await loadInternalAccountPage();
+      await loadOutsideHolderPage();
       setAdminMsg({
         type: 'success',
         text:
@@ -1333,7 +1291,8 @@ export default function App() {
         return;
       }
       await loadState();
-      await refreshWalletBalances();
+      await loadInternalAccountPage();
+      await loadOutsideHolderPage();
       setAdminMsg({ type: 'success', text: data.message || 'Deleted successfully' });
     } catch {
       setAdminMsg({ type: 'error', text: 'Network error' });

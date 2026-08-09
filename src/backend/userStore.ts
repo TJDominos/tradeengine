@@ -82,6 +82,14 @@ type ManagedAccountCandidateRow = {
   last_traded_at: number | null;
 };
 
+type AccountSnapshotRow = {
+  wallet_usdc_balance?: number | null;
+  wallet_sol_balance?: number | null;
+  wallet_active_token_mint?: string | null;
+  wallet_active_token_balance?: number | null;
+  wallet_balance_updated_at?: number | null;
+};
+
 function mapAccountRow(
   row: {
     id: number;
@@ -92,7 +100,7 @@ function mapAccountRow(
     capability_quote_mint?: string | null;
     created_at: number;
     is_active?: number | null;
-  },
+  } & AccountSnapshotRow,
 ): AccountRecord {
   return {
     id: row.id,
@@ -103,6 +111,11 @@ function mapAccountRow(
     capabilityQuoteMint: row.capability_quote_mint ?? null,
     createdAt: row.created_at,
     isActive: row.is_active !== 0,
+    walletUsdcBalance: row.wallet_usdc_balance ?? null,
+    walletSolBalance: row.wallet_sol_balance ?? null,
+    walletActiveTokenMint: row.wallet_active_token_mint ?? null,
+    walletActiveTokenBalance: row.wallet_active_token_balance ?? null,
+    walletBalanceUpdatedAt: row.wallet_balance_updated_at ?? null,
   };
 }
 
@@ -263,6 +276,137 @@ async function loadWalletBalancesByAddress(
     balances[result.value.address] = result.value.balance;
   }
   return balances;
+}
+
+function buildWalletBalanceFromSnapshot(
+  account: AccountRecord,
+  activeTokenMint: string,
+): WalletBalanceResponse | null {
+  const updatedAt = account.walletBalanceUpdatedAt ?? null;
+  const hasSnapshot =
+    updatedAt != null ||
+    account.walletUsdcBalance != null ||
+    account.walletSolBalance != null ||
+    account.walletActiveTokenBalance != null;
+  if (!hasSnapshot) {
+    return null;
+  }
+
+  const tokens =
+    activeTokenMint &&
+    account.walletActiveTokenMint === activeTokenMint &&
+    account.walletActiveTokenBalance != null
+      ? [
+          {
+            mint: activeTokenMint,
+            symbol: 'Tracked',
+            network: 'solana',
+            amount: String(account.walletActiveTokenBalance),
+            decimals: null,
+          },
+        ]
+      : [];
+
+  return {
+    address: account.address,
+    sol: String(account.walletSolBalance ?? 0),
+    usdc: String(account.walletUsdcBalance ?? 0),
+    tokens,
+    updatedAt: updatedAt ?? 0,
+  };
+}
+
+function buildWalletBalancesFromSnapshots(
+  accounts: AccountRecord[],
+  activeTokenMint: string,
+): Record<string, WalletBalanceResponse> {
+  const balances: Record<string, WalletBalanceResponse> = {};
+  for (const account of accounts) {
+    const balance = buildWalletBalanceFromSnapshot(account, activeTokenMint);
+    if (!balance) {
+      continue;
+    }
+    balances[account.address] = balance;
+  }
+  return balances;
+}
+
+export async function listManagedAccountsWithStoredBalances(
+  db: D1Database,
+  userId: number,
+  options?: {
+    pair?: {
+      baseMint: string;
+      quoteMint: string;
+    };
+  },
+): Promise<ManagedAccountBalanceRecord[]> {
+  const settings = await dbLoadSettings(db, userId);
+  const pair = options?.pair ?? {
+    baseMint: settings.baseTokenAddress.trim()
+      ? normalizePubkey(settings.baseTokenAddress)
+      : '',
+    quoteMint: SOLANA_USDC_MINT,
+  };
+  const accounts = await dbListAccounts(db, userId, 'managed');
+
+  return accounts.map((account) => {
+    const walletBalance =
+      buildWalletBalanceFromSnapshot(account, pair.baseMint) ?? {
+        address: account.address,
+        sol: '0',
+        usdc: '0',
+        tokens: [],
+        updatedAt: 0,
+      };
+    return {
+      ...account,
+      walletBalance,
+      quoteAvailableAmount: readQuoteBalanceAmount(walletBalance, pair.quoteMint),
+      baseTokenAmount: pair.baseMint
+        ? readBaseTokenAmount(walletBalance, pair.baseMint)
+        : 0,
+      hasSolReserve: (toFiniteNumber(walletBalance.sol) ?? 0) >= ACCOUNT_MIN_SOL_RESERVE,
+      pairCompatible: accountCapabilityMatchesMintPair(account, pair.baseMint, pair.quoteMint),
+    };
+  });
+}
+
+export async function dbUpdateManagedAccountWalletBalanceSnapshot(
+  db: D1Database,
+  userId: number,
+  walletAddress: string,
+  snapshot: {
+    usdcBalance: number;
+    solBalance: number;
+    activeTokenMint: string | null;
+    activeTokenBalance: number | null;
+    updatedAt: number;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE accounts
+       SET wallet_usdc_balance = ?4,
+           wallet_sol_balance = ?5,
+           wallet_active_token_mint = ?6,
+           wallet_active_token_balance = ?7,
+           wallet_balance_updated_at = ?8
+       WHERE user_id = ?1
+         AND type = 'managed'
+         AND wallet_address = ?2`,
+    )
+    .bind(
+      userId,
+      walletAddress,
+      'managed',
+      snapshot.usdcBalance,
+      snapshot.solBalance,
+      snapshot.activeTokenMint,
+      snapshot.activeTokenBalance,
+      snapshot.updatedAt,
+    )
+    .run();
 }
 
 async function listActiveManagedAccountCandidates(
@@ -696,6 +840,7 @@ export async function dbListAccounts(
   const rows = await db
     .prepare(
       `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+              wallet_usdc_balance, wallet_sol_balance, wallet_active_token_mint, wallet_active_token_balance, wallet_balance_updated_at,
               COALESCE(is_active, 1) AS is_active
        FROM accounts
        WHERE user_id = ?1 AND type = ?2
@@ -710,6 +855,11 @@ export async function dbListAccounts(
       capability_base_mint: string | null;
       capability_quote_mint: string | null;
       created_at: number;
+      wallet_usdc_balance: number | null;
+      wallet_sol_balance: number | null;
+      wallet_active_token_mint: string | null;
+      wallet_active_token_balance: number | null;
+      wallet_balance_updated_at: number | null;
       is_active: number;
     }>();
   return rows.results.map((row) => mapAccountRow(row));
@@ -745,80 +895,47 @@ export async function dbListManagedAccountsPage(
       )
     : allAccounts;
 
-  if (sort === 'newest') {
-    filteredAccounts.sort(compareManagedAccountsByNewest);
-  } else {
-    const [settings, tradableTokens] = await Promise.all([
-      dbLoadSettings(db, userId),
-      dbListTradableTokens(db),
-    ]);
-    const rpcUrls = await dbResolveSolanaRpcUrls(db, userId, options?.envRpcUrl);
-    const balancesByAddress = await loadWalletBalancesByAddress(
-      filteredAccounts,
-      settings,
-      tradableTokens,
-      rpcUrls,
-    );
-    const activeBaseTokenAddress =
-      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+  const settings = await dbLoadSettings(db, userId);
+  const activeBaseTokenAddress =
+    settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
 
-    filteredAccounts.sort((left, right) => {
-      if (sort === 'usdc') {
-        return compareManagedAccountsByNumeric(
-          left,
-          right,
-          toFiniteNumber(balancesByAddress[left.address]?.usdc) ?? 0,
-          toFiniteNumber(balancesByAddress[right.address]?.usdc) ?? 0,
-        );
-      }
-      if (sort === 'sol') {
-        return compareManagedAccountsByNumeric(
-          left,
-          right,
-          toFiniteNumber(balancesByAddress[left.address]?.sol) ?? 0,
-          toFiniteNumber(balancesByAddress[right.address]?.sol) ?? 0,
-        );
-      }
+  filteredAccounts.sort((left, right) => {
+    if (sort === 'newest') {
+      return compareManagedAccountsByNewest(left, right);
+    }
+    if (sort === 'usdc') {
       return compareManagedAccountsByNumeric(
         left,
         right,
-        activeBaseTokenAddress
-          ? readBaseTokenAmount(balancesByAddress[left.address] ?? {
-              address: left.address,
-              sol: '0',
-              usdc: '0',
-              tokens: [],
-              updatedAt: 0,
-            }, activeBaseTokenAddress)
-          : 0,
-        activeBaseTokenAddress
-          ? readBaseTokenAmount(balancesByAddress[right.address] ?? {
-              address: right.address,
-              sol: '0',
-              usdc: '0',
-              tokens: [],
-              updatedAt: 0,
-            }, activeBaseTokenAddress)
-          : 0,
+        left.walletUsdcBalance ?? 0,
+        right.walletUsdcBalance ?? 0,
       );
-    });
-  }
+    }
+    if (sort === 'sol') {
+      return compareManagedAccountsByNumeric(
+        left,
+        right,
+        left.walletSolBalance ?? 0,
+        right.walletSolBalance ?? 0,
+      );
+    }
+    return compareManagedAccountsByNumeric(
+      left,
+      right,
+      left.walletActiveTokenMint === activeBaseTokenAddress
+        ? left.walletActiveTokenBalance ?? 0
+        : 0,
+      right.walletActiveTokenMint === activeBaseTokenAddress
+        ? right.walletActiveTokenBalance ?? 0
+        : 0,
+    );
+  });
 
   const totalItems = filteredAccounts.length;
   const offset = (page - 1) * pageSize;
   const items = filteredAccounts.slice(offset, offset + pageSize);
 
-  const [settings, tradableTokens] = await Promise.all([
-    dbLoadSettings(db, userId),
-    dbListTradableTokens(db),
-  ]);
-  const rpcUrls = await dbResolveSolanaRpcUrls(db, userId, options?.envRpcUrl);
-  const balances = await loadWalletBalancesByAddress(
-    items,
-    settings,
-    tradableTokens,
-    rpcUrls,
-  );
+  const balances = buildWalletBalancesFromSnapshots(items, activeBaseTokenAddress);
 
   return {
     items,
@@ -859,6 +976,7 @@ export async function dbGetManagedAccountById(
   const row = await db
     .prepare(
       `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+              wallet_usdc_balance, wallet_sol_balance, wallet_active_token_mint, wallet_active_token_balance, wallet_balance_updated_at,
               COALESCE(is_active, 1) AS is_active
        FROM accounts
        WHERE user_id = ?1 AND id = ?2 AND type = 'managed' AND COALESCE(is_active, 1) = 1
@@ -873,6 +991,11 @@ export async function dbGetManagedAccountById(
       capability_base_mint: string | null;
       capability_quote_mint: string | null;
       created_at: number;
+      wallet_usdc_balance: number | null;
+      wallet_sol_balance: number | null;
+      wallet_active_token_mint: string | null;
+      wallet_active_token_balance: number | null;
+      wallet_balance_updated_at: number | null;
       is_active: number;
     }>();
   if (!row) {
@@ -890,6 +1013,7 @@ export async function dbGetManagedAccountByAddress(
   const row = await db
     .prepare(
       `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+              wallet_usdc_balance, wallet_sol_balance, wallet_active_token_mint, wallet_active_token_balance, wallet_balance_updated_at,
               COALESCE(is_active, 1) AS is_active
        FROM accounts
        WHERE user_id = ?1 AND wallet_address = ?2 AND type = 'managed' AND COALESCE(is_active, 1) = 1
@@ -904,6 +1028,11 @@ export async function dbGetManagedAccountByAddress(
       capability_base_mint: string | null;
       capability_quote_mint: string | null;
       created_at: number;
+      wallet_usdc_balance: number | null;
+      wallet_sol_balance: number | null;
+      wallet_active_token_mint: string | null;
+      wallet_active_token_balance: number | null;
+      wallet_balance_updated_at: number | null;
       is_active: number;
     }>();
   if (!row) {
@@ -922,6 +1051,7 @@ export async function dbSetManagedAccountActiveState(
   const row = await db
     .prepare(
       `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+              wallet_usdc_balance, wallet_sol_balance, wallet_active_token_mint, wallet_active_token_balance, wallet_balance_updated_at,
               COALESCE(is_active, 1) AS is_active
        FROM accounts
        WHERE user_id = ?1 AND wallet_address = ?2 AND type = 'managed'
@@ -936,6 +1066,11 @@ export async function dbSetManagedAccountActiveState(
       capability_base_mint: string | null;
       capability_quote_mint: string | null;
       created_at: number;
+      wallet_usdc_balance: number | null;
+      wallet_sol_balance: number | null;
+      wallet_active_token_mint: string | null;
+      wallet_active_token_balance: number | null;
+      wallet_balance_updated_at: number | null;
       is_active: number;
     }>();
   if (!row) {

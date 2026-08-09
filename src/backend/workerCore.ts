@@ -695,6 +695,15 @@ export function writeWalletBalanceCache(
   });
 }
 
+export function invalidateWalletBalanceCacheForAddress(address: string): void {
+  const prefix = `${address}|`;
+  for (const key of walletBalanceCache.keys()) {
+    if (key.startsWith(prefix)) {
+      walletBalanceCache.delete(key);
+    }
+  }
+}
+
 export function tokenMarketCacheKey(network: string, contractAddress: string): string {
   return `${network}:${contractAddress}`;
 }
