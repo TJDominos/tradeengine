@@ -899,6 +899,32 @@ export async function dbListAccountsDirectory(
   return rows.results.map((row) => mapAccountRow(row));
 }
 
+  export async function dbListInternalAccountDirectory(
+    db: D1Database,
+    userId: number,
+  ): Promise<AccountRecord[]> {
+    const rows = await db
+      .prepare(
+        `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+                COALESCE(is_active, 1) AS is_active
+         FROM accounts
+         WHERE user_id = ?1 AND type = 'managed'
+         ORDER BY created_at DESC, id DESC`,
+      )
+      .bind(userId)
+      .all<{
+        id: number;
+        label: string;
+        wallet_address: string;
+        type: string;
+        capability_base_mint: string | null;
+        capability_quote_mint: string | null;
+        created_at: number;
+        is_active: number;
+      }>();
+    return rows.results.map((row) => mapAccountRow(row));
+  }
+
 export async function dbGetManagedAccountSummary(
   db: D1Database,
   userId: number,

@@ -306,6 +306,7 @@ export type EngineState = {
   auth: { username: string; role: string };
   settings: SettingsState;
   internalAccs: AccountRecord[];
+  internalAccountDirectory: AccountRecord[];
   internalAccountSummary: AccountSummary;
   activityLogs: AuditLog[];
   tradeLogs: TradeLog[];

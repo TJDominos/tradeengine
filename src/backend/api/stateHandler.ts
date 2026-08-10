@@ -7,6 +7,7 @@ import {
 } from '../tokenHolders';
 import {
   dbGetManagedAccountSummary,
+  dbListInternalAccountDirectory,
   dbListAccountsDirectory,
   dbListManagedAccountsPage,
   dbListAuditLogs,
@@ -313,6 +314,7 @@ export async function handleStateRoutes(
     ).catch(() => null);
     const [
       internalAccs,
+      internalAccountDirectory,
       internalAccountSummary,
       activityLogs,
       tradeLogs,
@@ -323,6 +325,7 @@ export async function handleStateRoutes(
     ] =
       await Promise.all([
         dbListAccountsDirectory(env.TRADINGBOT_DB, user.id, 'managed'),
+        dbListInternalAccountDirectory(env.TRADINGBOT_DB, user.id),
         dbGetManagedAccountSummary(
           env.TRADINGBOT_DB,
           user.id,
@@ -411,6 +414,7 @@ export async function handleStateRoutes(
       auth: { username: user.username, role: user.role },
       settings,
       internalAccs,
+      internalAccountDirectory,
       internalAccountSummary,
       logs: activityLogs,
       activityLogs,

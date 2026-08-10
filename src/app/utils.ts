@@ -122,7 +122,7 @@ export function formatWebhookEventLabel(eventType: string) {
 export function buildWalletOwnershipLookup(engineState: EngineState): Map<string, WalletOwnershipMeta> {
   const lookup = new Map<string, WalletOwnershipMeta>();
 
-  for (const account of engineState.internalAccs) {
+  for (const account of engineState.internalAccountDirectory) {
     lookup.set(account.address, {
       ownership: 'internal',
       accountLabel: account.label,
@@ -135,12 +135,13 @@ export function buildWalletOwnershipLookup(engineState: EngineState): Map<string
 export function resolveWalletOwnershipMeta(
   walletAddress: string | null | undefined,
   ownershipLookup: Map<string, WalletOwnershipMeta>,
+  fallbackOwnership: WalletOwnershipMeta['ownership'] = 'untracked',
 ): WalletOwnershipMeta {
   if (!walletAddress || walletAddress === 'system') {
     return { ownership: 'system', accountLabel: null };
   }
   return ownershipLookup.get(walletAddress) ?? {
-    ownership: 'untracked',
+    ownership: fallbackOwnership,
     accountLabel: null,
   };
 }

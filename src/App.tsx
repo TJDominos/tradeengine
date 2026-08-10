@@ -1612,11 +1612,17 @@ export default function App() {
       return true;
     }
 
-    const walletOwnershipMeta = resolveWalletOwnershipMeta(log.walletAddress, walletOwnershipLookup);
-    const accountLabel = (walletOwnershipMeta.accountLabel ?? '').toLowerCase();
-    const ownershipLabel = walletOwnershipMeta.ownership.toLowerCase();
+    const walletOwnershipMeta = resolveWalletOwnershipMeta(
+      log.walletAddress,
+      walletOwnershipLookup,
+      'external',
+    );
+    const accountLabels = [walletOwnershipMeta.accountLabel ?? ''];
+    const ownershipLabels = [walletOwnershipMeta.ownership];
 
     if (log.kind === 'trade') {
+      const accountLabel = accountLabels[0].toLowerCase();
+      const ownershipLabel = ownershipLabels[0].toLowerCase();
       return (
         (log.tokenContractAddress ?? '').toLowerCase().includes(term) ||
         (log.tokenSymbol ?? '').toLowerCase().includes(term) ||
@@ -1631,14 +1637,33 @@ export default function App() {
       );
     }
 
+    const fromOwnershipMeta = resolveWalletOwnershipMeta(
+      log.fromWalletAddress,
+      walletOwnershipLookup,
+      'external',
+    );
+    const toOwnershipMeta = resolveWalletOwnershipMeta(
+      log.toWalletAddress,
+      walletOwnershipLookup,
+      'external',
+    );
+    accountLabels.push(
+      fromOwnershipMeta.accountLabel ?? '',
+      toOwnershipMeta.accountLabel ?? '',
+    );
+    ownershipLabels.push(
+      fromOwnershipMeta.ownership,
+      toOwnershipMeta.ownership,
+    );
+
     return (
       (log.tokenContractAddress ?? '').toLowerCase().includes(term) ||
       (log.tokenSymbol ?? '').toLowerCase().includes(term) ||
       (log.walletAddress ?? '').toLowerCase().includes(term) ||
       (log.fromWalletAddress ?? '').toLowerCase().includes(term) ||
       (log.toWalletAddress ?? '').toLowerCase().includes(term) ||
-      accountLabel.includes(term) ||
-      ownershipLabel.includes(term) ||
+      accountLabels.some((label) => label.toLowerCase().includes(term)) ||
+      ownershipLabels.some((label) => label.toLowerCase().includes(term)) ||
       (log.action ?? '').toLowerCase().includes(term) ||
       log.eventType.toLowerCase().includes(term) ||
       log.status.toLowerCase().includes(term) ||
