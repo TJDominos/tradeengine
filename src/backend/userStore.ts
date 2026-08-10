@@ -1333,8 +1333,7 @@ export async function getManagedBuyCapacitySummary(
     quoteMint: SOLANA_USDC_MINT,
   };
 
-  const accounts = await listManagedAccountsWithBalances(db, userId, {
-    envRpcUrl: options?.envRpcUrl,
+  const accounts = await listManagedAccountsWithStoredBalances(db, userId, {
     pair,
   });
   if (accounts.length === 0) {

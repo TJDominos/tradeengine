@@ -16,7 +16,7 @@ import { executeSwap } from '../services/jupiterSwapService';
 import { getActiveAccounts } from '../services/accountPoolService';
 import { allocateVolumeAcrossAccountCaps } from '../services/tradeMath';
 import { analyzeTradeDirection } from '../services/webhookParser';
-import { listManagedAccountsWithBalances } from '../userStore';
+import { listManagedAccountsWithStoredBalances } from '../userStore';
 
 const STORAGE_KEY = 'strategy-engine-state';
 const MAX_DEDUPED_TX_HASHES = 256;
@@ -642,11 +642,10 @@ export class StrategyEngineDurableObject {
       );
     }
 
-    const fundedAccounts = await listManagedAccountsWithBalances(
+    const fundedAccounts = await listManagedAccountsWithStoredBalances(
       this.env.TRADINGBOT_DB,
       config.userId,
       {
-        envRpcUrl: this.env.SOLANA_RPC_URL,
         pair: {
           baseMint: config.strategyDocument.parameters.baseTokenAddress.trim(),
           quoteMint: config.strategyDocument.parameters.quoteTokenAddress.trim(),

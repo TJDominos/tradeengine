@@ -32,7 +32,7 @@ import {
 import { loadStoredMarketSnapshotByContractAddress } from '../services/tokenMarketService';
 import {
   getManagedBuyCapacitySummary,
-  listManagedAccountsWithBalances,
+  listManagedAccountsWithStoredBalances,
   type ManagedAccountBalanceRecord,
 } from '../userStore';
 import { splitBasePlannedTransactionCount } from '../strategy/plannedTransactions';
@@ -555,11 +555,10 @@ export async function handleStrategyRoutes(
       user.id,
     );
     const requiredBuyAmount = deriveRequiredStrategyBuyAmount(normalizedDocument);
-    const accounts = await listManagedAccountsWithBalances(
+    const accounts = await listManagedAccountsWithStoredBalances(
       env.TRADINGBOT_DB,
       user.id,
       {
-        envRpcUrl: env.SOLANA_RPC_URL,
         pair: {
           baseMint: normalizedBaseTokenAddress,
           quoteMint: normalizedQuoteTokenAddress,
