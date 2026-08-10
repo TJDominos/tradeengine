@@ -581,7 +581,7 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
-            <FieldShell label="Max Transactions" helper="Upper bound for accepted aggregate market transaction count in the selected operating window. The planner also treats this as its transaction ceiling when min planned trades is set.">
+            <FieldShell label="Max Transactions" helper="Upper bound for accepted aggregate market transaction count in the selected operating window. This market threshold does not cap the planner floor from Min Planned Trades.">
               <Controller
                 control={control}
                 name="parameters.maxTransactions"
@@ -1018,7 +1018,7 @@ export default function StrategySchemaForm({
                     {formatCurrency(planPreview.availableBuyAmount)} / {formatCurrency(planPreview.requiredBuyAmount)} {planPreview.quoteLabel}
                   </p>
                   <p className="mt-1 text-xs opacity-80">
-                    {planPreview.eligibleAccountCount}/{planPreview.enabledAccountCount} eligible enabled account(s), capability skipped {planPreview.skippedForCapabilityCount}, low-SOL skipped {planPreview.skippedForSolReserveCount}
+                    {planPreview.eligibleAccountCount}/{planPreview.enabledAccountCount} buy-eligible enabled account(s), capability skipped {planPreview.skippedForCapabilityCount}, low-SOL warning {planPreview.skippedForSolReserveCount}
                   </p>
                 </div>
 

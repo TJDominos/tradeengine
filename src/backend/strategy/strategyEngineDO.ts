@@ -3,18 +3,27 @@ import { fetchJupiterTokenMetadata, fetchJupiterTokenPrice } from '../jupiter';
 import { dbFindTradableTokenByPair, dbGetLatestTokenMarketSnapshot, dbResolveTradableTokenId } from '../tokenStore';
 import { fetchSolanaMintDecimals, normalizePubkey } from '../workerCore';
 import { SOLANA_USDC_MINT, type Env } from '../workerShared';
-import { buildRandomizedTwapPlan, type EngineState, type MacroObjective } from './engine';
+import type { EngineState, MacroObjective } from './engine';
 import { normalizeStrategyDocument } from './migrations';
 import {
+  buildPlanningVolumeMapsFromTasks,
+  buildStrategyPlanTaskSpecs,
+  buildStrategyPlanningResult,
+  createDeterministicRandom,
+  deriveRequiredNetBuyAmount,
+  type StrategyPlannerConfig,
+  type StrategyPlannerTask,
+  type StrategyPlannerTaskAllocation,
+  type StrategyPlannerTaskSpec,
+} from './planner';
+import {
   resolveBasePlannedTransactionCount,
-  splitBasePlannedTransactionCount,
 } from './plannedTransactions';
 import type { ExecutionReport, StrategyExecutionConfig, StrategyVersionDocument } from './types';
 import type { ExternalTradeEvent } from './triggers';
 import { initializeAllSchemas } from '../services/dbSetup';
 import { executeSwap } from '../services/jupiterSwapService';
 import { getActiveAccounts } from '../services/accountPoolService';
-import { allocateVolumeAcrossAccountCaps } from '../services/tradeMath';
 import { analyzeTradeDirection } from '../services/webhookParser';
 import { listManagedAccountsWithStoredBalances } from '../userStore';
 
@@ -60,6 +69,7 @@ export interface StrategyEngineDurableObjectTask {
   amountUsd: number;
   scheduledAt: number;
   source: 'base' | 'tactic';
+  allocations?: StrategyPlannerTaskAllocation[];
   metadata?: Record<string, unknown>;
 }
 
@@ -277,7 +287,7 @@ export class StrategyEngineDurableObject {
     }
 
     if (state.pendingTasks.length === 0) {
-      this.ensureBasePlanIfNeeded(Date.now());
+      await this.ensureBasePlanIfNeeded(Date.now());
     }
 
     const now = Date.now();
@@ -324,7 +334,7 @@ export class StrategyEngineDurableObject {
     }
 
     if (state.pendingTasks.length === 0) {
-      this.ensureBasePlanIfNeeded(Date.now());
+      await this.ensureBasePlanIfNeeded(Date.now());
     }
 
     await this.persistState();
@@ -344,7 +354,7 @@ export class StrategyEngineDurableObject {
     state.pendingTasks = [];
     state.dedupedTxHashes = [];
     state.allocationRotationOffsets = createEmptyAllocationRotationOffsets();
-    this.ensureBasePlanIfNeeded(planStartTime);
+    await this.ensureBasePlanIfNeeded(planStartTime);
     await this.persistState();
     await this.ctx.storage.setAlarm(planStartTime);
   }
@@ -474,58 +484,118 @@ export class StrategyEngineDurableObject {
     if (normalizedDirection === 'BUY') {
       if (config.macroObjective === 'shakeout') {
         this.persistedState.currentEngineState = 'WAITING_FOR_LOSS_CUT';
-        this.enqueueTask({
-          side: 'sell',
-          amountUsd: amountUsd * config.execution.tactics.dumpRatio,
-          scheduledAt: now,
-          source: 'tactic',
-          metadata: { tactic: 'dump', txHash: event.txHash },
-        });
+        await this.enqueuePlannedTaskSpecs(
+          [
+            {
+              side: 'sell',
+              pulse: 'dump',
+              totalVolumeUsd: amountUsd * config.execution.tactics.dumpRatio,
+              orderCount: 1,
+              durationMs: 0,
+              scheduledOffsetMs: 0,
+            },
+          ],
+          now,
+          'tactic',
+          `tactic-dump:${event.txHash}`,
+          (task) => ({
+            tactic: 'dump',
+            txHash: event.txHash,
+            pulse: task.pulse,
+            orderIndex: task.orderIndex,
+            totalOrders: task.totalOrders,
+          }),
+        );
         triggered = true;
       } else if (config.macroObjective === 'distribution') {
         this.persistedState.currentEngineState = 'DISTRIBUTING';
         const chunkCount = Math.max(1, config.distributionChunkCount);
         const totalSellUsd = amountUsd * config.execution.tactics.followSellRatio;
+        const distributionRandom = createDeterministicRandom(
+          `follow-sell:${event.txHash}:${chunkCount}:${totalSellUsd}`,
+        );
+        const taskSpecs: StrategyPlannerTaskSpec[] = [];
         for (let index = 0; index < chunkCount; index += 1) {
-          this.enqueueTask({
+          taskSpecs.push({
             side: 'sell',
-            amountUsd: totalSellUsd / chunkCount,
-            scheduledAt:
-              now + Math.round(Math.random() * config.distributionChunkDelayJitterMs),
-            source: 'tactic',
-            metadata: {
-              tactic: 'follow_sell',
-              txHash: event.txHash,
-              chunkIndex: index + 1,
-              chunkCount,
-            },
+            pulse: 'follow_sell',
+            totalVolumeUsd: totalSellUsd / chunkCount,
+            orderCount: 1,
+            durationMs: 0,
+            scheduledOffsetMs: Math.round(
+              distributionRandom() * config.distributionChunkDelayJitterMs,
+            ),
           });
         }
+        await this.enqueuePlannedTaskSpecs(
+          taskSpecs,
+          now,
+          'tactic',
+          `tactic-follow-sell:${event.txHash}`,
+          (task) => ({
+            tactic: 'follow_sell',
+            txHash: event.txHash,
+            pulse: task.pulse,
+            orderIndex: task.orderIndex,
+            totalOrders: task.totalOrders,
+            chunkCount,
+          }),
+        );
         triggered = true;
       }
     }
 
     if (normalizedDirection === 'SELL' && config.macroObjective === 'accumulation') {
       this.persistedState.currentEngineState = 'ACCUMULATING';
-      this.enqueueTask({
-        side: 'buy',
-        amountUsd: amountUsd * config.execution.tactics.absorbRatio,
-        scheduledAt: now,
-        source: 'tactic',
-        metadata: { tactic: 'absorb', txHash: event.txHash },
-      });
+      await this.enqueuePlannedTaskSpecs(
+        [
+          {
+            side: 'buy',
+            pulse: 'absorb',
+            totalVolumeUsd: amountUsd * config.execution.tactics.absorbRatio,
+            orderCount: 1,
+            durationMs: 0,
+            scheduledOffsetMs: 0,
+          },
+        ],
+        now,
+        'tactic',
+        `tactic-absorb:${event.txHash}`,
+        (task) => ({
+          tactic: 'absorb',
+          txHash: event.txHash,
+          pulse: task.pulse,
+          orderIndex: task.orderIndex,
+          totalOrders: task.totalOrders,
+        }),
+      );
       triggered = true;
     }
 
     if (event.is_loss_cut && config.macroObjective === 'shakeout') {
       this.persistedState.currentEngineState = 'BUILDING_TREND';
-      this.enqueueTask({
-        side: 'buy',
-        amountUsd,
-        scheduledAt: now,
-        source: 'tactic',
-        metadata: { tactic: 'scoop', txHash: event.txHash },
-      });
+      await this.enqueuePlannedTaskSpecs(
+        [
+          {
+            side: 'buy',
+            pulse: 'scoop',
+            totalVolumeUsd: amountUsd,
+            orderCount: 1,
+            durationMs: 0,
+            scheduledOffsetMs: 0,
+          },
+        ],
+        now,
+        'tactic',
+        `tactic-scoop:${event.txHash}`,
+        (task) => ({
+          tactic: 'scoop',
+          txHash: event.txHash,
+          pulse: task.pulse,
+          orderIndex: task.orderIndex,
+          totalOrders: task.totalOrders,
+        }),
+      );
       triggered = true;
     }
 
@@ -623,6 +693,141 @@ export class StrategyEngineDurableObject {
     }
   }
 
+  private buildExistingPlannedVolumes() {
+    return buildPlanningVolumeMapsFromTasks(this.persistedState.pendingTasks);
+  }
+
+  private buildPlannerConfig(): StrategyPlannerConfig {
+    const config = this.persistedState.config;
+    if (!config) {
+      throw new ApiError(409, 'Strategy engine durable object is not configured');
+    }
+
+    return {
+      macroObjective: config.macroObjective,
+      baseOrderCount: config.baseOrderCount,
+      baseTotalVolumeUsd: config.targetTotalVolumeUsd,
+      baseDurationMs: config.baseDurationMs,
+      execution: config.execution,
+      baseTokenAddress: config.baseTokenAddress,
+      quoteTokenAddress: config.strategyDocument.parameters.quoteTokenAddress.trim(),
+    };
+  }
+
+  private async loadPlanningInputs(): Promise<{
+    accounts: Awaited<ReturnType<typeof listManagedAccountsWithStoredBalances>>;
+    baseTokenPriceUsd: number | null;
+  }> {
+    const config = this.persistedState.config;
+    if (!config) {
+      throw new ApiError(409, 'Strategy engine durable object is not configured');
+    }
+
+    const [accounts, tokenId] = await Promise.all([
+      listManagedAccountsWithStoredBalances(
+        this.env.TRADINGBOT_DB,
+        config.userId,
+        {
+          pair: {
+            baseMint: config.strategyDocument.parameters.baseTokenAddress.trim(),
+            quoteMint: config.strategyDocument.parameters.quoteTokenAddress.trim(),
+          },
+        },
+      ),
+      dbResolveTradableTokenId(
+        this.env.TRADINGBOT_DB,
+        config.strategyDocument.parameters.baseTokenAddress.trim(),
+      ),
+    ]);
+
+    const marketSnapshot = tokenId
+      ? await dbGetLatestTokenMarketSnapshot(this.env.TRADINGBOT_DB, tokenId)
+      : null;
+
+    return {
+      accounts,
+      baseTokenPriceUsd: marketSnapshot?.priceUsd ?? null,
+    };
+  }
+
+  private async enqueuePlannedTaskSpecs(
+    taskSpecs: StrategyPlannerTaskSpec[],
+    startTime: number,
+    source: StrategyEngineDurableObjectTask['source'],
+    seedContext: string,
+    metadataFactory?: (task: StrategyPlannerTask) => Record<string, unknown>,
+  ): Promise<void> {
+    const config = this.persistedState.config;
+    if (!config || this.persistedState.status !== 'running') {
+      return;
+    }
+
+    const { accounts, baseTokenPriceUsd } = await this.loadPlanningInputs();
+    const planning = buildStrategyPlanningResult({
+      document: config.strategyDocument,
+      config: this.buildPlannerConfig(),
+      accounts,
+      taskSpecs,
+      startTime,
+      baseTokenPriceUsd,
+      existingPlannedVolumes: this.buildExistingPlannedVolumes(),
+      seedContext,
+    });
+
+    for (const task of planning.tasks) {
+      this.enqueueTask({
+        id: `${source}:${seedContext}:${task.taskId}:${Math.round(task.scheduledAt)}`,
+        side: task.side,
+        amountUsd: task.totalVolumeUsd,
+        scheduledAt: task.scheduledAt,
+        source,
+        allocations: task.allocations,
+        metadata: {
+          pulse: task.pulse,
+          orderIndex: task.orderIndex,
+          totalOrders: task.totalOrders,
+          ...(metadataFactory ? metadataFactory(task) : {}),
+        },
+      });
+    }
+  }
+
+  private async resolveTaskAllocations(
+    task: StrategyEngineDurableObjectTask,
+  ): Promise<StrategyPlannerTaskAllocation[]> {
+    if (task.allocations && task.allocations.length > 0) {
+      return task.allocations;
+    }
+
+    const config = this.persistedState.config;
+    if (!config) {
+      throw new ApiError(409, 'Strategy engine durable object is not configured');
+    }
+
+    const { accounts, baseTokenPriceUsd } = await this.loadPlanningInputs();
+    const planning = buildStrategyPlanningResult({
+      document: config.strategyDocument,
+      config: this.buildPlannerConfig(),
+      accounts,
+      taskSpecs: [
+        {
+          side: task.side,
+          pulse:
+            typeof task.metadata?.pulse === 'string' ? task.metadata.pulse : null,
+          totalVolumeUsd: task.amountUsd,
+          orderCount: 1,
+          durationMs: 0,
+          scheduledOffsetMs: 0,
+        },
+      ],
+      startTime: task.scheduledAt,
+      baseTokenPriceUsd,
+      existingPlannedVolumes: this.buildExistingPlannedVolumes(),
+      seedContext: `retry:${task.id}`,
+    });
+    return planning.tasks[0]?.allocations ?? [];
+  }
+
   private async executeDueTask(
     task: StrategyEngineDurableObjectTask,
   ): Promise<{ executedVolumeUsd: number; retryVolumeUsd: number }> {
@@ -641,69 +846,31 @@ export class StrategyEngineDurableObject {
         'No active managed accounts available for strategy execution',
       );
     }
-
-    const fundedAccounts = await listManagedAccountsWithStoredBalances(
-      this.env.TRADINGBOT_DB,
-      config.userId,
-      {
-        pair: {
-          baseMint: config.strategyDocument.parameters.baseTokenAddress.trim(),
-          quoteMint: config.strategyDocument.parameters.quoteTokenAddress.trim(),
-        },
-      },
-    );
     const activeAccountsByAddress = new Map(
       activeAccounts.map((account) => [account.publicKey, account]),
     );
-    const executableAccounts = fundedAccounts
-      .filter((account) =>
-        account.pairCompatible &&
-        account.hasSolReserve &&
-        (task.side === 'buy'
-          ? account.quoteAvailableAmount > 0
-          : account.baseTokenAmount > 0),
-      )
-      .flatMap((account) => {
-        const signingAccount = activeAccountsByAddress.get(account.address);
-        return signingAccount ? [{ balance: account, signingAccount }] : [];
-      });
+    const taskAllocations = await this.resolveTaskAllocations(task);
+    const executableAccounts = taskAllocations.flatMap((allocation) => {
+      const signingAccount = activeAccountsByAddress.get(allocation.walletAddress);
+      return signingAccount ? [{ allocation, signingAccount }] : [];
+    });
     if (executableAccounts.length === 0) {
       throw new ApiError(
         409,
         'No active managed accounts available for strategy execution',
       );
     }
-
-    const allocationPlan = allocateVolumeAcrossAccountCaps(
-      task.amountUsd,
-      executableAccounts.map(({ balance }) => ({
-        accountId: balance.id,
-        maxVolumeUsd: null,
-        existingVolumeUsd: 0,
-      })),
-      {
-        accountCyclingEnabled: config.execution.accountCyclingEnabled,
-        rotationOffset: this.persistedState.allocationRotationOffsets[task.side],
-        accountDispersionStrength: config.execution.accountDispersionStrength,
-      },
-    );
-    this.persistedState.allocationRotationOffsets[task.side] =
-      allocationPlan.nextRotationOffset;
-    if (allocationPlan.allocations.length === 0) {
-      throw new ApiError(
-        409,
-        'No active managed accounts available for strategy execution',
-      );
-    }
-
-    const allocatedVolumeByAccountId = new Map(
-      allocationPlan.allocations.map((allocation) => [allocation.accountId, allocation.volumeUsd]),
-    );
     let executedVolumeUsd = 0;
-    let retryVolumeUsd = allocationPlan.unallocatedVolumeUsd;
+    const executablePlannedVolumeUsd = executableAccounts.reduce(
+      (sum, executableAccount) => sum + executableAccount.allocation.plannedVolumeUsd,
+      0,
+    );
+    let retryVolumeUsd = Number(
+      Math.max(0, task.amountUsd - executablePlannedVolumeUsd).toFixed(6),
+    );
 
     for (const executableAccount of executableAccounts) {
-      const sliceVolumeUsd = allocatedVolumeByAccountId.get(executableAccount.balance.id) ?? 0;
+      const sliceVolumeUsd = executableAccount.allocation.plannedVolumeUsd;
       if (!Number.isFinite(sliceVolumeUsd) || sliceVolumeUsd <= 0) {
         continue;
       }
@@ -828,6 +995,8 @@ export class StrategyEngineDurableObject {
   ): void {
     this.enqueueTask({
       ...task,
+      id: undefined,
+      allocations: undefined,
       scheduledAt: now + this.buildRetryDelayMs(),
       metadata: {
         ...task.metadata,
@@ -850,16 +1019,11 @@ export class StrategyEngineDurableObject {
     return Math.max(1_000, Math.round(baseIntervalMs * jitterMultiplier));
   }
 
-  private ensureBasePlanIfNeeded(startTime: number): void {
+  private async ensureBasePlanIfNeeded(startTime: number): Promise<void> {
     const config = this.persistedState.config;
     if (!config || this.persistedState.status !== 'running') {
       return;
     }
-
-    const { buyCount, sellCount } = splitBasePlannedTransactionCount(
-      config.macroObjective,
-      config.baseOrderCount,
-    );
 
     const hasBaseTasks = this.persistedState.pendingTasks.some(
       (task) => task.source === 'base',
@@ -867,100 +1031,18 @@ export class StrategyEngineDurableObject {
     if (hasBaseTasks) {
       return;
     }
-
-    switch (config.macroObjective) {
-      case 'distribution': {
-        this.enqueuePlan(
-          'buy',
-          config.targetTotalVolumeUsd / 2,
-          buyCount,
-          config.baseDurationMs,
-          'base',
-          startTime,
-          { pulse: 'wash_buy' },
-        );
-        this.enqueuePlan(
-          'sell',
-          config.targetTotalVolumeUsd / 2,
-          sellCount,
-          config.baseDurationMs,
-          'base',
-          startTime,
-          { pulse: 'wash_sell' },
-          750,
-        );
-        break;
-      }
-      case 'accumulation': {
-        this.enqueuePlan(
-          'buy',
+    await this.enqueuePlannedTaskSpecs(
+      buildStrategyPlanTaskSpecs(
+        this.buildPlannerConfig(),
+        deriveRequiredNetBuyAmount(
+          config.strategyDocument,
           config.targetTotalVolumeUsd,
-          buyCount,
-          Math.round(config.baseDurationMs * 1.5),
-          'base',
-          startTime,
-          { pulse: 'slow_buy' },
-        );
-        break;
-      }
-      case 'shakeout':
-      default: {
-        this.enqueuePlan(
-          'buy',
-          config.targetTotalVolumeUsd,
-          config.baseOrderCount,
-          config.baseDurationMs,
-          'base',
-          startTime,
-          { pulse: 'trend' },
-        );
-        break;
-      }
-    }
-  }
-
-  private enqueuePlan(
-    side: 'buy' | 'sell',
-    totalVolumeUsd: number,
-    orderCount: number,
-    durationMs: number,
-    source: StrategyEngineDurableObjectTask['source'],
-    startTime: number,
-    metadata?: Record<string, unknown>,
-    scheduledOffsetMs = 0,
-  ): void {
-    const config = this.persistedState.config;
-    if (!config) {
-      return;
-    }
-    const normalizedVolume = clampPositiveNumber(totalVolumeUsd, 0);
-    if (normalizedVolume <= 0) {
-      return;
-    }
-
-    const plan = buildRandomizedTwapPlan(config.execution, {
-      side,
-      totalVolume: normalizedVolume,
-      orderCount: Math.max(1, Math.floor(orderCount)),
-      durationMs: Math.max(1_000, Math.round(durationMs)),
+        ),
+      ),
       startTime,
-      baseTokenAddress: config.baseTokenAddress,
-    });
-
-    for (const slice of plan.slices) {
-      this.enqueueTask({
-        id: `${source}-${slice.orderIndex}-${slice.scheduledAt}`,
-        side,
-        amountUsd: slice.targetVolume,
-        scheduledAt: slice.scheduledAt + scheduledOffsetMs,
-        source,
-        metadata: {
-          orderIndex: slice.orderIndex,
-          totalOrders: plan.orderCount,
-          ...metadata,
-        },
-      });
-    }
+      'base',
+      'base-plan',
+    );
   }
 
   private enqueueTask(task: Omit<StrategyEngineDurableObjectTask, 'id'> & { id?: string }): void {
@@ -974,6 +1056,7 @@ export class StrategyEngineDurableObject {
       amountUsd,
       scheduledAt: Math.max(Date.now(), Math.round(task.scheduledAt)),
       source: task.source,
+      allocations: task.allocations,
       metadata: task.metadata,
     });
     this.persistedState.pendingTasks.sort(

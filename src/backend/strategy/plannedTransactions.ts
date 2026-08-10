@@ -33,14 +33,8 @@ export function normalizeMinimumPlannedTransactions(
   );
 }
 
-function normalizeMaximumPlannedTransactions(
-  value: unknown,
-  minTransactions: number,
-): number {
-  return Math.max(
-    minTransactions,
-    normalizePositiveInteger(value, DEFAULT_MAX_PLANNED_TRANSACTIONS),
-  );
+function normalizePlannerTransactionCeiling(minTransactions: number): number {
+  return Math.max(DEFAULT_MAX_PLANNED_TRANSACTIONS, minTransactions);
 }
 
 function deriveLegacyPlannedTransactionCount(
@@ -73,8 +67,7 @@ export function resolveBasePlannedTransactionCount(
     document.execution.macroObjective,
     document.parameters.minTransactions,
   );
-  const maxTransactions = normalizeMaximumPlannedTransactions(
-    document.parameters.maxTransactions,
+  const plannerTransactionCeiling = normalizePlannerTransactionCeiling(
     minTransactions,
   );
   const legacyTransactionCount = deriveLegacyPlannedTransactionCount(
@@ -83,7 +76,7 @@ export function resolveBasePlannedTransactionCount(
   );
 
   return Math.min(
-    maxTransactions,
+    plannerTransactionCeiling,
     Math.max(minTransactions, legacyTransactionCount),
   );
 }

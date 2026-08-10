@@ -1358,14 +1358,13 @@ export async function getManagedBuyCapacitySummary(
       continue;
     }
 
-    if (!account.hasSolReserve) {
-      skippedForSolReserveCount += 1;
-      continue;
-    }
-
     const quoteAmount = account.quoteAvailableAmount;
     if (quoteAmount <= 0) {
       continue;
+    }
+
+    if (!account.hasSolReserve) {
+      skippedForSolReserveCount += 1;
     }
 
     eligibleAccountCount += 1;
