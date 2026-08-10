@@ -8,6 +8,7 @@ import { handleSettingsRoutes } from './api/settingsHandler';
 import { handleStateRoutes } from './api/stateHandler';
 import { handleStrategyRoutes } from './api/strategyHandler';
 import { handleWebhookRoutes } from './api/webhookHandler';
+import { initializeAllSchemas, initializeCoreSchemas } from './services/dbSetup';
 import { errorResponse, jsonResponse } from './workerCore';
 import type { Env } from './workerShared';
 
@@ -66,6 +67,13 @@ async function handleApi(
     return await withApiTimeout(
       request,
       (async () => {
+        const pathname = new URL(request.url).pathname;
+        if (pathname.startsWith('/api/auth/')) {
+          await initializeCoreSchemas(env);
+        } else if (pathname !== '/api/health') {
+          await initializeAllSchemas(env);
+        }
+
         const handlers = [
           () => handleAuthRoutes(request, env),
           () => handleWebhookRoutes(request, env, ctx),

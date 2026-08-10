@@ -13,7 +13,6 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<Response> {
-    await initializeAllSchemas(env);
     return appRouter(request, env, ctx);
   },
 
