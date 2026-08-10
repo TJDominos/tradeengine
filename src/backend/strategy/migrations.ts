@@ -50,7 +50,7 @@ function readRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function normalizeParameters(value: unknown): StrategyParameters {
+function normalizeParameters(value: unknown, schemaVersion: number): StrategyParameters {
   const raw = readRecord(value);
   const legacyContractAddress = readString(raw.contractAddress).trim();
   const baseTokenAddress = readString(raw.baseTokenAddress).trim() || legacyContractAddress;
@@ -61,6 +61,10 @@ function normalizeParameters(value: unknown): StrategyParameters {
     minOrderUsd + 0.01,
     readNumber(raw.maxOrderUsd, 100),
   );
+  const rawMaxSlippageBps = readNumber(raw.maxSlippageBps, 10);
+  const maxSlippageBps = schemaVersion < 2 && rawMaxSlippageBps === 100
+    ? 10
+    : rawMaxSlippageBps;
   return {
     contractAddress: legacyContractAddress || baseTokenAddress,
     baseTokenAddress,
@@ -71,7 +75,7 @@ function normalizeParameters(value: unknown): StrategyParameters {
     maxTransactions: readNumber(raw.maxTransactions, 100),
     minOrderUsd,
     maxOrderUsd,
-    maxSlippageBps: readNumber(raw.maxSlippageBps, 10),
+    maxSlippageBps,
     notes: readString(raw.notes),
   };
 }
@@ -207,14 +211,15 @@ function normalizeMetadata(value: unknown): StrategyMetadata {
 
 export function normalizeStrategyDocument(value: unknown): StrategyVersionDocument {
   const raw = readRecord(value);
+  const schemaVersion = readNumber(raw.schemaVersion, STRATEGY_SCHEMA_VERSION);
   return {
-    schemaVersion: readNumber(raw.schemaVersion, STRATEGY_SCHEMA_VERSION),
+    schemaVersion,
     engineVersion: readString(raw.engineVersion, STRATEGY_ENGINE_VERSION),
     strategyType:
       raw.strategyType === DEFAULT_STRATEGY_TYPE
         ? raw.strategyType
         : DEFAULT_STRATEGY_TYPE,
-    parameters: normalizeParameters(raw.parameters),
+    parameters: normalizeParameters(raw.parameters, schemaVersion),
     triggers: normalizeTriggers(raw.triggers),
     targets: normalizeTargets(raw.targets),
     riskControls: normalizeRiskControls(raw.riskControls),

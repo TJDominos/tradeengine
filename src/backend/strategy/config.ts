@@ -5,7 +5,7 @@ import type {
   StrategyType,
 } from './types';
 
-export const STRATEGY_SCHEMA_VERSION = 1;
+export const STRATEGY_SCHEMA_VERSION = 2;
 export const STRATEGY_ENGINE_VERSION = '1.0.0';
 export const PRIMARY_STRATEGY_NAME = 'Primary Strategy';
 export const DEFAULT_STRATEGY_TYPE: StrategyType = 'solana-auto-trade';
@@ -38,12 +38,12 @@ export const DEFAULT_RISK_CONTROLS: StrategyRiskControls = {
 };
 
 export const DEFAULT_EXECUTION_CONFIG: StrategyExecutionConfig = {
-  enabled: false,
+  enabled: true,
   route: 'jupiter',
   commitment: 'confirmed',
   timeJitterRatio: 0.15,
   volumeJitterRatio: 0.15,
-  accountCyclingEnabled: false,
+  accountCyclingEnabled: true,
   accountDispersionStrength: 0.5,
   macroObjective: 'accumulation',
   tactics: {

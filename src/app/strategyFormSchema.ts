@@ -410,7 +410,7 @@ export function createStrategyDraftFromSettings(
   const activeBaseTokenAddress = settings.activeBaseTokenAddress ?? settings.baseTokenAddress;
   const activeQuoteTokenAddress = settings.activeQuoteTokenAddress ?? SOLANA_USDC_MINT;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     engineVersion: '1.0.0',
     strategyType: 'solana-auto-trade',
     parameters: {
@@ -448,12 +448,12 @@ export function createStrategyDraftFromSettings(
       requireCompleteMetrics: true,
     },
     execution: {
-      enabled: false,
+      enabled: true,
       route: 'jupiter',
       commitment: 'confirmed',
       timeJitterRatio: 0.15,
       volumeJitterRatio: 0.15,
-      accountCyclingEnabled: false,
+      accountCyclingEnabled: true,
       accountDispersionStrength: 0.5,
       macroObjective: 'accumulation',
       tactics: {

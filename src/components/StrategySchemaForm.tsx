@@ -650,14 +650,18 @@ export default function StrategySchemaForm({
                     value={formatNumberInputValue(field.value)}
                     onChange={(event) => {
                       const parsed = parseBlankableNumber(event.target.value);
-                      field.onChange(
-                        parsed == null
-                          ? null
-                          : Math.max(
-                            (formData.parameters.minOrderUsd ?? 0) + ORDER_AMOUNT_STEP_USD,
-                            parsed,
-                          ),
-                      );
+                      field.onChange(parsed);
+                    }}
+                    onBlur={(event) => {
+                      field.onBlur();
+                      const parsed = parseBlankableNumber(event.target.value);
+                      if (parsed == null) {
+                        return;
+                      }
+                      field.onChange(Math.max(
+                        (formData.parameters.minOrderUsd ?? 0) + ORDER_AMOUNT_STEP_USD,
+                        parsed,
+                      ));
                     }}
                     className={textInputClassName()}
                   />
@@ -1096,84 +1100,25 @@ export default function StrategySchemaForm({
                 </div>
 
                 <div className="mt-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Account Allocation</p>
-                  <div className="mt-2 space-y-2">
-                    {planPreview.accounts.length > 0 ? (
-                      planPreview.accounts.map((account) => (
-                        <div
-                          key={account.accountId}
-                          className="rounded-xl border border-slate-700 bg-slate-800/70 px-3 py-3 text-sm text-slate-200"
-                        >
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Planned Tasks</p>
+                  <div className="mt-2 max-h-80 space-y-2 overflow-y-auto pr-1">
+                    {planPreview.tasks.length > 0 ? (
+                      planPreview.tasks.map((task) => (
+                        <div key={task.taskId} className="rounded-xl border border-slate-700 bg-slate-800/70 px-3 py-3 text-sm text-slate-200">
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <p className="font-medium text-white">{account.label}</p>
-                              <p className="mt-1 font-mono text-xs text-slate-400">{contractPreview(account.walletAddress)}</p>
+                              <p className="font-medium text-white">{task.side.toUpperCase()} {formatCurrency(task.totalVolumeUsd)}</p>
+                              <p className="mt-1 text-xs text-slate-400">Pulse {task.pulse ?? 'base'} · Order {task.orderIndex}/{task.totalOrders}</p>
                             </div>
-                            <div className="text-right text-xs text-slate-400">
-                              <p>Buy {formatCurrency(account.plannedBuyVolumeUsd)}</p>
-                              <p className="mt-1">Sell {formatCurrency(account.plannedSellVolumeUsd)}</p>
-                            </div>
-                          </div>
-                          <div className="mt-2 rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
-                            Quote snapshot: {formatCurrency(account.quoteAvailableAmount)}. Planned self-sell proceeds: {formatCurrency(account.plannedSellVolumeUsd)}. Remaining quote after planned buys: {formatCurrency(account.buyRemainingQuoteUsd)}.
-                          </div>
-                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                            <span className={`rounded-full px-2.5 py-1 ${account.eligibleForBuy ? 'bg-emerald-500/15 text-emerald-200' : 'bg-slate-700 text-slate-300'}`}>
-                              Buy balance {formatNumber(account.quoteAvailableAmount)}
-                            </span>
-                            <span className={`rounded-full px-2.5 py-1 ${account.eligibleForSell ? 'bg-amber-500/15 text-amber-200' : 'bg-slate-700 text-slate-300'}`}>
-                              Base balance {formatNumber(account.baseTokenAmount)}
-                            </span>
-                            <span className={`rounded-full px-2.5 py-1 ${account.solBalance >= 0.01 ? 'bg-blue-500/15 text-blue-200' : 'bg-rose-500/15 text-rose-200'}`}>
-                              SOL {formatNumber(account.solBalance)}
-                            </span>
+                            <p className="text-xs text-slate-400">{formatPlannerTime(task.scheduledAt)}</p>
                           </div>
                         </div>
                       ))
                     ) : (
                       <div className="rounded-xl border border-dashed border-slate-700 px-3 py-3 text-sm text-slate-500">
-                        No enabled managed accounts available for this planner preview.
+                        No executable planned tasks for this preview.
                       </div>
                     )}
-                  </div>
-                </div>
-
-                <div className="mt-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Planned Tasks</p>
-                  <div className="mt-2 max-h-80 space-y-2 overflow-y-auto pr-1">
-                    {planPreview.tasks.map((task) => (
-                      <div key={task.taskId} className="rounded-xl border border-slate-700 bg-slate-800/70 px-3 py-3 text-sm text-slate-200">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="font-medium text-white">{task.side.toUpperCase()} {formatCurrency(task.totalVolumeUsd)}</p>
-                            <p className="mt-1 text-xs text-slate-400">Pulse {task.pulse ?? 'base'} · Order {task.orderIndex}/{task.totalOrders}</p>
-                          </div>
-                          <p className="text-xs text-slate-400">{formatPlannerTime(task.scheduledAt)}</p>
-                        </div>
-                        <div className="mt-2 space-y-1">
-                          {task.unallocatedVolumeUsd > 0 ? (
-                            <div className="rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-                              {formatCurrency(task.unallocatedVolumeUsd)} could not be assigned with the current balances.
-                            </div>
-                          ) : null}
-                          {task.allocations.length > 0 ? (
-                            task.allocations.map((allocation) => (
-                              <div
-                                key={`${task.taskId}-${allocation.accountId}`}
-                                className="flex items-center justify-between gap-3 rounded-lg bg-slate-900/70 px-3 py-2 text-xs text-slate-300"
-                              >
-                                <span>{allocation.label} · {contractPreview(allocation.walletAddress)}</span>
-                                <span>{formatCurrency(allocation.plannedVolumeUsd)}</span>
-                              </div>
-                            ))
-                          ) : (
-                            <div className="rounded-lg bg-slate-900/70 px-3 py-2 text-xs text-rose-200">
-                              No eligible account can take this task with the current balances.
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
                   </div>
                 </div>
               </>

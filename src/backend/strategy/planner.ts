@@ -234,8 +234,8 @@ export function deriveRequiredNetBuyAmount(
   return positiveNumber(fallback);
 }
 
-function normalizePlannerTaskOrderCeiling(minTransactions: number): number {
-  return Math.max(100, minTransactions);
+function normalizePlannerTaskOrderCount(orderCount: number): number {
+  return Math.max(1, Math.floor(orderCount));
 }
 
 function resolveSelfCyclingOrderSplit(
@@ -286,14 +286,14 @@ export function buildStrategyPlanTaskSpecs(
   config: StrategyPlannerConfig,
   requiredNetBuyAmount: number,
 ): StrategyPlannerTaskSpec[] {
-  const plannerOrderCeiling = normalizePlannerTaskOrderCeiling(config.baseOrderCount);
+  const plannerOrderCount = normalizePlannerTaskOrderCount(config.baseOrderCount);
   const totalVolumeUsd = positiveNumber(config.baseTotalVolumeUsd);
 
   switch (config.macroObjective) {
     case 'distribution': {
       const { buyCount, sellCount } = splitBasePlannedTransactionCount(
         config.macroObjective,
-        plannerOrderCeiling,
+        plannerOrderCount,
       );
       return [
         {
@@ -323,7 +323,7 @@ export function buildStrategyPlanTaskSpecs(
       const sellVolumeUsd = resolveSelfCyclingSellVolume(config, netBuyAmountUsd);
       const buyVolumeUsd = roundToSixDecimals(netBuyAmountUsd + sellVolumeUsd);
       const { buyCount, sellCount } = resolveSelfCyclingOrderSplit(
-        plannerOrderCeiling,
+        plannerOrderCount,
         buyVolumeUsd,
         sellVolumeUsd,
       );
@@ -621,9 +621,14 @@ export function buildStrategyPlanningResult(input: {
     }
   }
 
+  const executableAccountList = accountList.filter(
+    (account) =>
+      account.plannedBuyVolumeUsd > MIN_VOLUME_EPSILON ||
+      account.plannedSellVolumeUsd > MIN_VOLUME_EPSILON,
+  );
   const eligibleBuyAccounts = accountList.filter((account) => account.eligibleForBuy);
   return {
-    accounts: accountList,
+    accounts: executableAccountList,
     tasks: tasks.sort((left, right) =>
       left.scheduledAt - right.scheduledAt || left.taskId.localeCompare(right.taskId),
     ),

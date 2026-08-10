@@ -109,9 +109,18 @@ function resolveConstrainedOrderCount(
   if (minimumOrderCount > maximumOrderCount) {
     return 1;
   }
+  const normalizedRequestedOrderCount = Math.max(1, Math.floor(requestedOrderCount));
+  const preferredOrderUsd = Number.isFinite(maxOrderUsd) && maxOrderUsd > minOrderUsd
+    ? minOrderUsd + (maxOrderUsd - minOrderUsd) * 0.55
+    : totalVolume / normalizedRequestedOrderCount;
+  const preferredOrderCount = Math.max(1, Math.round(totalVolume / preferredOrderUsd));
   return Math.min(
     maximumOrderCount,
-    Math.max(minimumOrderCount, Math.max(1, Math.floor(requestedOrderCount))),
+    Math.max(
+      minimumOrderCount,
+      normalizedRequestedOrderCount,
+      preferredOrderCount,
+    ),
   );
 }
 
