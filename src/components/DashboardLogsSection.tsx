@@ -14,6 +14,9 @@ type DashboardLogsSectionProps = {
   dashboardLogTab: DashboardLogTab;
   onDashboardLogTabChange: (tab: DashboardLogTab) => void;
   currentTransactionLogs: DashboardTransactionLog[];
+  onRefreshTransactionLogs: () => void;
+  transactionLogRefreshPending: boolean;
+  requestLocked: boolean;
   totalTransactionLogsCount: number;
   filteredTransactionLogsCount: number;
   transactionLogSearchTerm: string;
@@ -37,6 +40,9 @@ export default function DashboardLogsSection({
   dashboardLogTab,
   onDashboardLogTabChange,
   currentTransactionLogs,
+  onRefreshTransactionLogs,
+  transactionLogRefreshPending,
+  requestLocked,
   totalTransactionLogsCount,
   filteredTransactionLogsCount,
   transactionLogSearchTerm,
@@ -74,6 +80,9 @@ export default function DashboardLogsSection({
       {dashboardLogTab === 'transaction' ? (
         <TransactionLogsCard
           currentTransactionLogs={currentTransactionLogs}
+          onRefreshTransactionLogs={onRefreshTransactionLogs}
+          transactionLogRefreshPending={transactionLogRefreshPending}
+          requestLocked={requestLocked}
           totalTransactionLogsCount={totalTransactionLogsCount}
           filteredTransactionLogsCount={filteredTransactionLogsCount}
           transactionLogSearchTerm={transactionLogSearchTerm}

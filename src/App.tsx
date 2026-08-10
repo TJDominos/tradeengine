@@ -185,6 +185,7 @@ export default function App() {
   const walletBalanceActionRef = React.useRef(false);
   const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
   const dashboardStatePollInFlightRef = React.useRef(false);
+  const marketRefreshPollInFlightRef = React.useRef(false);
   const outsideHolderPageRef = React.useRef(outsideHolderPage);
   const outsideHolderQueryMetaRef = React.useRef<{
     signature: string;
@@ -724,6 +725,27 @@ export default function App() {
     }
   }, [activeBaseTokenAddress, auth?.authenticated, dateRange.from, dateRange.to]);
 
+  const loadMarketRefreshStatus = React.useCallback(async () => {
+    if (!auth?.authenticated || !activeBaseTokenAddress) {
+      return null;
+    }
+
+    const result = await api<{
+      marketRefreshStatus: EngineState['marketRefreshStatus'];
+    }>('/api/market-snapshot/refresh/status');
+
+    setEngineState((current) =>
+      current
+        ? {
+            ...current,
+            marketRefreshStatus: result.marketRefreshStatus ?? null,
+          }
+        : current,
+    );
+
+    return result.marketRefreshStatus ?? null;
+  }, [activeBaseTokenAddress, auth?.authenticated]);
+
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
       if (auth?.authenticated && activeBaseTokenAddress) {
@@ -746,11 +768,20 @@ export default function App() {
               ? {
                   ...current,
                   marketSnapshot: result.marketSnapshot,
+                  marketRefreshStatus: result.marketRefreshStatus,
+                }
+              : current,
+          );
+        } else {
+          setEngineState((current) =>
+            current
+              ? {
+                  ...current,
+                  marketRefreshStatus: result.marketRefreshStatus,
                 }
               : current,
           );
         }
-        await loadState();
         setNotice(
           result.status === 'running'
             ? 'Refresh is already running. Waiting for the active request to finish.'
@@ -759,6 +790,36 @@ export default function App() {
       } else {
         setNotice('No active trading token. Select a token first to refresh market data.');
       }
+    });
+
+  const handleRefreshTransactionLogs = () =>
+    void submitWithFeedback('transaction-log-refresh', async () => {
+      if (!auth?.authenticated || !activeBaseTokenAddress) {
+        setNotice('No active trading token. Select a token first to refresh transaction logs.');
+        return;
+      }
+
+      const refreshQuery = hasDateRange
+        ? `?startTime=${toRangeStartMs(dateRange.from)}&endTime=${toRangeEndMs(dateRange.to)}`
+        : '';
+      const result = await api<{
+        ok: boolean;
+        contractAddress: string;
+        reconciliation: {
+          scannedSignatures: number;
+          insertedSignals: number;
+          duplicates: number;
+          skippedIrrelevant: number;
+        };
+      }>(`/api/transaction-logs/refresh${refreshQuery}`, {
+        method: 'POST',
+      });
+
+      await loadState();
+      const { scannedSignatures, insertedSignals, duplicates, skippedIrrelevant } = result.reconciliation;
+      setNotice(
+        `Transaction log refresh scanned ${scannedSignatures} signature(s), inserted ${insertedSignals}, skipped ${duplicates} duplicate(s), and ignored ${skippedIrrelevant} irrelevant transaction(s).`,
+      );
     });
 
   useEffect(() => {
@@ -822,16 +883,59 @@ export default function App() {
       return;
     }
 
+    let cancelled = false;
+
+    const pollRefreshStatus = async () => {
+      if (
+        cancelled ||
+        marketRefreshPollInFlightRef.current ||
+        document.visibilityState !== 'visible'
+      ) {
+        return;
+      }
+
+      marketRefreshPollInFlightRef.current = true;
+      try {
+        const status = await loadMarketRefreshStatus();
+        if (
+          !cancelled &&
+          status &&
+          status.status !== 'running'
+        ) {
+          await loadState();
+          if (activeTab === 'dashboard' && activeBaseTokenAddress && hasDateRange) {
+            await loadMarketSnapshotHistory();
+          }
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          console.warn('Failed to poll refresh state:', err);
+        }
+      } finally {
+        marketRefreshPollInFlightRef.current = false;
+      }
+    };
+
     const intervalId = window.setInterval(() => {
-      void loadState().catch((err: unknown) => {
-        console.warn('Failed to poll refresh state:', err);
-      });
+      void pollRefreshStatus();
     }, 3000);
 
+    void pollRefreshStatus();
+
     return () => {
+      cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [auth?.authenticated, loadState, marketRefreshRunning]);
+  }, [
+    activeBaseTokenAddress,
+    activeTab,
+    auth?.authenticated,
+    hasDateRange,
+    loadMarketRefreshStatus,
+    loadMarketSnapshotHistory,
+    loadState,
+    marketRefreshRunning,
+  ]);
 
   const handleSaveConfig = () =>
     submitWithFeedback('settings', async () => {
@@ -1601,6 +1705,9 @@ export default function App() {
       dashboardLogTab={dashboardLogTab}
       onDashboardLogTabChange={setDashboardLogTab}
       currentTransactionLogs={currentTransactionLogs}
+      onRefreshTransactionLogs={handleRefreshTransactionLogs}
+      transactionLogRefreshPending={submitting === 'transaction-log-refresh'}
+      requestLocked={requestLocked}
       totalTransactionLogsCount={combinedTransactionLogs.length}
       filteredTransactionLogsCount={filteredTransactionLogs.length}
       transactionLogSearchTerm={transactionLogSearchTerm}

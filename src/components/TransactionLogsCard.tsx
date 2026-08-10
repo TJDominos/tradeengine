@@ -1,4 +1,4 @@
-import { CheckSquare, Copy, FileText, Search } from 'lucide-react';
+import { CheckSquare, Copy, FileText, RefreshCw, Search } from 'lucide-react';
 
 import type { DashboardTransactionLog, WalletOwnershipMeta } from '../app/types';
 import {
@@ -13,6 +13,9 @@ import Pagination from './Pagination';
 
 type TransactionLogsCardProps = {
   currentTransactionLogs: DashboardTransactionLog[];
+  onRefreshTransactionLogs: () => void;
+  transactionLogRefreshPending: boolean;
+  requestLocked: boolean;
   totalTransactionLogsCount: number;
   filteredTransactionLogsCount: number;
   transactionLogSearchTerm: string;
@@ -28,6 +31,9 @@ type TransactionLogsCardProps = {
 
 export default function TransactionLogsCard({
   currentTransactionLogs,
+  onRefreshTransactionLogs,
+  transactionLogRefreshPending,
+  requestLocked,
   totalTransactionLogsCount,
   filteredTransactionLogsCount,
   transactionLogSearchTerm,
@@ -95,15 +101,26 @@ export default function TransactionLogsCard({
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"></span> LIVE
           </span>
         </h3>
-        <div className="relative">
-          <Search size={14} className="absolute left-3 top-2.5 text-slate-500" />
-          <input
-            type="text"
-            placeholder="Search transaction logs..."
-            value={transactionLogSearchTerm}
-            onChange={(event) => onTransactionLogSearchTermChange(event.target.value)}
-            className="w-64 rounded-md border border-slate-700 bg-slate-950 py-1.5 pl-8 pr-3 text-sm outline-none focus:border-blue-500"
-          />
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onRefreshTransactionLogs}
+            disabled={requestLocked}
+            className="flex h-9 items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-3 text-sm text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw size={14} className={transactionLogRefreshPending ? 'animate-spin' : ''} />
+            {transactionLogRefreshPending ? 'Refreshing...' : 'Refresh RPC Logs'}
+          </button>
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-2.5 text-slate-500" />
+            <input
+              type="text"
+              placeholder="Search transaction logs..."
+              value={transactionLogSearchTerm}
+              onChange={(event) => onTransactionLogSearchTermChange(event.target.value)}
+              className="w-64 rounded-md border border-slate-700 bg-slate-950 py-1.5 pl-8 pr-3 text-sm outline-none focus:border-blue-500"
+            />
+          </div>
         </div>
       </div>
       <div className="overflow-x-auto">

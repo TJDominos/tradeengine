@@ -19,6 +19,9 @@ function resolveApiTimeoutMs(pathname: string): number {
   if (pathname === '/api/health') {
     return HEALTH_API_TIMEOUT_MS;
   }
+  if (pathname === '/api/transaction-logs/refresh') {
+    return LONG_RUNNING_API_TIMEOUT_MS;
+  }
   if (pathname.startsWith('/api/webhook') || pathname.startsWith('/api/webhooks/')) {
     return LONG_RUNNING_API_TIMEOUT_MS;
   }

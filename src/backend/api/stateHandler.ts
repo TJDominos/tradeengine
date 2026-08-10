@@ -34,6 +34,7 @@ import { SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID } from '../wo
 import { requireAdmin, requireUser } from '../services/accessControl';
 import { dbComputeManagedProfitUsdc, dbListHistoricalSetups } from '../services/historyMetricsService';
 import { dbGetMarketRefreshState } from '../services/marketRefreshStateService';
+import { reconcileTokenTransactionsFromRpc } from '../services/signalStore';
 import { StrategyAutomationService } from '../services/strategyAutomationService';
 import {
   dbGetActiveStrategyVersion,
@@ -133,6 +134,14 @@ type StrategyDebugSimulateRequest = {
   tacticsTriggeredCount?: number;
   clearPendingTasks?: boolean;
 };
+
+function parseOptionalTimestampMs(rawValue: string | null): number | null {
+  const parsed = Number.parseInt(rawValue ?? '', 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed >= 1_000_000_000_000 ? parsed : parsed * 1000;
+}
 
 function assertLocalDebugRequest(url: URL): void {
   if (url.protocol === 'http:') {
@@ -433,6 +442,59 @@ export async function handleStateRoutes(
         databasePath: 'D1:tradingbot',
         databaseConnected: true,
       },
+    });
+  }
+
+  if (method === 'POST' && pathname === '/api/transaction-logs/refresh') {
+    const user = await requireAdmin(request, env);
+    const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+    const contractAddress =
+      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+    const quoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || undefined;
+
+    if (!contractAddress) {
+      return jsonResponse(
+        { error: 'Set an active trading token before refreshing transaction logs' },
+        400,
+      );
+    }
+
+    const startTimeMs = parseOptionalTimestampMs(url.searchParams.get('startTime'));
+    const endTimeMs = parseOptionalTimestampMs(url.searchParams.get('endTime'));
+    if (startTimeMs != null && endTimeMs != null && startTimeMs > endTimeMs) {
+      throw new ApiError(400, 'startTime must be less than or equal to endTime');
+    }
+
+    const rpcUrls = await dbResolveSolanaRpcUrls(
+      env.TRADINGBOT_DB,
+      user.id,
+      env.SOLANA_RPC_URL,
+    );
+    const tokenId = await dbResolveTradableTokenId(
+      env.TRADINGBOT_DB,
+      contractAddress,
+      quoteTokenAddress,
+    );
+    const latestSnapshot = tokenId
+      ? await dbGetLatestTokenMarketSnapshot(env.TRADINGBOT_DB, tokenId).catch(() => null)
+      : null;
+
+    const reconciliation = await reconcileTokenTransactionsFromRpc(
+      env.TRADINGBOT_DB,
+      user.id,
+      contractAddress,
+      rpcUrls,
+      {
+        additionalAddresses: [latestSnapshot?.pairAddress],
+        startTimeMs,
+        endTimeMs,
+      },
+    );
+
+    return jsonResponse({
+      ok: true,
+      contractAddress,
+      reconciliation,
     });
   }
 

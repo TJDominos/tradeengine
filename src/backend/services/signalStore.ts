@@ -966,6 +966,71 @@ export async function dbCreateSignal(
     },
   };
 }
+
+export async function dbFindSignalByUserTxSignature(
+  db: D1Database,
+  userId: number,
+  txSignature: string,
+): Promise<SignalRecord | null> {
+  const row = await db
+    .prepare(
+      `SELECT
+         id,
+         source,
+         external_id,
+         event_type,
+         wallet_address,
+         tx_signature,
+         payload,
+         details_json,
+         processed,
+         processed_at,
+         error_message,
+         retry_count,
+         created_at
+       FROM signals
+       WHERE source LIKE ?1 AND tx_signature = ?2
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`,
+    )
+    .bind(`%:user:${userId}`, txSignature)
+    .first<{
+      id: number;
+      source: string;
+      external_id: string;
+      event_type: string;
+      wallet_address: string | null;
+      tx_signature: string | null;
+      payload: string;
+      details_json: string | null;
+      processed: number;
+      processed_at: number | null;
+      error_message: string | null;
+      retry_count: number;
+      created_at: number;
+    }>();
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    source: row.source,
+    externalId: row.external_id,
+    eventType: row.event_type,
+    walletAddress: row.wallet_address,
+    txSignature: row.tx_signature,
+    payload: row.payload,
+    detailsJson: row.details_json,
+    processed: row.processed === 1,
+    processedState: row.processed,
+    processedAt: row.processed_at,
+    errorMessage: row.error_message,
+    retryCount: row.retry_count,
+    createdAt: row.created_at,
+  };
+}
 export async function dbClaimSignalProcessing(
   db: D1Database,
   source: string,

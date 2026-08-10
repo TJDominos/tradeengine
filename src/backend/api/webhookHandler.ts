@@ -14,6 +14,7 @@ import type {
   AlchemyWebhookPayload,
   DerivedChainSignal,
   Env,
+  SignalRecord,
   TokenMarketSnapshot,
 } from '../workerShared';
 import { SOLANA_USDC_MINT } from '../workerShared';
@@ -32,6 +33,7 @@ import {
   dbApplyTokenHolderTransactionDelta,
   dbClaimSignalProcessing,
   dbCreateSignal,
+  dbFindSignalByUserTxSignature,
   dbMarkSignalFailed,
   dbMarkSignalProcessed,
   dbResolvePreferredSignalWalletAddress,
@@ -43,6 +45,62 @@ import { getActiveStrategy, runAndPersistStrategyEvaluation } from '../services/
 import { syncTokenMarketSnapshotForUser } from '../services/tokenMarketService';
 
 const strategyAutomationService = new StrategyAutomationService();
+
+async function resolveSignalStorageTarget(
+  env: Env,
+  input: {
+    userId: number;
+    source: string;
+    externalId: string;
+    eventType: string;
+    walletAddress: string | null;
+    txSignature: string | null;
+    payload: string;
+    detailsJson?: string | null;
+  },
+): Promise<{
+  signal: SignalRecord;
+  inserted: boolean;
+  reusedByTxSignature: boolean;
+}> {
+  const existingByTxSignature = input.txSignature
+    ? await dbFindSignalByUserTxSignature(
+        env.TRADINGBOT_DB,
+        input.userId,
+        input.txSignature,
+      )
+    : null;
+
+  if (
+    existingByTxSignature &&
+    (
+      existingByTxSignature.source !== input.source ||
+      existingByTxSignature.externalId !== input.externalId
+    )
+  ) {
+    return {
+      signal: existingByTxSignature,
+      inserted: false,
+      reusedByTxSignature: true,
+    };
+  }
+
+  const created = await dbCreateSignal(env.TRADINGBOT_DB, {
+    source: input.source,
+    externalId: input.externalId,
+    eventType: input.eventType,
+    walletAddress: input.walletAddress,
+    txSignature: input.txSignature,
+    payload: input.payload,
+    detailsJson: input.detailsJson ?? null,
+  });
+
+  return {
+    signal: created.signal,
+    inserted: created.inserted,
+    reusedByTxSignature: false,
+  };
+}
 
 export async function handleWebhookRoutes(
   request: Request,
@@ -168,7 +226,8 @@ async function handleRustNodeWebhook(
     detailSource: 'payload' as const,
   };
 
-  const { inserted, signal } = await dbCreateSignal(env.TRADINGBOT_DB, {
+  const signalTarget = await resolveSignalStorageTarget(env, {
+    userId: activeTarget.record.config.userId,
     source: signalSource,
     externalId: signalExternalId,
     eventType: payload.type,
@@ -177,11 +236,21 @@ async function handleRustNodeWebhook(
     payload: payload.payloadJson ?? JSON.stringify(payload),
     detailsJson: JSON.stringify(initialDetails),
   });
+  const targetSource = signalTarget.signal.source;
+  const targetExternalId = signalTarget.signal.externalId;
 
-  if (inserted || !signal.processed) {
-    const claimed = inserted
+  if (
+    signalTarget.inserted ||
+    signalTarget.reusedByTxSignature ||
+    !signalTarget.signal.processed
+  ) {
+    const claimed = signalTarget.inserted || signalTarget.signal.processed
       ? true
-      : await dbClaimSignalProcessing(env.TRADINGBOT_DB, signalSource, signalExternalId);
+      : await dbClaimSignalProcessing(
+          env.TRADINGBOT_DB,
+          targetSource,
+          targetExternalId,
+        );
 
     if (claimed) {
       try {
@@ -224,8 +293,8 @@ async function handleRustNodeWebhook(
         mergedDetails.primaryWalletAddress = preferredWalletAddress;
         await dbUpdateSignalTransactionDetails(
           env.TRADINGBOT_DB,
-          signalSource,
-          signalExternalId,
+          targetSource,
+          targetExternalId,
           preferredWalletAddress,
           mergedDetails,
         );
@@ -242,14 +311,14 @@ async function handleRustNodeWebhook(
         }
         await dbMarkSignalProcessed(
           env.TRADINGBOT_DB,
-          signalSource,
-          signalExternalId,
+          targetSource,
+          targetExternalId,
         );
       } catch (err: unknown) {
         await dbMarkSignalFailed(
           env.TRADINGBOT_DB,
-          signalSource,
-          signalExternalId,
+          targetSource,
+          targetExternalId,
           err instanceof Error ? err.message : String(err),
         );
       }
@@ -655,7 +724,8 @@ async function processTokenActivitySignal(
   },
 ): Promise<boolean> {
   const normalizedContractAddress = normalizePubkey(input.contractAddress);
-  const { inserted, signal } = await dbCreateSignal(env.TRADINGBOT_DB, {
+  const signalTarget = await resolveSignalStorageTarget(env, {
+    userId: input.userId,
     source: input.source,
     externalId: input.externalId,
     eventType: input.eventType,
@@ -664,15 +734,18 @@ async function processTokenActivitySignal(
     payload: input.payload,
     detailsJson: null,
   });
+  const inserted = signalTarget.inserted;
+  const targetSource = signalTarget.signal.source;
+  const targetExternalId = signalTarget.signal.externalId;
 
-  if (!inserted) {
-    if (signal.processed) {
+  if (!inserted && !signalTarget.reusedByTxSignature) {
+    if (signalTarget.signal.processed) {
       return false;
     }
     const claimed = await dbClaimSignalProcessing(
       env.TRADINGBOT_DB,
-      input.source,
-      input.externalId,
+      targetSource,
+      targetExternalId,
     );
     if (!claimed) {
       return false;
@@ -724,8 +797,8 @@ async function processTokenActivitySignal(
     mergedDetails.primaryWalletAddress = preferredWalletAddress;
     await dbUpdateSignalTransactionDetails(
       env.TRADINGBOT_DB,
-      input.source,
-      input.externalId,
+      targetSource,
+      targetExternalId,
       preferredWalletAddress,
       mergedDetails,
     );
@@ -850,16 +923,16 @@ async function processTokenActivitySignal(
     );
     await dbMarkSignalProcessed(
       env.TRADINGBOT_DB,
-      input.source,
-      input.externalId,
+      targetSource,
+      targetExternalId,
     );
     return true;
   } catch (err: unknown) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     await dbMarkSignalFailed(
       env.TRADINGBOT_DB,
-      input.source,
-      input.externalId,
+      targetSource,
+      targetExternalId,
       errorMessage,
     );
     throw err;

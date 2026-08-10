@@ -299,6 +299,25 @@ export async function handleMarketSnapshotRoutes(
   const { method } = request;
   const { pathname } = url;
 
+  if (method === 'GET' && pathname === '/api/market-snapshot/refresh/status') {
+    const user = await requireAdmin(request, env);
+    const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+    const contractAddress =
+      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+
+    if (!contractAddress) {
+      return jsonResponse({ marketRefreshStatus: null });
+    }
+
+    const marketRefreshStatus = await dbGetMarketRefreshState(
+      env.TRADINGBOT_DB,
+      user.id,
+      contractAddress,
+    );
+
+    return jsonResponse({ marketRefreshStatus });
+  }
+
   if (method === 'GET' && pathname === '/api/market-snapshots') {
     const user = await requireAdmin(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
