@@ -808,14 +808,20 @@ export default function App() {
           duplicates: number;
           skippedIrrelevant: number;
         };
+        tradeLogBackfill: {
+          candidateLogs: number;
+          updatedLogs: number;
+          unresolvedLogs: number;
+        };
       }>(`/api/transaction-logs/refresh${refreshQuery}`, {
         method: 'POST',
       });
 
       await loadState();
       const { scannedSignatures, insertedSignals, duplicates, skippedIrrelevant } = result.reconciliation;
+      const { candidateLogs, updatedLogs, unresolvedLogs } = result.tradeLogBackfill;
       setNotice(
-        `Transaction log refresh scanned ${scannedSignatures} signature(s), inserted ${insertedSignals}, skipped ${duplicates} duplicate(s), and ignored ${skippedIrrelevant} irrelevant transaction(s).`,
+        `Transaction log refresh scanned ${scannedSignatures} signature(s), inserted ${insertedSignals}, skipped ${duplicates} duplicate(s), ignored ${skippedIrrelevant} irrelevant transaction(s), and backfilled chain time for ${updatedLogs} of ${candidateLogs} trade log(s) with ${unresolvedLogs} still pending.`,
       );
     });
 
@@ -1528,12 +1534,22 @@ export default function App() {
 
   const selectedRangeStartMs = hasDateRange ? toRangeStartMs(dateRange.from) : null;
   const selectedRangeEndMs = hasDateRange ? toRangeEndMs(dateRange.to) : null;
-  const isInSelectedRange = (timestamp: number) => {
+  const isInSelectedRange = (timestamp: number | null) => {
+    if (timestamp == null) {
+      return !hasDateRange;
+    }
     const normalized = timestamp >= 1_000_000_000_000 ? timestamp : timestamp * 1000;
     if (selectedRangeStartMs != null && normalized < selectedRangeStartMs) return false;
     if (selectedRangeEndMs != null && normalized > selectedRangeEndMs) return false;
     return true;
   };
+
+  const resolveTransactionLogTimestamp = (log: DashboardTransactionLog): number | null =>
+    log.kind === 'webhook'
+      ? log.chainTimeMs
+      : log.txSignature
+        ? log.chainTimeMs
+        : log.createdAt;
 
   const filteredSnapshots = (engineState.marketSnapshotHistory ?? []).filter((snapshot) =>
     isInSelectedRange(snapshot.fetchedAt),
@@ -1555,12 +1571,23 @@ export default function App() {
     ...engineState.tradeLogs.map((log) => ({ kind: 'trade' as const, ...log })),
     ...((engineState.webhookTransactionLogs ?? []).map((log) => ({ kind: 'webhook' as const, ...log }))),
   ].sort((left, right) => {
-    const createdAtDelta = normalizeTimestampMs(right.createdAt) - normalizeTimestampMs(left.createdAt);
+    const leftTimestamp = resolveTransactionLogTimestamp(left);
+    const rightTimestamp = resolveTransactionLogTimestamp(right);
+    if (leftTimestamp == null && rightTimestamp == null) {
+      return right.id - left.id;
+    }
+    if (leftTimestamp == null) {
+      return 1;
+    }
+    if (rightTimestamp == null) {
+      return -1;
+    }
+    const createdAtDelta = normalizeTimestampMs(rightTimestamp) - normalizeTimestampMs(leftTimestamp);
     return createdAtDelta !== 0 ? createdAtDelta : right.id - left.id;
   });
 
   const rangeTransactionLogs = combinedTransactionLogs.filter((log) =>
-    isInSelectedRange(log.createdAt),
+    isInSelectedRange(resolveTransactionLogTimestamp(log)),
   );
 
   const rangeTransactionVolumeUsd = rangeTransactionLogs.reduce((sum, log) => {
@@ -1578,7 +1605,7 @@ export default function App() {
 
   const filteredTransactionLogs = combinedTransactionLogs.filter((log) => {
     const term = transactionLogSearchTerm.toLowerCase();
-    if (!isInSelectedRange(log.createdAt)) {
+    if (!isInSelectedRange(resolveTransactionLogTimestamp(log))) {
       return false;
     }
     if (!term) {

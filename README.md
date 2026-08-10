@@ -55,7 +55,9 @@ The Worker uses the following binding (already configured in `wrangler.jsonc`):
 
 ### Apply the schema migration (optional pre-provisioning)
 
-The Worker now auto-initialises the D1 schema on first auth request (`/api/auth/status` or `/api/auth/bootstrap`) by running idempotent `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` statements that match `migrations/0001_init.sql`.
+The Worker now auto-initialises the core D1 schema on the first write-capable auth request (`/api/auth/bootstrap` or `/api/auth/login`) by running idempotent `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` statements that match `migrations/0001_init.sql`.
+
+`/api/auth/status` only probes the existing auth tables and no longer runs schema DDL, which keeps cold-start status checks from getting stuck behind broader trade-domain schema work.
 
 You can still run migrations manually to pre-provision environments:
 

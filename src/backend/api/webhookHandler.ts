@@ -258,6 +258,7 @@ async function handleRustNodeWebhook(
     if (claimed) {
       let latestDetails = mergeStoredSignalTransactionDetails(initialDetails);
       let latestWalletAddress = payload.wallet_address;
+      let latestChainTimeMs: number | null = null;
       try {
         const rpcUrls = await dbResolveSolanaRpcUrls(
           env.TRADINGBOT_DB,
@@ -272,7 +273,7 @@ async function handleRustNodeWebhook(
           payload.payloadJson ?? JSON.stringify(payload),
           payload.contractAddress,
         );
-        const rpcDetails = payload.txHash
+        const rpcResult = payload.txHash
           ? await fetchSolanaWebhookTransactionDetailsFromRpc(
               rpcUrls,
               payload.txHash,
@@ -280,10 +281,11 @@ async function handleRustNodeWebhook(
               payloadDetails,
             )
           : null;
+        latestChainTimeMs = rpcResult?.chainTimeMs ?? null;
         const mergedDetails = mergeStoredSignalTransactionDetails(
           initialDetails,
           payloadDetails,
-          rpcDetails,
+          rpcResult?.details,
         );
         const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
           env.TRADINGBOT_DB,
@@ -333,11 +335,13 @@ async function handleRustNodeWebhook(
           details: latestDetails,
           processed: true,
           errorMessage: null,
+          chainTimeMs: latestChainTimeMs,
           createdAt: signalTarget.signal.createdAt,
           metadata: {
             updateReason: 'strategy_webhook_process',
             signalSource,
             signalExternalId,
+            chainTimeMs: latestChainTimeMs,
           },
         });
       } catch (err: unknown) {
@@ -360,11 +364,13 @@ async function handleRustNodeWebhook(
           details: latestDetails,
           processed: false,
           errorMessage,
+          chainTimeMs: latestChainTimeMs,
           createdAt: signalTarget.signal.createdAt,
           metadata: {
             updateReason: 'strategy_webhook_failed',
             signalSource,
             signalExternalId,
+            chainTimeMs: latestChainTimeMs,
           },
         });
       }
@@ -802,6 +808,7 @@ async function processTokenActivitySignal(
     }
   }
 
+  let latestChainTimeMs: number | null = null;
   try {
     let latestDetails = mergeStoredSignalTransactionDetails({
       tokenContractAddress: normalizedContractAddress,
@@ -827,7 +834,7 @@ async function processTokenActivitySignal(
       input.payload,
       normalizedContractAddress,
     );
-    const rpcDetails = input.txSignature
+    const rpcResult = input.txSignature
       ? await fetchSolanaWebhookTransactionDetailsFromRpc(
           rpcUrls,
           input.txSignature,
@@ -835,6 +842,7 @@ async function processTokenActivitySignal(
           payloadDetails,
         )
       : null;
+    latestChainTimeMs = rpcResult?.chainTimeMs ?? null;
     const mergedDetails = mergeStoredSignalTransactionDetails(
       {
         tokenContractAddress: normalizedContractAddress,
@@ -843,7 +851,7 @@ async function processTokenActivitySignal(
         detailSource: 'unknown',
       },
       payloadDetails,
-      rpcDetails,
+      rpcResult?.details,
     );
     const correctedDetails = applyAmmPoolDirectionCorrection(
       mergedDetails,
@@ -893,11 +901,13 @@ async function processTokenActivitySignal(
       details: latestDetails,
       processed: true,
       errorMessage: null,
+      chainTimeMs: latestChainTimeMs,
       createdAt: signalTarget.signal.createdAt,
       metadata: {
         updateReason: 'alchemy_notify_process',
         providerLabel: input.providerLabel,
         signalSource: input.source,
+        chainTimeMs: latestChainTimeMs,
       },
     });
 
@@ -1050,11 +1060,13 @@ async function processTokenActivitySignal(
       },
       processed: false,
       errorMessage,
+      chainTimeMs: latestChainTimeMs,
       createdAt: signalTarget.signal.createdAt,
       metadata: {
         updateReason: 'alchemy_notify_failed',
         providerLabel: input.providerLabel,
         signalSource: input.source,
+        chainTimeMs: latestChainTimeMs,
       },
     });
     throw err;

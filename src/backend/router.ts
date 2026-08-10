@@ -17,6 +17,10 @@ const STATE_API_TIMEOUT_MS = 15_000;
 const LONG_RUNNING_API_TIMEOUT_MS = 25_000;
 const HEALTH_API_TIMEOUT_MS = 2_000;
 
+function shouldInitializeCoreAuthSchema(pathname: string): boolean {
+  return pathname === '/api/auth/bootstrap' || pathname === '/api/auth/login';
+}
+
 function resolveApiTimeoutMs(pathname: string): number {
   if (pathname === '/api/health') {
     return HEALTH_API_TIMEOUT_MS;
@@ -73,7 +77,9 @@ async function handleApi(
       (async () => {
         const pathname = new URL(request.url).pathname;
         if (pathname.startsWith('/api/auth/')) {
-          await initializeCoreSchemas(env);
+          if (shouldInitializeCoreAuthSchema(pathname)) {
+            await initializeCoreSchemas(env);
+          }
         } else if (pathname !== '/api/health') {
           await initializeAllSchemas(env);
         }

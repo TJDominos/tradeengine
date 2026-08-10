@@ -126,6 +126,7 @@ export interface TradeLogRecord {
   executedAmount: number | null;
   executedPrice: number | null;
   txSignature: string | null;
+  chainTimeMs: number | null;
   executionTraceJson?: string | null;
   status: 'PENDING' | 'SUCCESS' | 'FAILED';
   errorMessage: string | null;
@@ -146,6 +147,7 @@ export interface WebhookTransactionLogRecord {
   source: 'webhook' | 'rpc_reconcile';
   eventType: string;
   txSignature: string | null;
+  chainTimeMs: number | null;
   status: 'PENDING' | 'CONFIRMED' | 'FAILED';
   errorMessage: string | null;
   createdAt: number;

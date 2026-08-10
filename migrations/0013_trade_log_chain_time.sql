@@ -1,0 +1,1 @@
+ALTER TABLE trade_logs ADD COLUMN chain_time_ms INTEGER;

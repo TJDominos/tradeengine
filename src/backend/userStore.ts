@@ -38,6 +38,12 @@ import { SOLANA_USDC_MINT } from './workerShared';
 const ACCOUNT_TRADE_COOLDOWN_MS = 45_000;
 const ACCOUNT_MIN_SOL_RESERVE = 0.01;
 
+function isMissingTableError(err: unknown, tableName: string): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes(`no such table: ${tableName}`)
+    || message.includes(`no such table: main.${tableName}`);
+}
+
 export interface AvailableAccountRecord extends AccountRecord {
   lastTradedAt: number | null;
   walletBalance: WalletBalanceResponse;
@@ -508,16 +514,18 @@ export async function listManagedAccountsWithBalances(
   );
 }
 
-/**
- * Lightweight check: does the database have any users?
- * This is used by auth endpoints to determine if setup is required.
- * Does NOT trigger schema initialization (schema init happens at worker startup).
- */
 export async function dbIsSetupRequired(db: D1Database): Promise<boolean> {
-  const result = await db
-    .prepare('SELECT COUNT(*) AS cnt FROM users')
-    .first<{ cnt: number }>();
-  return (result?.cnt ?? 0) === 0;
+  try {
+    const result = await db
+      .prepare('SELECT COUNT(*) AS cnt FROM users')
+      .first<{ cnt: number }>();
+    return (result?.cnt ?? 0) === 0;
+  } catch (err) {
+    if (isMissingTableError(err, 'users')) {
+      return true;
+    }
+    throw err;
+  }
 }
 
 export async function dbCreateUser(
@@ -610,29 +618,43 @@ export async function dbGetUserBySessionToken(
 ): Promise<SessionUser | null> {
   const tokenHash = await sha256Hex(token);
   const now = nowTs();
-  // Prune expired sessions
-  await db
-    .prepare('DELETE FROM sessions WHERE expires_at <= ?1')
-    .bind(now)
-    .run();
-  const user = await db
-    .prepare(
-      `SELECT users.id, users.username, users.role
-       FROM sessions
-       INNER JOIN users ON users.id = sessions.user_id
-       WHERE sessions.token_hash = ?1 AND sessions.expires_at > ?2`,
-    )
-    .bind(tokenHash, now)
-    .first<SessionUser>();
-  return user ?? null;
+  try {
+    // Prune expired sessions.
+    await db
+      .prepare('DELETE FROM sessions WHERE expires_at <= ?1')
+      .bind(now)
+      .run();
+    const user = await db
+      .prepare(
+        `SELECT users.id, users.username, users.role
+         FROM sessions
+         INNER JOIN users ON users.id = sessions.user_id
+         WHERE sessions.token_hash = ?1 AND sessions.expires_at > ?2`,
+      )
+      .bind(tokenHash, now)
+      .first<SessionUser>();
+    return user ?? null;
+  } catch (err) {
+    if (isMissingTableError(err, 'sessions') || isMissingTableError(err, 'users')) {
+      return null;
+    }
+    throw err;
+  }
 }
 
 export async function dbDeleteSession(db: D1Database, token: string): Promise<void> {
   const tokenHash = await sha256Hex(token);
-  await db
-    .prepare('DELETE FROM sessions WHERE token_hash = ?1')
-    .bind(tokenHash)
-    .run();
+  try {
+    await db
+      .prepare('DELETE FROM sessions WHERE token_hash = ?1')
+      .bind(tokenHash)
+      .run();
+  } catch (err) {
+    if (isMissingTableError(err, 'sessions')) {
+      return;
+    }
+    throw err;
+  }
 }
 
 export async function dbDeleteOtherSessions(
@@ -1528,6 +1550,7 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
          tl.executed_amount,
          tl.executed_price,
          tl.tx_signature,
+         tl.chain_time_ms,
         tl.execution_trace_json,
          tl.status,
          tl.error_message,
@@ -1537,7 +1560,7 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
          tt.symbol
        FROM trade_logs tl
        LEFT JOIN tradable_tokens tt ON tt.id = tl.token_id
-       ORDER BY tl.created_at DESC, tl.id DESC
+       ORDER BY tl.chain_time_ms DESC, tl.created_at DESC, tl.id DESC
        LIMIT 50`,
     )
     .all<{
@@ -1549,6 +1572,7 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
       executed_amount: number | null;
       executed_price: number | null;
       tx_signature: string | null;
+      chain_time_ms: number | null;
       execution_trace_json: string | null;
       status: 'PENDING' | 'SUCCESS' | 'FAILED';
       error_message: string | null;
@@ -1568,6 +1592,7 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
     executedAmount: row.executed_amount,
     executedPrice: row.executed_price,
     txSignature: row.tx_signature,
+    chainTimeMs: row.chain_time_ms,
     executionTraceJson: row.execution_trace_json,
     status: row.status,
     errorMessage: row.error_message,
@@ -1596,13 +1621,14 @@ export async function dbListWebhookTransactionLogs(
          wtl.source,
          wtl.event_type,
          wtl.tx_signature,
+         wtl.chain_time_ms,
          wtl.status,
          wtl.error_message,
          wtl.created_at
        FROM webhook_transaction_logs wtl
        LEFT JOIN tradable_tokens tt ON tt.id = wtl.token_id
        WHERE wtl.user_id = ?1
-       ORDER BY wtl.created_at DESC, wtl.id DESC
+       ORDER BY wtl.chain_time_ms DESC, wtl.id DESC
        LIMIT 50`,
     )
     .bind(userId)
@@ -1620,6 +1646,7 @@ export async function dbListWebhookTransactionLogs(
       source: 'webhook' | 'rpc_reconcile';
       event_type: string;
       tx_signature: string | null;
+      chain_time_ms: number | null;
       status: 'PENDING' | 'CONFIRMED' | 'FAILED';
       error_message: string | null;
       created_at: number;
@@ -1639,6 +1666,7 @@ export async function dbListWebhookTransactionLogs(
     source: row.source,
     eventType: row.event_type,
     txSignature: row.tx_signature,
+    chainTimeMs: row.chain_time_ms,
     status: row.status,
     errorMessage: row.error_message,
     createdAt: row.created_at,

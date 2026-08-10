@@ -57,9 +57,9 @@ export default function TransactionLogsCard({
           ? 'No transaction logs fall within the selected date range.'
           : 'No trade or webhook records yet.';
 
-  const handleCopyAddress = async (address: string) => {
+  const handleCopyText = async (value: string) => {
     try {
-      await navigator.clipboard.writeText(address);
+      await navigator.clipboard.writeText(value);
     } catch {
       // Ignore clipboard failures; clicking still navigates to the account search.
     }
@@ -82,7 +82,7 @@ export default function TransactionLogsCard({
         </button>
         <button
           type="button"
-          onClick={() => void handleCopyAddress(address)}
+          onClick={() => void handleCopyText(address)}
           className="rounded border border-slate-700 bg-slate-950 p-1 text-slate-500 transition hover:border-slate-500 hover:text-slate-200"
           title="Copy address"
         >
@@ -141,6 +141,11 @@ export default function TransactionLogsCard({
           </thead>
           <tbody className="divide-y divide-slate-800">
             {currentTransactionLogs.map((log) => {
+              const displayTime = log.kind === 'webhook'
+                ? log.chainTimeMs
+                : log.txSignature
+                  ? log.chainTimeMs
+                  : log.createdAt;
               const walletOwnershipMeta = resolveWalletOwnershipMeta(log.walletAddress, walletOwnershipLookup);
               const webhookFromOwnership =
                 log.kind === 'webhook'
@@ -218,7 +223,9 @@ export default function TransactionLogsCard({
 
               return (
                 <tr key={`${log.kind}-${log.id}`} className="transition-colors hover:bg-slate-800/50">
-                  <td className="px-4 py-1.5 text-xs text-slate-400">{formatDate(log.createdAt)}</td>
+                  <td className="px-4 py-1.5 text-xs text-slate-400">
+                    {displayTime != null ? formatDate(displayTime) : 'Pending chain time'}
+                  </td>
                   <td className="px-4 py-1.5">
                     <div className="text-xs font-semibold text-slate-200">
                       {log.tokenSymbol ?? (log.kind === 'webhook' ? 'Tracked Activity' : 'Tracked Pair')}
@@ -273,7 +280,23 @@ export default function TransactionLogsCard({
                       <CheckSquare size={10} /> {log.status.toLowerCase()}
                     </span>
                   </td>
-                  <td className="max-w-[320px] px-4 py-1.5 text-xs text-slate-300">{txOrError}</td>
+                  <td className="max-w-[320px] px-4 py-1.5 text-xs text-slate-300">
+                    {log.txSignature ? (
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono" title={log.txSignature}>{txOrError}</span>
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyText(log.txSignature!)}
+                          className="rounded border border-slate-700 bg-slate-950 p-1 text-slate-500 transition hover:border-slate-500 hover:text-slate-200"
+                          title="Copy transaction signature"
+                        >
+                          <Copy size={10} />
+                        </button>
+                      </div>
+                    ) : (
+                      txOrError
+                    )}
+                  </td>
                 </tr>
               );
             })}

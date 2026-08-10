@@ -128,6 +128,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
       CHECK(source IN ('webhook', 'rpc_reconcile')),
     event_type TEXT NOT NULL,
     tx_signature TEXT,
+    chain_time_ms INTEGER,
     status TEXT NOT NULL DEFAULT 'PENDING'
       CHECK(status IN ('PENDING', 'CONFIRMED', 'FAILED')),
     error_message TEXT,
@@ -163,6 +164,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     executed_amount REAL,
     executed_price REAL,
     tx_signature TEXT,
+    chain_time_ms INTEGER,
     execution_trace_json TEXT,
     status TEXT NOT NULL DEFAULT 'PENDING'
       CHECK(status IN ('PENDING', 'SUCCESS', 'FAILED')),
@@ -637,6 +639,12 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
         await dbEnsureTableColumn(
           db,
           'trade_logs',
+          'chain_time_ms',
+          'INTEGER',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'trade_logs',
           'execution_trace_json',
           'TEXT',
         );
@@ -645,6 +653,12 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           'rpc_endpoints',
           'is_active',
           'INTEGER NOT NULL DEFAULT 1',
+        );
+        await dbEnsureTableColumn(
+          db,
+          'webhook_transaction_logs',
+          'chain_time_ms',
+          'INTEGER',
         );
         await db.batch(
           D1_TRADE_DOMAIN_INDEX_STATEMENTS.map((statement) =>

@@ -1,0 +1,1 @@
+ALTER TABLE webhook_transaction_logs ADD COLUMN chain_time_ms INTEGER;

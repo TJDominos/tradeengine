@@ -32,6 +32,7 @@ import { requireAdmin, requireUser } from '../services/accessControl';
 import { dbComputeManagedProfitUsdc, dbListHistoricalSetups } from '../services/historyMetricsService';
 import { dbGetMarketRefreshState } from '../services/marketRefreshStateService';
 import {
+  backfillTradeLogChainTimes,
   reconcileTokenTransactionsFromRpc,
   reconcileWebhookTransactionDetailsInWindow,
 } from '../services/signalStore';
@@ -481,12 +482,17 @@ export async function handleStateRoutes(
       startTimeMs,
       endTimeMs,
     );
+    const tradeLogBackfill = await backfillTradeLogChainTimes(
+      env.TRADINGBOT_DB,
+      rpcUrls,
+    );
 
     return jsonResponse({
       ok: true,
       contractAddress,
       reconciliation,
       detailReconciliation,
+      tradeLogBackfill,
     });
   }
 

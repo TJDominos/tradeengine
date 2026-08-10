@@ -168,6 +168,11 @@ type RpcTransactionMeta = {
   postTokenBalances?: RpcTokenBalanceEntry[];
 };
 
+type RpcWebhookTransactionDetailsResult = {
+  details: Partial<StoredSignalTransactionDetails>;
+  chainTimeMs: number | null;
+};
+
 type PersistedWebhookTransactionLogRow = {
   id: number;
   user_id: number;
@@ -184,6 +189,7 @@ type PersistedWebhookTransactionLogRow = {
   source: 'webhook' | 'rpc_reconcile';
   event_type: string;
   tx_signature: string | null;
+  chain_time_ms: number | null;
   status: 'PENDING' | 'CONFIRMED' | 'FAILED';
   error_message: string | null;
   detail_source: StoredSignalTransactionDetails['detailSource'];
@@ -327,6 +333,7 @@ export async function dbUpsertWebhookTransactionLog(
     source: 'webhook' | 'rpc_reconcile';
     eventType: string;
     txSignature: string | null;
+    chainTimeMs?: number | null;
     externalId: string;
     walletAddress: string | null;
     details: StoredSignalTransactionDetails;
@@ -360,6 +367,7 @@ export async function dbUpsertWebhookTransactionLog(
          source,
          event_type,
          tx_signature,
+         chain_time_ms,
          status,
          error_message,
          detail_source,
@@ -389,6 +397,7 @@ export async function dbUpsertWebhookTransactionLog(
     lastEventType: input.eventType,
   };
   const createdAt = existing?.created_at ?? input.createdAt;
+  const chainTimeMs = input.chainTimeMs ?? existing?.chain_time_ms ?? null;
   const updatedAt = input.updatedAt ?? nowTs();
   const walletAddress =
     input.walletAddress ??
@@ -418,6 +427,7 @@ export async function dbUpsertWebhookTransactionLog(
          source,
          event_type,
          tx_signature,
+         chain_time_ms,
          status,
          error_message,
          detail_source,
@@ -425,7 +435,7 @@ export async function dbUpsertWebhookTransactionLog(
          metadata_json,
          created_at,
          updated_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
        ON CONFLICT(user_id, group_key)
        DO UPDATE SET
          token_id = excluded.token_id,
@@ -439,6 +449,7 @@ export async function dbUpsertWebhookTransactionLog(
          fee_amount_usd = excluded.fee_amount_usd,
          source = excluded.source,
          tx_signature = excluded.tx_signature,
+         chain_time_ms = excluded.chain_time_ms,
          status = excluded.status,
          error_message = excluded.error_message,
          detail_source = excluded.detail_source,
@@ -461,6 +472,7 @@ export async function dbUpsertWebhookTransactionLog(
       mergedDetails.source,
       existing?.event_type ?? input.eventType,
       input.txSignature,
+      chainTimeMs,
       status,
       status === 'FAILED' ? input.errorMessage : null,
       mergedDetails.detailSource,
@@ -474,6 +486,8 @@ export async function dbUpsertWebhookTransactionLog(
 
 const SIGNAL_SOL_PRICE_CACHE_TTL_MS = 30_000;
 const SIGNAL_SOL_PRICE_FAILURE_TTL_MS = 5_000;
+const TRADE_LOG_CHAIN_TIME_BACKFILL_LIMIT = 50;
+const TRADE_LOG_CHAIN_TIME_BACKFILL_CONCURRENCY = 5;
 
 let cachedSignalSolPriceUsd: {
   expiresAt: number;
@@ -775,12 +789,14 @@ async function dbListSignalGroupsForTokenWindow(
 ): Promise<Array<{
   groupKey: string;
   txSignature: string | null;
+  chainTimeMs: number | null;
   rows: Array<{
     id: number;
     source: string;
     event_type: string;
     wallet_address: string | null;
     tx_signature: string | null;
+    chain_time_ms: number | null;
     details_json: string | null;
     payload: string;
     processed: number;
@@ -792,28 +808,34 @@ async function dbListSignalGroupsForTokenWindow(
   const rows = await db
     .prepare(
       `SELECT
-         id,
-         source,
-         event_type,
-         wallet_address,
-         tx_signature,
-         details_json,
-         payload,
-         processed,
-         error_message,
-         created_at
-       FROM signals
-       WHERE source LIKE ?1
-       ORDER BY created_at DESC, id DESC
+         s.id,
+         s.source,
+         s.event_type,
+         s.wallet_address,
+         s.tx_signature,
+         wtl.chain_time_ms,
+         s.details_json,
+         s.payload,
+         s.processed,
+         s.error_message,
+         s.created_at
+       FROM signals s
+       LEFT JOIN webhook_transaction_logs wtl
+         ON wtl.user_id = ?2
+        AND wtl.tx_signature = s.tx_signature
+        AND wtl.token_contract_address = ?3
+       WHERE s.source LIKE ?1
+       ORDER BY COALESCE(wtl.chain_time_ms, s.created_at) DESC, s.id DESC
        LIMIT 2000`,
     )
-    .bind(`%:user:${userId}`)
+    .bind(`%:user:${userId}`, userId, contractAddress)
     .all<{
       id: number;
       source: string;
       event_type: string;
       wallet_address: string | null;
       tx_signature: string | null;
+      chain_time_ms: number | null;
       details_json: string | null;
       payload: string;
       processed: number;
@@ -822,9 +844,9 @@ async function dbListSignalGroupsForTokenWindow(
     }>();
   const grouped = new Map<string, typeof rows.results>();
   for (const row of rows.results) {
-    const createdAtMs = normalizeTimestampMs(row.created_at);
-    if (startTimeMs != null && createdAtMs < startTimeMs) continue;
-    if (endTimeMs != null && createdAtMs > endTimeMs) continue;
+    const chainTimeMs = row.chain_time_ms;
+    if (startTimeMs != null && chainTimeMs != null && chainTimeMs < startTimeMs) continue;
+    if (endTimeMs != null && chainTimeMs != null && chainTimeMs > endTimeMs) continue;
     const contractAddresses = extractStoredSignalContractAddresses(row.payload);
     if (!contractAddresses.includes(contractAddress)) {
       continue;
@@ -840,6 +862,7 @@ async function dbListSignalGroupsForTokenWindow(
   return [...grouped.entries()].map(([groupKey, groupRows]) => ({
     groupKey,
     txSignature: groupRows[0]?.tx_signature ?? null,
+    chainTimeMs: groupRows[0]?.chain_time_ms ?? null,
     rows: groupRows,
     mergedDetails: mergeStoredSignalTransactionDetails(
       ...groupRows.map((row) => parseStoredSignalTransactionDetails(row.details_json)),
@@ -890,16 +913,17 @@ export async function reconcileWebhookTransactionDetailsInWindow(
     : null;
   let enrichedTransactions = 0;
   for (const group of groupsToReconcile) {
-    const rpcDetails = await fetchSolanaWebhookTransactionDetailsFromRpc(
+    const rpcResult = await fetchSolanaWebhookTransactionDetailsFromRpc(
       rpcUrls,
       group.txSignature!,
       contractAddress,
       group.mergedDetails,
       solPriceUsd,
     );
+    const chainTimeMs = rpcResult.chainTimeMs ?? group.chainTimeMs ?? null;
     const mergedDetails = mergeStoredSignalTransactionDetails(
       group.mergedDetails,
-      rpcDetails,
+      rpcResult.details,
     );
     const correctedDetails = applyAmmPoolDirectionCorrection(
       mergedDetails,
@@ -938,9 +962,11 @@ export async function reconcileWebhookTransactionDetailsInWindow(
       details: correctedDetails,
       processed: group.rows.every((row) => row.processed === 1),
       errorMessage: group.rows.find((row) => row.error_message)?.error_message ?? null,
+      chainTimeMs,
       createdAt: group.rows[0]?.created_at ?? nowTs(),
       metadata: {
         updateReason: 'signal_detail_reconcile',
+        chainTimeMs,
       },
     });
     const detailsChanged =
@@ -1031,6 +1057,101 @@ function signatureBlockTimeToMs(blockTime: number | null | undefined): number | 
   }
   return blockTime * 1000;
 }
+
+export async function fetchSolanaTransactionChainTimeMs(
+  rpcUrls: string | string[],
+  txSignature: string,
+): Promise<number | null> {
+  try {
+    const transaction = await solanaRpc<{
+      blockTime?: number | null;
+    } | null>(rpcUrls, 'getTransaction', [
+      txSignature,
+      { commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+    ]);
+    return signatureBlockTimeToMs(transaction?.blockTime);
+  } catch (err: unknown) {
+    console.warn(`Failed to load chain time for trade transaction ${txSignature}:`, err);
+    return null;
+  }
+}
+
+export async function backfillTradeLogChainTimes(
+  db: D1Database,
+  rpcUrls: string | string[],
+  options?: {
+    limit?: number;
+  },
+): Promise<{
+  candidateLogs: number;
+  updatedLogs: number;
+  unresolvedLogs: number;
+}> {
+  const limit = Math.min(
+    Math.max(options?.limit ?? TRADE_LOG_CHAIN_TIME_BACKFILL_LIMIT, 1),
+    TRADE_LOG_CHAIN_TIME_BACKFILL_LIMIT,
+  );
+  const rows = await db
+    .prepare(
+      `SELECT id, tx_signature
+       FROM trade_logs
+       WHERE tx_signature IS NOT NULL
+         AND TRIM(tx_signature) <> ''
+         AND chain_time_ms IS NULL
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?1`,
+    )
+    .bind(limit)
+    .all<{
+      id: number;
+      tx_signature: string;
+    }>();
+
+  let updatedLogs = 0;
+  let unresolvedLogs = 0;
+  for (let index = 0; index < rows.results.length; index += TRADE_LOG_CHAIN_TIME_BACKFILL_CONCURRENCY) {
+    const chunk = rows.results.slice(
+      index,
+      index + TRADE_LOG_CHAIN_TIME_BACKFILL_CONCURRENCY,
+    );
+    const chainTimes = await Promise.allSettled(
+      chunk.map(async (row) => ({
+        id: row.id,
+        chainTimeMs: await fetchSolanaTransactionChainTimeMs(rpcUrls, row.tx_signature),
+      })),
+    );
+
+    const updateStatements: D1PreparedStatement[] = [];
+    const timestamp = nowTs();
+    for (const result of chainTimes) {
+      if (result.status !== 'fulfilled' || result.value.chainTimeMs == null) {
+        unresolvedLogs += 1;
+        continue;
+      }
+      updateStatements.push(
+        db
+          .prepare(
+            `UPDATE trade_logs
+             SET chain_time_ms = ?2,
+                 updated_at = ?3
+             WHERE id = ?1`,
+          )
+          .bind(result.value.id, result.value.chainTimeMs, timestamp),
+      );
+    }
+
+    if (updateStatements.length > 0) {
+      await db.batch(updateStatements);
+      updatedLogs += updateStatements.length;
+    }
+  }
+
+  return {
+    candidateLogs: rows.results.length,
+    updatedLogs,
+    unresolvedLogs,
+  };
+}
 export async function reconcileTokenTransactionsFromRpc(
   db: D1Database,
   userId: number,
@@ -1114,7 +1235,7 @@ export async function reconcileTokenTransactionsFromRpc(
     const scannedWalletAddress = signatureMeta.address !== contractAddress
       ? signatureMeta.address
       : null;
-    const rpcDetails = await fetchSolanaWebhookTransactionDetailsFromRpc(
+    const rpcResult = await fetchSolanaWebhookTransactionDetailsFromRpc(
       rpcUrls,
       txSignature,
       contractAddress,
@@ -1123,6 +1244,7 @@ export async function reconcileTokenTransactionsFromRpc(
       },
       solPriceUsd,
     );
+    const chainTimeMs = rpcResult.chainTimeMs ?? signatureMeta.blockTimeMs ?? null;
     const mergedDetails = applyAmmPoolDirectionCorrection(
       mergeStoredSignalTransactionDetails(
         {
@@ -1132,7 +1254,7 @@ export async function reconcileTokenTransactionsFromRpc(
           transactionStatus: 'PENDING',
           detailSource: 'unknown',
         },
-        rpcDetails,
+        rpcResult.details,
       ),
       ammPoolAddress,
     );
@@ -1186,11 +1308,12 @@ export async function reconcileTokenTransactionsFromRpc(
       details: mergedDetails,
       processed: true,
       errorMessage: null,
+      chainTimeMs,
       createdAt: createdSignal.signal.createdAt,
       metadata: {
         updateReason: 'rpc_reconcile_insert',
         scannedAddress: signatureMeta.address,
-        blockTimeMs: signatureMeta.blockTimeMs,
+        blockTimeMs: chainTimeMs,
       },
     });
     insertedSignals += 1;
@@ -1495,31 +1618,38 @@ export async function fetchSolanaWebhookTransactionDetailsFromRpc(
   trackedContractAddress: string,
   payloadDetails: Partial<StoredSignalTransactionDetails>,
   solPriceUsd?: number | null,
-): Promise<Partial<StoredSignalTransactionDetails>> {
+): Promise<RpcWebhookTransactionDetailsResult> {
   try {
     const resolvedSolPriceUsd = solPriceUsd === undefined
       ? await loadSignalSolPriceUsd()
       : solPriceUsd;
     const transaction = await solanaRpc<{
       meta?: RpcTransactionMeta;
+      blockTime?: number | null;
     }>(rpcUrls, 'getTransaction', [
       txSignature,
       { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
     ]);
-    return buildRpcSignalDetailsFromTransactionMeta(
-      transaction.meta,
-      trackedContractAddress,
-      payloadDetails,
-      resolvedSolPriceUsd,
-    );
+    return {
+      chainTimeMs: signatureBlockTimeToMs(transaction.blockTime),
+      details: buildRpcSignalDetailsFromTransactionMeta(
+        transaction.meta,
+        trackedContractAddress,
+        payloadDetails,
+        resolvedSolPriceUsd,
+      ),
+    };
   } catch (err: unknown) {
     console.warn(`Failed to enrich webhook transaction ${txSignature} from RPC:`, err);
     return {
-      tokenContractAddress: trackedContractAddress,
-      feeAmountUsd: null,
-      source: 'rpc_reconcile',
-      transactionStatus: 'PENDING',
-      detailSource: 'unknown',
+      chainTimeMs: null,
+      details: {
+        tokenContractAddress: trackedContractAddress,
+        feeAmountUsd: null,
+        source: 'rpc_reconcile',
+        transactionStatus: 'PENDING',
+        detailSource: 'unknown',
+      },
     };
   }
 }
