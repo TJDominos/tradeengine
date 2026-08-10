@@ -213,6 +213,7 @@ export function buildStrategyRecordConfigFromDocument(
     },
     execution: buildQueuedExecutionConfig(document.execution),
     baseOrderCount: basePlannedTransactionCount,
+    maxOrderCount: document.parameters.maxTransactions,
     baseTotalVolumeUsd:
       document.riskControls.maxPositionUsd ??
       (document.targets.volumeUsdMin > 0

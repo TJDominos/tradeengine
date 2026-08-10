@@ -246,6 +246,10 @@ export type StrategyPlanPreview = {
   skippedForCapabilityCount: number;
   skippedForSolReserveCount: number;
   sufficientBuyCapacity: boolean;
+  requestedTaskCount: number;
+  plannedTaskCount: number;
+  unallocatedVolumeUsd: number;
+  isExecutable: boolean;
   tasks: StrategyPlanPreviewTask[];
   accounts: StrategyPlanPreviewAccount[];
 };

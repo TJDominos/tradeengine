@@ -116,6 +116,7 @@ export interface StrategyExecutionPlanningInput {
   startTime: number;
   minOrderUsd?: number;
   maxOrderUsd?: number;
+  strictOrderCount?: boolean;
   random?: () => number;
   baseTokenAddress?: string;
 }
@@ -239,6 +240,7 @@ export interface StrategyRecordConfig {
   tactics: StrategyExecutionTactics;
   execution: StrategyExecutionConfig;
   baseOrderCount: number;
+  maxOrderCount: number;
   baseTotalVolumeUsd: number;
   baseDurationMs: number;
   minOrderUsd: number;

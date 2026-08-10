@@ -98,6 +98,10 @@ type StrategyPlanPreviewResponse = {
   skippedForCapabilityCount: number;
   skippedForSolReserveCount: number;
   sufficientBuyCapacity: boolean;
+  requestedTaskCount: number;
+  plannedTaskCount: number;
+  unallocatedVolumeUsd: number;
+  isExecutable: boolean;
   tasks: StrategyPlanPreviewTask[];
   accounts: StrategyPlanPreviewAccount[];
 };
@@ -154,6 +158,10 @@ function buildStrategyPlanPreview(
     skippedForCapabilityCount: planning.skippedForCapabilityCount,
     skippedForSolReserveCount: planning.lowSolWarningCount,
     sufficientBuyCapacity: planning.availableBuyAmount >= requiredBuyAmount,
+    requestedTaskCount: planning.requestedTaskCount,
+    plannedTaskCount: planning.plannedTaskCount,
+    unallocatedVolumeUsd: planning.unallocatedVolumeUsd,
+    isExecutable: planning.isExecutable,
     tasks: planning.tasks,
     accounts: planning.accounts,
   };
@@ -409,6 +417,36 @@ export async function handleStrategyRoutes(
       throw new ApiError(
         409,
         `Enabled managed accounts only provide ${deploymentValidation.availableQuoteAmount.toFixed(2)} ${quoteLabel} of immediate buy balance across ${deploymentValidation.eligibleAccountCount}/${deploymentValidation.enabledAccountCount} eligible accounts, below required ${requiredBuyAmount.toFixed(2)} ${quoteLabel}`,
+      );
+    }
+
+    const [planningAccounts, deploymentMarketSnapshot] = await Promise.all([
+      listManagedAccountsWithStoredBalances(
+        env.TRADINGBOT_DB,
+        user.id,
+        {
+          pair: {
+            baseMint: normalizedBaseTokenAddress,
+            quoteMint: normalizedQuoteTokenAddress,
+          },
+        },
+      ),
+      loadStoredMarketSnapshotByContractAddress(
+        env.TRADINGBOT_DB,
+        normalizedBaseTokenAddress,
+      ),
+    ]);
+    const deploymentPlan = buildStrategyPlanPreview(
+      normalizedDocument,
+      buildStrategyRecordConfigFromDocument(normalizedDocument, user.id),
+      planningAccounts,
+      requiredBuyAmount,
+      deploymentMarketSnapshot?.priceUsd ?? null,
+    );
+    if (!deploymentPlan.isExecutable) {
+      throw new ApiError(
+        409,
+        `Planner could only allocate ${deploymentPlan.plannedTaskCount}/${deploymentPlan.requestedTaskCount} required tasks with ${deploymentPlan.unallocatedVolumeUsd.toFixed(2)} ${quoteLabel} unallocated`,
       );
     }
 

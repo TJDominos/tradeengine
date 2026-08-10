@@ -14,6 +14,7 @@
     "check:strategy-do-lifecycle": "node scripts/check-strategy-do-lifecycle.mjs",
     "check:strategy-do-completion-advance": "node scripts/check-strategy-do-completion-advance.mjs",
     "check:strategy-do-idempotency": "node scripts/check-strategy-do-idempotency.mjs",
+    "check:strategy-planner": "npx --yes tsx scripts/check-strategy-planner.mts",
     "check:max-lines": "node scripts/check-max-lines.mjs",
     "cleanup:token-account-holders": "node scripts/cleanup-token-account-holders.mjs",
     "check:base-token-backfill:local": "wrangler d1 execute tradingbot --local --file ./scripts/check-base-token-backfill.sql",

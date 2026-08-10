@@ -706,6 +706,7 @@ export class StrategyEngineDurableObject {
     return {
       macroObjective: config.macroObjective,
       baseOrderCount: config.baseOrderCount,
+      maxOrderCount: config.strategyDocument.parameters.maxTransactions,
       baseTotalVolumeUsd: config.targetTotalVolumeUsd,
       baseDurationMs: config.baseDurationMs,
       minOrderUsd: config.strategyDocument.parameters.minOrderUsd,
@@ -775,6 +776,13 @@ export class StrategyEngineDurableObject {
       existingPlannedVolumes: this.buildExistingPlannedVolumes(),
       seedContext,
     });
+
+    if (!planning.isExecutable) {
+      throw new ApiError(
+        409,
+        `Planner could only allocate ${planning.plannedTaskCount}/${planning.requestedTaskCount} tasks with ${planning.unallocatedVolumeUsd.toFixed(2)} USD unallocated`,
+      );
+    }
 
     for (const task of planning.tasks) {
       this.enqueueTask({

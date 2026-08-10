@@ -100,6 +100,7 @@ function resolveConstrainedOrderCount(
   requestedOrderCount: number,
   minOrderUsd: number,
   maxOrderUsd: number,
+  strictOrderCount: boolean,
 ): number {
   if (totalVolume < minOrderUsd) {
     return 0;
@@ -110,6 +111,12 @@ function resolveConstrainedOrderCount(
     return 1;
   }
   const normalizedRequestedOrderCount = Math.max(1, Math.floor(requestedOrderCount));
+  if (strictOrderCount) {
+    return Math.min(
+      maximumOrderCount,
+      Math.max(minimumOrderCount, normalizedRequestedOrderCount),
+    );
+  }
   const preferredOrderUsd = Number.isFinite(maxOrderUsd) && maxOrderUsd > minOrderUsd
     ? minOrderUsd + (maxOrderUsd - minOrderUsd) * 0.55
     : totalVolume / normalizedRequestedOrderCount;
@@ -285,6 +292,7 @@ export function buildRandomizedTwapPlan(
     input.orderCount,
     minOrderUsd,
     maxOrderUsd,
+    input.strictOrderCount ?? false,
   );
   const durationMs = Math.max(0, Math.round(input.durationMs));
   const random = input.random ?? Math.random;

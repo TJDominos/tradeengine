@@ -1081,13 +1081,27 @@ export default function StrategySchemaForm({
 
             {planPreview ? (
               <>
+                <div className={`mt-4 rounded-xl border px-4 py-3 text-sm ${planPreview.isExecutable ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100' : 'border-rose-500/20 bg-rose-500/10 text-rose-100'}`}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] opacity-80">
+                    {planPreview.isExecutable ? 'Executable Plan' : 'Plan Cannot Execute'}
+                  </p>
+                  <p className="mt-2 font-semibold">
+                    {planPreview.plannedTaskCount}/{planPreview.requestedTaskCount} required tasks allocated
+                  </p>
+                  {!planPreview.isExecutable ? (
+                    <p className="mt-1 text-xs opacity-80">
+                      {formatCurrency(planPreview.unallocatedVolumeUsd)} remains unallocated. Adjust account balances, minimum order size, or transaction count before deployment.
+                    </p>
+                  ) : null}
+                </div>
+
                 <div className={`mt-4 rounded-xl border px-4 py-3 text-sm ${planPreview.sufficientBuyCapacity ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100' : 'border-rose-500/20 bg-rose-500/10 text-rose-100'}`}>
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] opacity-80">Buy Capacity</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] opacity-80">Initial Buy Capacity</p>
                   <p className="mt-2 text-lg font-semibold">
                     {formatCurrency(planPreview.availableBuyAmount)} / {formatCurrency(planPreview.requiredBuyAmount)} {planPreview.quoteLabel}
                   </p>
                   <p className="mt-1 text-xs opacity-80">
-                    {planPreview.eligibleAccountCount}/{planPreview.enabledAccountCount} buy-eligible enabled account(s), capability skipped {planPreview.skippedForCapabilityCount}, low-SOL warning {planPreview.skippedForSolReserveCount}
+                    {planPreview.eligibleAccountCount} account(s) can fund at least one minimum buy before planned sells, capability skipped {planPreview.skippedForCapabilityCount}, low-SOL warning {planPreview.skippedForSolReserveCount}
                   </p>
                 </div>
 
@@ -1111,6 +1125,37 @@ export default function StrategySchemaForm({
                               <p className="mt-1 text-xs text-slate-400">Pulse {task.pulse ?? 'base'} · Order {task.orderIndex}/{task.totalOrders}</p>
                             </div>
                             <p className="text-xs text-slate-400">{formatPlannerTime(task.scheduledAt)}</p>
+                          </div>
+                          <div className="mt-3 space-y-2 border-t border-slate-700 pt-3">
+                            {task.allocations.length > 0 ? (
+                              task.allocations.map((allocation) => {
+                                const currentBalance = task.side === 'buy'
+                                  ? `${formatNumber(allocation.quoteAvailableAmount)} ${planPreview.quoteLabel}`
+                                  : `${formatNumber(allocation.baseTokenAmount)} base`;
+
+                                return (
+                                  <div key={allocation.accountId} className="rounded-lg bg-slate-900/70 px-3 py-2">
+                                    <div className="flex items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <p className="truncate font-medium text-slate-100">{allocation.label}</p>
+                                        <p className="mt-0.5 truncate font-mono text-[11px] text-slate-500">{contractPreview(allocation.walletAddress)}</p>
+                                      </div>
+                                      <p className="shrink-0 font-semibold text-white">
+                                        {task.side === 'buy' ? 'Buy' : 'Sell'} {formatCurrency(allocation.plannedVolumeUsd)}
+                                      </p>
+                                    </div>
+                                    <p className="mt-1 text-xs text-slate-400">Current balance: {currentBalance}</p>
+                                    {allocation.accountBuyOverAllocated ? (
+                                      <p className="mt-1 text-xs text-amber-300">
+                                        Buy exceeds available balance by {formatCurrency(allocation.accountBuyOverAllocationUsd)}.
+                                      </p>
+                                    ) : null}
+                                  </div>
+                                );
+                              })
+                            ) : (
+                              <p className="text-xs text-slate-500">No account allocation for this task.</p>
+                            )}
                           </div>
                         </div>
                       ))
