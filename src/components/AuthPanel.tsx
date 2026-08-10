@@ -64,7 +64,7 @@ export default function AuthPanel({
           <button
             className="h-11 w-full rounded-md bg-emerald-600 font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
             onClick={onBootstrap}
-            disabled={submitting === 'bootstrap'}
+            disabled={submitting != null}
           >
             {submitting === 'bootstrap' ? 'Creating admin...' : 'Create admin account'}
           </button>
@@ -105,7 +105,7 @@ export default function AuthPanel({
         <button
           className="h-11 w-full rounded-md bg-blue-600 font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
           onClick={onLogin}
-          disabled={submitting === 'login'}
+          disabled={submitting != null}
         >
           {submitting === 'login' ? 'Signing in...' : 'Log in'}
         </button>

@@ -50,7 +50,6 @@ import {
   api,
   buildWalletOwnershipLookup,
   createDefaultDateRange,
-  findWalletTokenAmount,
   formatDate,
   formatUSD,
   mergeTradableToken,
@@ -58,7 +57,6 @@ import {
   parseAmount,
   resolveWalletOwnershipMeta,
   serializeSettings,
-  summarizeAccounts,
   toRangeEndMs,
   toRangeStartMs,
 } from './app/utils';
@@ -76,54 +74,6 @@ type ManagedAccountPageResponse = {
   totalItems: number;
   balances: Record<string, WalletBalance>;
 };
-
-function buildWalletBalanceFromAccountSnapshot(
-  account: EngineState['internalAccs'][number],
-  activeTokenMint: string,
-): WalletBalance | null {
-  const hasSnapshot =
-    account.walletBalanceUpdatedAt != null ||
-    account.walletUsdcBalance != null ||
-    account.walletSolBalance != null ||
-    account.walletActiveTokenBalance != null;
-  if (!hasSnapshot) {
-    return null;
-  }
-
-  return {
-    address: account.address,
-    sol: String(account.walletSolBalance ?? 0),
-    usdc: String(account.walletUsdcBalance ?? 0),
-    tokens:
-      activeTokenMint &&
-      account.walletActiveTokenMint === activeTokenMint &&
-      account.walletActiveTokenBalance != null
-        ? [{
-            mint: activeTokenMint,
-            symbol: 'Tracked',
-            network: 'solana',
-            amount: String(account.walletActiveTokenBalance),
-            decimals: null,
-          }]
-        : [],
-    updatedAt: account.walletBalanceUpdatedAt ?? 0,
-  };
-}
-
-function buildWalletBalancesFromAccountSnapshots(
-  accounts: EngineState['internalAccs'],
-  activeTokenMint: string,
-): Record<string, WalletBalance> {
-  const balances: Record<string, WalletBalance> = {};
-  for (const account of accounts) {
-    const balance = buildWalletBalanceFromAccountSnapshot(account, activeTokenMint);
-    if (!balance) {
-      continue;
-    }
-    balances[account.address] = balance;
-  }
-  return balances;
-}
 
 function createEmptyRecoveryPhrase(): string[] {
   return Array(MAX_RECOVERY_PHRASE_WORD_COUNT).fill('');
@@ -194,6 +144,7 @@ export default function App() {
   const [rpcEndpointForm, setRpcEndpointForm] = React.useState({ url: '' });
   const [strategyDraft, setStrategyDraft] = React.useState<StrategyVersionDocument | null>(null);
   const [submitting, setSubmitting] = React.useState<string | null>(null);
+  const [walletBalanceActionPending, setWalletBalanceActionPending] = React.useState(false);
 
   const [walletBalances, setWalletBalances] = React.useState<Record<string, WalletBalance>>({});
   const [walletBalanceErrors, setWalletBalanceErrors] = React.useState<Record<string, string>>({});
@@ -231,6 +182,7 @@ export default function App() {
   const settingsDirtyRef = React.useRef(false);
   const strategyDraftDirtyRef = React.useRef(false);
   const activeSubmissionRef = React.useRef<string | null>(null);
+  const walletBalanceActionRef = React.useRef(false);
   const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
   const dashboardStatePollInFlightRef = React.useRef(false);
   const outsideHolderPageRef = React.useRef(outsideHolderPage);
@@ -317,11 +269,6 @@ export default function App() {
     setEngineState(state);
     syncSettingsFromServer(state.settings);
     syncStrategyDraftFromServer(state, { preserveDraft: true });
-    const activeTokenMint = state.settings.activeBaseTokenAddress?.trim() || state.settings.baseTokenAddress.trim();
-    setWalletBalances((current) => ({
-      ...current,
-      ...buildWalletBalancesFromAccountSnapshots(state.internalAccs, activeTokenMint),
-    }));
     setLastUpdated(new Date().toLocaleString());
     return state;
   }, [syncSettingsFromServer, syncStrategyDraftFromServer]);
@@ -543,7 +490,44 @@ export default function App() {
     };
   }, [activeTab, auth?.authenticated, loadState, marketRefreshRunning]);
 
-  const refreshWalletBalance = React.useCallback(async (address: string) => {
+  const runLockedAction = React.useCallback(async (
+    name: string,
+    action: () => Promise<void>,
+  ): Promise<boolean> => {
+    if (activeSubmissionRef.current) {
+      return false;
+    }
+
+    activeSubmissionRef.current = name;
+    setSubmitting(name);
+    try {
+      await action();
+      return true;
+    } finally {
+      activeSubmissionRef.current = null;
+      setSubmitting(null);
+    }
+  }, []);
+
+  const runWalletBalanceAction = React.useCallback(async (
+    action: () => Promise<void>,
+  ): Promise<boolean> => {
+    if (walletBalanceActionRef.current) {
+      return false;
+    }
+
+    walletBalanceActionRef.current = true;
+    setWalletBalanceActionPending(true);
+    try {
+      await action();
+      return true;
+    } finally {
+      walletBalanceActionRef.current = false;
+      setWalletBalanceActionPending(false);
+    }
+  }, []);
+
+  const requestWalletBalance = React.useCallback(async (address: string) => {
     if (!auth?.authenticated) {
       return false;
     }
@@ -590,32 +574,29 @@ export default function App() {
       return;
     }
 
-    setError('');
-    setNotice('');
-    const results: boolean[] = [];
-    const batchSize = 2;
-    for (let index = 0; index < targetAddresses.length; index += batchSize) {
-      const batch = targetAddresses.slice(index, index + batchSize);
-      const batchResults = await Promise.all(
-        batch.map((address) => refreshWalletBalance(address)),
-      );
-      results.push(...batchResults);
-    }
-    const refreshedCount = results.filter(Boolean).length;
-    const failedCount = targetAddresses.length - refreshedCount;
+    await runWalletBalanceAction(async () => {
+      setError('');
+      setNotice('');
+      const results: boolean[] = [];
+      for (const address of targetAddresses) {
+        results.push(await requestWalletBalance(address));
+      }
+      const refreshedCount = results.filter(Boolean).length;
+      const failedCount = targetAddresses.length - refreshedCount;
 
-    if (failedCount === 0) {
-      setNotice(`Refreshed ${refreshedCount} wallet balance${refreshedCount === 1 ? '' : 's'}.`);
-      return;
-    }
+      if (failedCount === 0) {
+        setNotice(`Refreshed ${refreshedCount} wallet balance${refreshedCount === 1 ? '' : 's'}.`);
+        return;
+      }
 
-    if (refreshedCount === 0) {
-      setError(`Failed to refresh ${failedCount} wallet balance${failedCount === 1 ? '' : 's'}.`);
-      return;
-    }
+      if (refreshedCount === 0) {
+        setError(`Failed to refresh ${failedCount} wallet balance${failedCount === 1 ? '' : 's'}.`);
+        return;
+      }
 
-    setNotice(`Refreshed ${refreshedCount} wallet balances; ${failedCount} failed.`);
-  }, [refreshWalletBalance]);
+      setNotice(`Refreshed ${refreshedCount} wallet balances; ${failedCount} failed.`);
+    });
+  }, [requestWalletBalance, runWalletBalanceAction]);
 
   const refreshInternalWalletBalances = React.useCallback(async () => {
     if (internalAccountPage.items.length === 0) {
@@ -633,33 +614,29 @@ export default function App() {
   }, [outsideHolderPage.items, refreshWalletBalances]);
 
   const refreshInternalAccountBalance = React.useCallback(async (address: string) => {
-    const refreshed = await refreshWalletBalance(address);
-    if (refreshed) {
-      setError('');
-      setNotice('Wallet balance refreshed.');
-      return;
-    }
+    await runWalletBalanceAction(async () => {
+      const refreshed = await requestWalletBalance(address);
+      if (refreshed) {
+        setError('');
+        setNotice('Wallet balance refreshed.');
+        return;
+      }
 
-    setNotice('');
-    setError('Failed to refresh wallet balance.');
-  }, [refreshWalletBalance]);
+      setNotice('');
+      setError('Failed to refresh wallet balance.');
+    });
+  }, [requestWalletBalance, runWalletBalanceAction]);
 
   const submitWithFeedback = async (name: string, action: () => Promise<void>) => {
-    if (activeSubmissionRef.current) {
-      return;
-    }
-    activeSubmissionRef.current = name;
-    setSubmitting(name);
-    setError('');
-    setNotice('');
-    try {
-      await action();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Request failed');
-    } finally {
-      activeSubmissionRef.current = null;
-      setSubmitting(null);
-    }
+    await runLockedAction(name, async () => {
+      setError('');
+      setNotice('');
+      try {
+        await action();
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Request failed');
+      }
+    });
   };
 
   const handleBootstrap = () =>
@@ -1172,27 +1149,29 @@ export default function App() {
       return;
     }
 
-    setAdminMsg({ type: '', text: 'Updating...' });
-    try {
-      const response = await fetch('/api/admin/password', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          oldPassword: adminPasswordForm.old,
-          newPassword: adminPasswordForm.new1,
-        }),
-      });
-      const data = (await response.json()) as { error?: string; message?: string };
-      if (!response.ok) {
-        setAdminMsg({ type: 'error', text: data.error || 'Failed to change password' });
-        return;
+    await runLockedAction('admin-password', async () => {
+      setAdminMsg({ type: '', text: 'Updating...' });
+      try {
+        const response = await fetch('/api/admin/password', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            oldPassword: adminPasswordForm.old,
+            newPassword: adminPasswordForm.new1,
+          }),
+        });
+        const data = (await response.json()) as { error?: string; message?: string };
+        if (!response.ok) {
+          setAdminMsg({ type: 'error', text: data.error || 'Failed to change password' });
+          return;
+        }
+        setAdminPasswordForm({ old: '', new1: '', new2: '' });
+        setAdminMsg({ type: 'success', text: data.message || 'Password updated successfully' });
+      } catch {
+        setAdminMsg({ type: 'error', text: 'Network error' });
       }
-      setAdminPasswordForm({ old: '', new1: '', new2: '' });
-      setAdminMsg({ type: 'success', text: data.message || 'Password updated successfully' });
-    } catch {
-      setAdminMsg({ type: 'error', text: 'Network error' });
-    }
+    });
   };
 
   const handleAdminImport = async () => {
@@ -1223,63 +1202,65 @@ export default function App() {
       }
     }
 
-    setAdminMsg({ type: '', text: 'Importing...' });
-    try {
-      const payload = adminImportForm.isRecovery
-        ? {
-            label: 'Imported Wallet',
-            adminPassword: adminImportForm.password,
-            recoveryPhrase: phrase,
-            derivedAccountCount: adminImportForm.derivedAccountCount,
-          }
-        : {
-            label: 'Imported Wallet',
-            adminPassword: adminImportForm.password,
-            privateKey: adminImportForm.key,
-          };
-      const response = await fetch('/api/admin/private-keys', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = (await response.json()) as {
-        error?: string;
-        account?: { address: string };
-        accounts?: Array<{ address: string }>;
-        importedCount?: number;
-        requestedDerivedAccountCount?: number;
-      };
-      if (!response.ok) {
-        setAdminMsg({ type: 'error', text: data.error || 'Failed to import wallet' });
-        return;
+    await runLockedAction('admin-import', async () => {
+      setAdminMsg({ type: '', text: 'Importing...' });
+      try {
+        const payload = adminImportForm.isRecovery
+          ? {
+              label: 'Imported Wallet',
+              adminPassword: adminImportForm.password,
+              recoveryPhrase: phrase,
+              derivedAccountCount: adminImportForm.derivedAccountCount,
+            }
+          : {
+              label: 'Imported Wallet',
+              adminPassword: adminImportForm.password,
+              privateKey: adminImportForm.key,
+            };
+        const response = await fetch('/api/admin/private-keys', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = (await response.json()) as {
+          error?: string;
+          account?: { address: string };
+          accounts?: Array<{ address: string }>;
+          importedCount?: number;
+          requestedDerivedAccountCount?: number;
+        };
+        if (!response.ok) {
+          setAdminMsg({ type: 'error', text: data.error || 'Failed to import wallet' });
+          return;
+        }
+        setAdminImportForm({
+          key: '',
+          password: '',
+          recoveryPhrase: createEmptyRecoveryPhrase(),
+          isRecovery: false,
+          wordCount: 12,
+          derivedAccountCount: Math.min(
+            (data.requestedDerivedAccountCount ?? adminImportForm.derivedAccountCount) + 20,
+            100,
+          ),
+        });
+        setDerivedAccountPreview([]);
+        await loadState();
+        await loadInternalAccountPage();
+        await loadOutsideHolderPage();
+        setAdminMsg({
+          type: 'success',
+          text:
+            data.importedCount && data.importedCount > 1
+              ? `Imported ${data.importedCount} derived wallets successfully`
+              : `Imported successfully: ${data.account?.address ?? ''}`.trim(),
+        });
+        setAdminTab('list');
+      } catch {
+        setAdminMsg({ type: 'error', text: 'Network error' });
       }
-      setAdminImportForm({
-        key: '',
-        password: '',
-        recoveryPhrase: createEmptyRecoveryPhrase(),
-        isRecovery: false,
-        wordCount: 12,
-        derivedAccountCount: Math.min(
-          (data.requestedDerivedAccountCount ?? adminImportForm.derivedAccountCount) + 20,
-          100,
-        ),
-      });
-      setDerivedAccountPreview([]);
-      await loadState();
-      await loadInternalAccountPage();
-      await loadOutsideHolderPage();
-      setAdminMsg({
-        type: 'success',
-        text:
-          data.importedCount && data.importedCount > 1
-            ? `Imported ${data.importedCount} derived wallets successfully`
-            : `Imported successfully: ${data.account?.address ?? ''}`.trim(),
-      });
-      setAdminTab('list');
-    } catch {
-      setAdminMsg({ type: 'error', text: 'Network error' });
-    }
+    });
   };
 
   const handleAdminDelete = async (address: string) => {
@@ -1290,63 +1271,67 @@ export default function App() {
     if (!window.confirm('Are you sure you want to delete this private key?')) return;
     if (!window.confirm('Double confirm: this action cannot be undone. Delete?')) return;
 
-    try {
-      const response = await fetch(`/api/admin/private-keys/${address}`, {
-        method: 'DELETE',
-        credentials: 'include',
-        headers: { Authorization: adminImportForm.password },
-      });
-      const data = (await response.json()) as { error?: string; message?: string };
-      if (!response.ok) {
-        setAdminMsg({ type: 'error', text: data.error || 'Failed to delete wallet' });
-        return;
+    await runLockedAction(`admin-delete-${address}`, async () => {
+      try {
+        const response = await fetch(`/api/admin/private-keys/${address}`, {
+          method: 'DELETE',
+          credentials: 'include',
+          headers: { Authorization: adminImportForm.password },
+        });
+        const data = (await response.json()) as { error?: string; message?: string };
+        if (!response.ok) {
+          setAdminMsg({ type: 'error', text: data.error || 'Failed to delete wallet' });
+          return;
+        }
+        await loadState();
+        await loadInternalAccountPage();
+        await loadOutsideHolderPage();
+        setAdminMsg({ type: 'success', text: data.message || 'Deleted successfully' });
+      } catch {
+        setAdminMsg({ type: 'error', text: 'Network error' });
       }
-      await loadState();
-      await loadInternalAccountPage();
-      await loadOutsideHolderPage();
-      setAdminMsg({ type: 'success', text: data.message || 'Deleted successfully' });
-    } catch {
-      setAdminMsg({ type: 'error', text: 'Network error' });
-    }
+    });
   };
 
   const handleManagedAccountTradingToggle = async (address: string, isActive: boolean) => {
-    if (managedAccountStatusAddress) {
+    if (managedAccountStatusAddress || activeSubmissionRef.current) {
       return;
     }
 
-    setManagedAccountStatusAddress(address);
-    setError('');
-    setNotice('');
-    try {
-      const response = await fetch(`/api/admin/private-keys/${address}`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          isActive,
-          adminPassword: adminImportForm.password || undefined,
-        }),
-      });
-      const data = (await response.json()) as { error?: string; message?: string };
-      if (!response.ok) {
-        const message = data.error || 'Failed to update managed wallet trading status';
+    await runLockedAction(`managed-account-status-${address}`, async () => {
+      setManagedAccountStatusAddress(address);
+      setError('');
+      setNotice('');
+      try {
+        const response = await fetch(`/api/admin/private-keys/${address}`, {
+          method: 'PATCH',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            isActive,
+            adminPassword: adminImportForm.password || undefined,
+          }),
+        });
+        const data = (await response.json()) as { error?: string; message?: string };
+        if (!response.ok) {
+          const message = data.error || 'Failed to update managed wallet trading status';
+          setError(message);
+          setAdminMsg({ type: 'error', text: message });
+          return;
+        }
+
+        await loadState();
+        const message = data.message || `${isActive ? 'Enabled' : 'Disabled'} trading successfully`;
+        setNotice(message);
+        setAdminMsg({ type: 'success', text: message });
+      } catch {
+        const message = 'Network error';
         setError(message);
         setAdminMsg({ type: 'error', text: message });
-        return;
+      } finally {
+        setManagedAccountStatusAddress(null);
       }
-
-      await loadState();
-      const message = data.message || `${isActive ? 'Enabled' : 'Disabled'} trading successfully`;
-      setNotice(message);
-      setAdminMsg({ type: 'success', text: message });
-    } catch {
-      const message = 'Network error';
-      setError(message);
-      setAdminMsg({ type: 'error', text: message });
-    } finally {
-      setManagedAccountStatusAddress(null);
-    }
+    });
   };
 
   const previewDerivedAccounts = React.useCallback(async () => {
@@ -1436,7 +1421,7 @@ export default function App() {
     );
   }
 
-  const internalSummary = summarizeAccounts(engineState.internalAccs, walletBalances);
+  const internalSummary = engineState.internalAccountSummary;
   const internalRows = internalAccountPage.items;
   const internalRowsTotal = internalAccountPage.totalItems;
 
@@ -1575,15 +1560,14 @@ export default function App() {
     : loadingMarketSnapshots
       ? 'Loading selected range...'
       : 'No market snapshot in the selected range';
-  const totalInternalTokenAmount = activeTokenContractAddress
-    ? engineState.internalAccs.reduce(
-        (sum, account) =>
-          sum + findWalletTokenAmount(walletBalances[account.address], activeTokenContractAddress),
-        0,
-      )
-    : 0;
+  const totalInternalTokenAmount =
+    activeTokenContractAddress
+      ? engineState.internalAccountSummary.totalTrackedTokenAmount ?? 0
+      : 0;
 
   const managedWallets = engineState.internalAccs;
+  const requestLocked = submitting != null;
+  const walletBalanceRequestLocked = walletBalanceActionPending;
   const holderSyncRunning = engineState.tokenHolderSyncState?.status === 'running';
   const tokenHolderAggregateLoading =
     Boolean(activeTokenContractAddress) &&
@@ -1672,7 +1656,7 @@ export default function App() {
       onUseToken={(contractAddress, quoteTokenAddress) => void handleUseToken(contractAddress, quoteTokenAddress)}
       totalInternalTokenAmount={totalInternalTokenAmount}
       managedAccountsCount={engineState.stats.managedAccounts}
-      internalAccountsCount={engineState.internalAccs.length}
+      internalAccountsCount={engineState.internalAccountSummary.total}
       profitUsdc={engineState.profitUsdc}
       dashboardSnapshot={dashboardSnapshot}
       tokenHolderAggregate={engineState.tokenHolderAggregate}
@@ -1738,6 +1722,8 @@ export default function App() {
       onRefreshOutsideBalances={() => void refreshOutsideWalletBalances()}
       onToggleInternalAccountTrading={(account) => void handleManagedAccountTradingToggle(account.address, !account.isActive)}
       managedAccountStatusUpdatingAddress={managedAccountStatusAddress}
+      requestLocked={requestLocked}
+      balanceRefreshLocked={walletBalanceRequestLocked}
       itemsPerPage={ITEMS_PER_PAGE}
     />
   );
@@ -1775,6 +1761,7 @@ export default function App() {
       <AppHeader
         lastUpdated={lastUpdated}
         isRefreshing={isRefreshPending}
+        requestLocked={requestLocked}
         onOpenAdmin={() => setIsAdminModalOpen(true)}
         onRefresh={handleRefresh}
         onLogout={handleLogout}
@@ -1817,6 +1804,7 @@ export default function App() {
         onToggleActive={(address, isActive) => void handleManagedAccountTradingToggle(address, isActive)}
         statusUpdatingAddress={managedAccountStatusAddress}
         onDelete={(address) => void handleAdminDelete(address)}
+        submitting={submitting}
       />
     </div>
   );

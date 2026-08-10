@@ -160,7 +160,7 @@ export default function TradingSetupPage({
               />
               <button
                 onClick={handleAddTrackedToken}
-                disabled={submitting === 'token'}
+                disabled={submitting != null}
                 className="flex h-11 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 text-sm font-medium text-white transition hover:bg-emerald-700 disabled:opacity-60"
               >
                 <Plus size={14} /> Add Pair
@@ -225,7 +225,7 @@ export default function TradingSetupPage({
                         <div className="flex items-center gap-2">
                           <button
                             onClick={() => void handleUseToken(token.baseTokenAddress, token.quoteTokenAddress)}
-                            disabled={submitting === 'use-token' || isActivePair}
+                            disabled={submitting != null || isActivePair}
                             className="rounded-xl border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-medium text-white transition hover:bg-slate-700 disabled:opacity-60"
                           >
                             {isActivePair
@@ -236,7 +236,7 @@ export default function TradingSetupPage({
                           </button>
                           <button
                             onClick={() => void handleDeleteTrackedToken(token.id)}
-                            disabled={submitting === `token-delete-${token.id}`}
+                            disabled={submitting != null}
                             className="rounded-xl border border-rose-500/20 bg-rose-500/10 p-2 text-rose-400 transition hover:bg-rose-500/20 disabled:opacity-60"
                             title="Remove tracked pair"
                           >
@@ -260,7 +260,7 @@ export default function TradingSetupPage({
                         />
                         <button
                           onClick={() => void handleUpdateTrackedToken(token.id, ammPoolDraftValue)}
-                          disabled={submitting === `token-update-${token.id}` || !isPoolDirty}
+                          disabled={submitting != null || !isPoolDirty}
                           className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300 transition hover:bg-emerald-500/20 disabled:opacity-60"
                         >
                           {submitting === `token-update-${token.id}` ? 'Saving...' : 'Save Pool'}
@@ -273,7 +273,7 @@ export default function TradingSetupPage({
                             }));
                             void handleUpdateTrackedToken(token.id, '');
                           }}
-                          disabled={submitting === `token-update-${token.id}` || (!(token.ammPoolAddress ?? '').trim() && !ammPoolDraftValue.trim())}
+                          disabled={submitting != null || (!(token.ammPoolAddress ?? '').trim() && !ammPoolDraftValue.trim())}
                           className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 transition hover:bg-slate-700 disabled:opacity-60"
                         >
                           Clear Pool
@@ -321,7 +321,7 @@ export default function TradingSetupPage({
               />
               <button
                 onClick={handleAddRpcEndpoint}
-                disabled={submitting === 'rpc'}
+                disabled={submitting != null}
                 className="flex h-11 items-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-medium text-white transition hover:bg-blue-700 disabled:opacity-60"
               >
                 <Plus size={14} /> Add RPC
@@ -340,7 +340,7 @@ export default function TradingSetupPage({
                     </div>
                     <button
                       onClick={() => void handleDeleteRpcEndpoint(endpoint.id)}
-                      disabled={submitting === `rpc-delete-${endpoint.id}`}
+                      disabled={submitting != null}
                       className="rounded-xl border border-rose-500/20 bg-rose-500/10 p-2 text-rose-400 transition hover:bg-rose-500/20 disabled:opacity-60"
                       title="Remove RPC endpoint"
                     >

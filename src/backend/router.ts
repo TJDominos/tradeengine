@@ -1,5 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
+import { ApiError } from './errors';
 import { handleAdminWalletRoutes } from './api/adminWalletHandler';
 import { handleAuthRoutes } from './api/authHandler';
 import { handleMarketSnapshotRoutes } from './api/marketSnapshotHandler';
@@ -10,30 +11,78 @@ import { handleWebhookRoutes } from './api/webhookHandler';
 import { errorResponse, jsonResponse } from './workerCore';
 import type { Env } from './workerShared';
 
+const DEFAULT_API_TIMEOUT_MS = 10_000;
+const LONG_RUNNING_API_TIMEOUT_MS = 25_000;
+const HEALTH_API_TIMEOUT_MS = 2_000;
+
+function resolveApiTimeoutMs(pathname: string): number {
+  if (pathname === '/api/health') {
+    return HEALTH_API_TIMEOUT_MS;
+  }
+  if (pathname.startsWith('/api/webhook') || pathname.startsWith('/api/webhooks/')) {
+    return LONG_RUNNING_API_TIMEOUT_MS;
+  }
+  return DEFAULT_API_TIMEOUT_MS;
+}
+
+async function withApiTimeout(
+  request: Request,
+  operation: Promise<Response>,
+): Promise<Response> {
+  const pathname = new URL(request.url).pathname;
+  const timeoutMs = resolveApiTimeoutMs(pathname);
+
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<Response>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(
+        new ApiError(
+          504,
+          `${pathname} timed out after ${timeoutMs}ms`,
+        ),
+      );
+    }, timeoutMs);
+  });
+
+  return Promise.race([
+    operation.finally(() => {
+      if (timeoutHandle != null) {
+        clearTimeout(timeoutHandle);
+      }
+    }),
+    timeoutPromise,
+  ]);
+}
+
 async function handleApi(
   request: Request,
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
   try {
-    const handlers = [
-      () => handleAuthRoutes(request, env),
-      () => handleWebhookRoutes(request, env, ctx),
-      () => handleStateRoutes(request, env),
-      () => handleSettingsRoutes(request, env),
-      () => handleStrategyRoutes(request, env, ctx),
-      () => handleMarketSnapshotRoutes(request, env, ctx),
-      () => handleAdminWalletRoutes(request, env, ctx),
-    ];
+    return await withApiTimeout(
+      request,
+      (async () => {
+        const handlers = [
+          () => handleAuthRoutes(request, env),
+          () => handleWebhookRoutes(request, env, ctx),
+          () => handleStateRoutes(request, env),
+          () => handleSettingsRoutes(request, env),
+          () => handleStrategyRoutes(request, env, ctx),
+          () => handleMarketSnapshotRoutes(request, env, ctx),
+          () => handleAdminWalletRoutes(request, env, ctx),
+        ];
 
-    for (const handle of handlers) {
-      const response = await handle();
-      if (response) {
-        return response;
-      }
-    }
+        for (const handle of handlers) {
+          const response = await handle();
+          if (response) {
+            return response;
+          }
+        }
 
-    return jsonResponse({ error: 'Not found' }, 404);
+        return jsonResponse({ error: 'Not found' }, 404);
+      })(),
+    );
   } catch (err) {
     return errorResponse(err);
   }

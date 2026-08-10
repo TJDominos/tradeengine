@@ -83,6 +83,16 @@ export interface AccountRecord {
   walletActiveTokenBalance?: number | null;
   walletBalanceUpdatedAt?: number | null;
 }
+export interface ManagedAccountSummaryRecord {
+  total: number;
+  activeAccounts: number;
+  activeAssets: number;
+  totalSol: number;
+  totalUsdc: number;
+  trackedWallets: number;
+  trackedTokenLines: number;
+  totalTrackedTokenAmount: number;
+}
 export interface AuditLog {
   id: number;
   action: string;

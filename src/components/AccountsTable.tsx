@@ -15,6 +15,8 @@ type AccountsTableProps = {
   balances: Record<string, WalletBalance>;
   balanceErrors: Record<string, string>;
   balancePending: Record<string, boolean>;
+  balanceRefreshLocked: boolean;
+  requestLocked: boolean;
   trackedTokenMint: string;
   trackedTokenSymbol: string;
   emptyText: string;
@@ -37,6 +39,8 @@ export default function AccountsTable({
   balances,
   balanceErrors,
   balancePending,
+  balanceRefreshLocked,
+  requestLocked,
   trackedTokenMint,
   trackedTokenSymbol,
   emptyText,
@@ -133,7 +137,7 @@ export default function AccountsTable({
                         <button
                           type="button"
                           onClick={() => onRefreshBalance?.(account.address)}
-                          disabled={pending}
+                          disabled={pending || balanceRefreshLocked}
                           className="rounded border border-slate-700 bg-slate-950 p-1 text-slate-400 transition hover:border-slate-500 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
                           title={pending ? 'Refreshing wallet balance' : 'Refresh wallet balance'}
                           aria-label={pending ? `Refreshing ${account.address} wallet balance` : `Refresh ${account.address} wallet balance`}
@@ -157,7 +161,7 @@ export default function AccountsTable({
                       <button
                         type="button"
                         onClick={() => onToggleTradingAccount?.(account)}
-                        disabled={togglePendingAddress === account.address}
+                        disabled={togglePendingAddress === account.address || requestLocked}
                         className={`rounded-md border px-3 py-1.5 transition ${
                           account.isActive
                             ? 'border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'

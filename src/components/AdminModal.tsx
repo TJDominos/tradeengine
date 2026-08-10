@@ -47,6 +47,7 @@ type AdminModalProps = {
   managedWallets: AccountRecord[];
   walletBalanceErrors: Record<string, string>;
   walletBalances: Record<string, WalletBalance>;
+  submitting: string | null;
   onPasswordChange: () => void;
   onImport: () => void;
   onToggleActive: (address: string, isActive: boolean) => void;
@@ -71,6 +72,7 @@ export default function AdminModal({
   managedWallets,
   walletBalanceErrors,
   walletBalances,
+  submitting,
   onPasswordChange,
   onImport,
   onToggleActive,
@@ -78,6 +80,7 @@ export default function AdminModal({
   onDelete,
 }: AdminModalProps) {
   const [manageSearchTerm, setManageSearchTerm] = React.useState('');
+  const requestLocked = submitting != null;
 
   React.useEffect(() => {
     if (!open) {
@@ -139,7 +142,13 @@ export default function AdminModal({
                 <span className="text-xs font-semibold uppercase text-slate-400">Confirm Password</span>
                 <input type="password" value={adminPasswordForm.new2} onChange={(event) => setAdminPasswordForm({ ...adminPasswordForm, new2: event.target.value })} className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
               </label>
-              <button onClick={onPasswordChange} className="mt-2 w-full rounded bg-amber-600 py-2.5 font-medium text-white hover:bg-amber-700">Change Password</button>
+              <button
+                onClick={onPasswordChange}
+                disabled={requestLocked}
+                className="mt-2 w-full rounded bg-amber-600 py-2.5 font-medium text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {submitting === 'admin-password' ? 'Updating...' : 'Change Password'}
+              </button>
             </div>
           ) : null}
 
@@ -288,7 +297,11 @@ export default function AdminModal({
               )}
 
               <div className="text-[10px] leading-tight text-slate-500">Keys are encrypted on the backend and saved as internal engine wallets.</div>
-              <button onClick={onImport} className="mt-2 flex w-full items-center justify-center gap-2 rounded bg-amber-600 py-2.5 font-medium text-white hover:bg-amber-700">
+              <button
+                onClick={onImport}
+                disabled={requestLocked}
+                className="mt-2 flex w-full items-center justify-center gap-2 rounded bg-amber-600 py-2.5 font-medium text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
                 <Key size={16} /> Import Wallet
               </button>
             </div>
@@ -341,7 +354,7 @@ export default function AdminModal({
                             <button
                               type="button"
                               onClick={() => onToggleActive(account.address, !account.isActive)}
-                              disabled={statusUpdatingAddress === account.address}
+                              disabled={statusUpdatingAddress === account.address || requestLocked}
                               className={`rounded border px-2 py-1 text-xs font-semibold transition ${
                                 account.isActive
                                   ? 'border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
@@ -354,8 +367,13 @@ export default function AdminModal({
                                   ? 'Disable Trading'
                                   : 'Enable Trading'}
                             </button>
-                            <button onClick={() => onDelete(account.address)} className="flex items-center gap-1 rounded bg-rose-500/10 p-1.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/20" title="Delete Key">
-                              <Trash2 size={14} /> Delete
+                            <button
+                              onClick={() => onDelete(account.address)}
+                              disabled={requestLocked}
+                              className="flex items-center gap-1 rounded bg-rose-500/10 p-1.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                              title="Delete Key"
+                            >
+                              <Trash2 size={14} /> {submitting === `admin-delete-${account.address}` ? 'Deleting...' : 'Delete'}
                             </button>
                           </div>
                         </div>

@@ -47,6 +47,8 @@ type AccountsPageProps = {
   walletBalances: Record<string, WalletBalance>;
   walletBalanceErrors: Record<string, string>;
   walletBalancePending: Record<string, boolean>;
+  requestLocked: boolean;
+  balanceRefreshLocked: boolean;
   internalListLoading: boolean;
   internalPage: number;
   outsiderPage: number;
@@ -89,6 +91,8 @@ export default function AccountsPage({
   walletBalances,
   walletBalanceErrors,
   walletBalancePending,
+  requestLocked,
+  balanceRefreshLocked,
   internalListLoading,
   internalPage,
   outsiderPage,
@@ -183,6 +187,8 @@ export default function AccountsPage({
         balances={walletBalances}
         balanceErrors={walletBalanceErrors}
         balancePending={walletBalancePending}
+        balanceRefreshLocked={balanceRefreshLocked}
+        requestLocked={requestLocked}
         trackedTokenMint={activeTokenContractAddress}
         trackedTokenSymbol={activeTokenSymbol}
         emptyText={internalListLoading ? 'Fetching internal account data...' : 'No internal accounts found.'}
@@ -195,7 +201,8 @@ export default function AccountsPage({
           <div className="flex items-center gap-3">
             <button
               onClick={onRefreshInternalBalances}
-              className="flex h-9 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm text-white hover:bg-slate-700"
+              disabled={balanceRefreshLocked}
+              className="flex h-9 items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <RefreshCw size={14} /> Refresh Wallet Balances
             </button>
@@ -220,8 +227,9 @@ export default function AccountsPage({
           <div className="flex items-center gap-3">
             <button
               onClick={onRefreshOutsideBalances}
+              disabled={balanceRefreshLocked}
               title="Refresh balances for the currently loaded outside-holder page"
-              className="flex h-9 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm text-white hover:bg-slate-700"
+              className="flex h-9 items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <RefreshCw size={14} /> Refresh Visible Balances
             </button>

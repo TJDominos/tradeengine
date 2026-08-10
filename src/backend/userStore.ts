@@ -25,6 +25,7 @@ import { analyzeTradeDirection } from './services/webhookParser';
 import type {
   AccountRecord,
   AuditLog,
+  ManagedAccountSummaryRecord,
   SessionUser,
   SettingsState,
   SettingsUpdateRequest,
@@ -223,32 +224,6 @@ function readBaseTokenAmount(
 ): number {
   const baseBalance = walletBalance.tokens.find((token) => token.mint === baseMint);
   return Math.max(0, toFiniteNumber(baseBalance?.amount) ?? 0);
-}
-
-function compareManagedAccountsByNewest(
-  left: AccountRecord,
-  right: AccountRecord,
-): number {
-  if (left.isActive !== right.isActive) {
-    return left.isActive ? -1 : 1;
-  }
-  const createdAtDelta = normalizeTimestampMs(right.createdAt) - normalizeTimestampMs(left.createdAt);
-  if (createdAtDelta !== 0) {
-    return createdAtDelta;
-  }
-  return right.id - left.id;
-}
-
-function compareManagedAccountsByNumeric(
-  left: AccountRecord,
-  right: AccountRecord,
-  leftValue: number,
-  rightValue: number,
-): number {
-  if (rightValue !== leftValue) {
-    return rightValue - leftValue;
-  }
-  return compareManagedAccountsByNewest(left, right);
 }
 
 async function loadWalletBalancesByAddress(
@@ -876,6 +851,99 @@ export async function dbListAccounts(
   return rows.results.map((row) => mapAccountRow(row));
 }
 
+export async function dbListAccountsDirectory(
+  db: D1Database,
+  userId: number,
+  type: string,
+): Promise<AccountRecord[]> {
+  const rows = await db
+    .prepare(
+      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+              COALESCE(is_active, 1) AS is_active
+       FROM accounts
+       WHERE user_id = ?1 AND type = ?2
+       ORDER BY created_at DESC, id DESC`,
+    )
+    .bind(userId, type)
+    .all<{
+      id: number;
+      label: string;
+      wallet_address: string;
+      type: string;
+      capability_base_mint: string | null;
+      capability_quote_mint: string | null;
+      created_at: number;
+      is_active: number;
+    }>();
+  return rows.results.map((row) => mapAccountRow(row));
+}
+
+export async function dbGetManagedAccountSummary(
+  db: D1Database,
+  userId: number,
+  activeBaseTokenAddress: string,
+): Promise<ManagedAccountSummaryRecord> {
+  const normalizedActiveBaseTokenAddress = activeBaseTokenAddress.trim();
+  const row = await db
+    .prepare(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN COALESCE(is_active, 1) = 1 THEN 1 ELSE 0 END) AS active_accounts,
+         SUM(CASE
+           WHEN COALESCE(wallet_sol_balance, 0) > 0
+             OR COALESCE(wallet_usdc_balance, 0) > 0
+             OR COALESCE(wallet_active_token_balance, 0) > 0
+           THEN 1
+           ELSE 0
+         END) AS active_assets,
+         SUM(COALESCE(wallet_sol_balance, 0)) AS total_sol,
+         SUM(COALESCE(wallet_usdc_balance, 0)) AS total_usdc,
+         SUM(CASE
+           WHEN ?2 <> ''
+             AND wallet_active_token_mint = ?2
+             AND COALESCE(wallet_active_token_balance, 0) > 0
+           THEN 1
+           ELSE 0
+         END) AS tracked_wallets,
+         SUM(CASE
+           WHEN ?2 <> ''
+             AND wallet_active_token_mint = ?2
+             AND COALESCE(wallet_active_token_balance, 0) > 0
+           THEN 1
+           ELSE 0
+         END) AS tracked_token_lines,
+         SUM(CASE
+           WHEN ?2 <> '' AND wallet_active_token_mint = ?2
+           THEN COALESCE(wallet_active_token_balance, 0)
+           ELSE 0
+         END) AS total_tracked_token_amount
+       FROM accounts
+       WHERE user_id = ?1 AND type = 'managed'`,
+    )
+    .bind(userId, normalizedActiveBaseTokenAddress)
+    .first<{
+      total: number;
+      active_accounts: number | null;
+      active_assets: number | null;
+      total_sol: number | null;
+      total_usdc: number | null;
+      tracked_wallets: number | null;
+      tracked_token_lines: number | null;
+      total_tracked_token_amount: number | null;
+    }>();
+
+  return {
+    total: Number(row?.total ?? 0),
+    activeAccounts: Number(row?.active_accounts ?? 0),
+    activeAssets: Number(row?.active_assets ?? 0),
+    totalSol: Number(row?.total_sol ?? 0),
+    totalUsdc: Number(row?.total_usdc ?? 0),
+    trackedWallets: Number(row?.tracked_wallets ?? 0),
+    trackedTokenLines: Number(row?.tracked_token_lines ?? 0),
+    totalTrackedTokenAmount: Number(row?.total_tracked_token_amount ?? 0),
+  };
+}
+
 export async function dbListManagedAccountsPage(
   db: D1Database,
   userId: number,
@@ -897,54 +965,71 @@ export async function dbListManagedAccountsPage(
       ? options.sort
       : 'newest';
 
-  const allAccounts = await dbListAccounts(db, userId, 'managed');
-  const filteredAccounts = searchTerm
-    ? allAccounts.filter(
-        (account) =>
-          account.address.toLowerCase().includes(searchTerm) ||
-          account.label.toLowerCase().includes(searchTerm),
-      )
-    : allAccounts;
-
   const settings = await dbLoadSettings(db, userId);
   const activeBaseTokenAddress =
     settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
-
-  filteredAccounts.sort((left, right) => {
-    if (sort === 'newest') {
-      return compareManagedAccountsByNewest(left, right);
-    }
-    if (sort === 'usdc') {
-      return compareManagedAccountsByNumeric(
-        left,
-        right,
-        left.walletUsdcBalance ?? 0,
-        right.walletUsdcBalance ?? 0,
-      );
-    }
-    if (sort === 'sol') {
-      return compareManagedAccountsByNumeric(
-        left,
-        right,
-        left.walletSolBalance ?? 0,
-        right.walletSolBalance ?? 0,
-      );
-    }
-    return compareManagedAccountsByNumeric(
-      left,
-      right,
-      left.walletActiveTokenMint === activeBaseTokenAddress
-        ? left.walletActiveTokenBalance ?? 0
-        : 0,
-      right.walletActiveTokenMint === activeBaseTokenAddress
-        ? right.walletActiveTokenBalance ?? 0
-        : 0,
-    );
-  });
-
-  const totalItems = filteredAccounts.length;
   const offset = (page - 1) * pageSize;
-  const items = filteredAccounts.slice(offset, offset + pageSize);
+  const searchPattern = `%${searchTerm}%`;
+  const countRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS total
+       FROM accounts
+       WHERE user_id = ?1
+         AND type = 'managed'
+         AND (?2 = '' OR LOWER(wallet_address) LIKE ?3 OR LOWER(label) LIKE ?3)`,
+    )
+    .bind(userId, searchTerm, searchPattern)
+    .first<{ total: number }>();
+  const rows = await db
+    .prepare(
+      `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
+              wallet_usdc_balance, wallet_sol_balance, wallet_active_token_mint, wallet_active_token_balance, wallet_balance_updated_at,
+              COALESCE(is_active, 1) AS is_active
+       FROM accounts
+       WHERE user_id = ?1
+         AND type = 'managed'
+         AND (?2 = '' OR LOWER(wallet_address) LIKE ?3 OR LOWER(label) LIKE ?3)
+       ORDER BY
+         CASE WHEN ?4 = 'usdc' THEN COALESCE(wallet_usdc_balance, 0) END DESC,
+         CASE WHEN ?4 = 'sol' THEN COALESCE(wallet_sol_balance, 0) END DESC,
+         CASE
+           WHEN ?4 = 'token' THEN CASE
+             WHEN ?5 <> '' AND wallet_active_token_mint = ?5
+             THEN COALESCE(wallet_active_token_balance, 0)
+             ELSE 0
+           END
+         END DESC,
+         COALESCE(is_active, 1) DESC,
+         created_at DESC,
+         id DESC
+       LIMIT ?6 OFFSET ?7`,
+    )
+    .bind(
+      userId,
+      searchTerm,
+      searchPattern,
+      sort,
+      activeBaseTokenAddress,
+      pageSize,
+      offset,
+    )
+    .all<{
+      id: number;
+      label: string;
+      wallet_address: string;
+      type: string;
+      capability_base_mint: string | null;
+      capability_quote_mint: string | null;
+      created_at: number;
+      wallet_usdc_balance: number | null;
+      wallet_sol_balance: number | null;
+      wallet_active_token_mint: string | null;
+      wallet_active_token_balance: number | null;
+      wallet_balance_updated_at: number | null;
+      is_active: number;
+    }>();
+  const items = rows.results.map((row) => mapAccountRow(row));
+  const totalItems = Number(countRow?.total ?? 0);
 
   const balances = buildWalletBalancesFromSnapshots(items, activeBaseTokenAddress);
 

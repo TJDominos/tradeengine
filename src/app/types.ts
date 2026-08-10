@@ -304,6 +304,7 @@ export type EngineState = {
   auth: { username: string; role: string };
   settings: SettingsState;
   internalAccs: AccountRecord[];
+  internalAccountSummary: AccountSummary;
   activityLogs: AuditLog[];
   tradeLogs: TradeLog[];
   webhookTransactionLogs: WebhookTransactionLog[];
@@ -338,11 +339,13 @@ export type DateRangeState = {
 
 export type AccountSummary = {
   total: number;
+  activeAccounts?: number;
   activeAssets: number;
   totalSol: number;
   totalUsdc: number;
   trackedWallets: number;
   trackedTokenLines: number;
+  totalTrackedTokenAmount?: number;
 };
 
 export type DashboardLogTab = 'transaction' | 'activity';

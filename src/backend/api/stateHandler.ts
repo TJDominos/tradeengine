@@ -9,7 +9,8 @@ import {
   dbRecomputeTokenHolderAggregate,
 } from '../tokenHolders';
 import {
-  dbListAccounts,
+  dbGetManagedAccountSummary,
+  dbListAccountsDirectory,
   dbListManagedAccountsPage,
   dbListAuditLogs,
   dbListRecentSignalsForDebug,
@@ -36,9 +37,6 @@ import { dbGetMarketRefreshState } from '../services/marketRefreshStateService';
 import { StrategyAutomationService } from '../services/strategyAutomationService';
 import {
   dbGetActiveStrategyVersion,
-  dbListStrategyEvaluations,
-  dbListStrategyVersions,
-  dedupeStrategyVersionsForDisplay,
 } from '../services/strategyStore';
 
 const strategyAutomationService = new StrategyAutomationService();
@@ -275,30 +273,35 @@ export async function handleStateRoutes(
   if (method === 'GET' && pathname === '/api/state') {
     const user = await requireUser(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+    const activeBaseTokenAddress =
+      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+    const activeQuoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || null;
     let activeStrategyVersion = await dbGetActiveStrategyVersion(
       env.TRADINGBOT_DB,
       user.id,
     ).catch(() => null);
-    let [
+    const [
       internalAccs,
+      internalAccountSummary,
       activityLogs,
       tradeLogs,
       webhookTransactionLogs,
       tradableTokens,
       historicalSetups,
-      strategyVersions,
-      strategyEvaluations,
       rpcEndpoints,
     ] =
       await Promise.all([
-        dbListAccounts(env.TRADINGBOT_DB, user.id, 'managed'),
+        dbListAccountsDirectory(env.TRADINGBOT_DB, user.id, 'managed'),
+        dbGetManagedAccountSummary(
+          env.TRADINGBOT_DB,
+          user.id,
+          activeBaseTokenAddress,
+        ),
         dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
         dbListTradeLogs(env.TRADINGBOT_DB),
         dbListWebhookTransactionLogs(env.TRADINGBOT_DB, user.id),
         dbListTradableTokens(env.TRADINGBOT_DB),
         dbListHistoricalSetups(env.TRADINGBOT_DB, user.id),
-        dbListStrategyVersions(env.TRADINGBOT_DB, user.id),
-        dbListStrategyEvaluations(env.TRADINGBOT_DB, user.id),
         dbListRpcEndpoints(env.TRADINGBOT_DB, user.id),
       ]);
 
@@ -308,8 +311,6 @@ export async function handleStateRoutes(
     let marketRefreshStatus: MarketRefreshStatusRecord | null = null;
     const outsideTokenHolders = [];
     let tokenId: number | null = null;
-    const activeBaseTokenAddress = settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
-    const activeQuoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || null;
     if (activeBaseTokenAddress) {
       try {
         marketRefreshStatus = await dbGetMarketRefreshState(
@@ -380,13 +381,6 @@ export async function handleStateRoutes(
       }
     }
 
-    const dedupedStrategyDisplay = dedupeStrategyVersionsForDisplay(
-      strategyVersions,
-      activeStrategyVersion,
-    );
-    strategyVersions = dedupedStrategyDisplay.versions;
-    activeStrategyVersion = dedupedStrategyDisplay.activeVersion;
-
     const profitUsdc = activeBaseTokenAddress
       ? await dbComputeManagedProfitUsdc(
           env.TRADINGBOT_DB,
@@ -408,12 +402,11 @@ export async function handleStateRoutes(
       };
     }
 
-    const enabledManagedAccounts = internalAccs.filter((account) => account.isActive);
-
     return jsonResponse({
       auth: { username: user.username, role: user.role },
       settings,
       internalAccs,
+      internalAccountSummary,
       logs: activityLogs,
       activityLogs,
       tradeLogs,
@@ -421,8 +414,8 @@ export async function handleStateRoutes(
       tradableTokens,
       historicalSetups,
       activeStrategyVersion,
-      strategyVersions,
-      strategyEvaluations,
+      strategyVersions: [],
+      strategyEvaluations: [],
       tokenHolderAggregate,
       tokenHolderSyncState,
       marketRefreshStatus,
@@ -432,7 +425,7 @@ export async function handleStateRoutes(
       marketSnapshotHistory: [],
       profitUsdc,
       stats: {
-        managedAccounts: enabledManagedAccounts.length,
+        managedAccounts: internalAccountSummary.activeAccounts,
         tradeExecutionEnabled: false,
       },
       system: {
