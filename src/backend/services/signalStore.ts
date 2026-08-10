@@ -168,6 +168,310 @@ type RpcTransactionMeta = {
   postTokenBalances?: RpcTokenBalanceEntry[];
 };
 
+type PersistedWebhookTransactionLogRow = {
+  id: number;
+  user_id: number;
+  group_key: string;
+  token_id: number | null;
+  token_contract_address: string;
+  wallet_address: string | null;
+  from_wallet_address: string | null;
+  to_wallet_address: string | null;
+  action: 'BUY' | 'SELL' | 'TRANSFER' | null;
+  usdc_amount: number | null;
+  token_amount: number | null;
+  fee_amount_usd: number | null;
+  source: 'webhook' | 'rpc_reconcile';
+  event_type: string;
+  tx_signature: string | null;
+  status: 'PENDING' | 'CONFIRMED' | 'FAILED';
+  error_message: string | null;
+  detail_source: StoredSignalTransactionDetails['detailSource'];
+  details_json: string;
+  metadata_json: string;
+  created_at: number;
+  updated_at: number;
+};
+
+function buildWebhookTransactionLogGroupKey(
+  txSignature: string | null,
+  externalId: string,
+  tokenContractAddress: string,
+): string {
+  return `${txSignature?.trim() || externalId}:${tokenContractAddress}`;
+}
+
+function parseStoredRecord(value: string | null | undefined): Record<string, unknown> {
+  if (!value) {
+    return {};
+  }
+  try {
+    const parsed = parseJsonText<unknown>(value);
+    return parsed != null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function buildStoredSignalTransactionDetailsFromWebhookLogRow(
+  row: PersistedWebhookTransactionLogRow,
+): StoredSignalTransactionDetails {
+  return parseStoredSignalTransactionDetails(row.details_json) ?? {
+    tokenContractAddress: row.token_contract_address,
+    fromWalletAddress: row.from_wallet_address,
+    toWalletAddress: row.to_wallet_address,
+    primaryWalletAddress: row.wallet_address,
+    action: row.action,
+    usdcAmount: row.usdc_amount,
+    tokenAmount: row.token_amount,
+    feeAmountUsd: row.fee_amount_usd,
+    source: row.source,
+    transactionStatus:
+      row.status === 'FAILED'
+        ? 'FAILED'
+        : row.status === 'CONFIRMED'
+          ? 'CONFIRMED'
+          : 'PENDING',
+    detailSource: row.detail_source,
+  };
+}
+
+function webhookActionRank(
+  action: StoredSignalTransactionDetails['action'],
+): number {
+  return action === 'BUY' || action === 'SELL'
+    ? 3
+    : action === 'TRANSFER'
+      ? 2
+      : 1;
+}
+
+function webhookDetailSourceRank(
+  detailSource: StoredSignalTransactionDetails['detailSource'],
+): number {
+  return detailSource === 'payload+rpc'
+    ? 3
+    : detailSource === 'rpc'
+      ? 2
+      : detailSource === 'payload'
+        ? 1
+        : 0;
+}
+
+function scoreStoredSignalTransactionDetails(
+  details: Partial<StoredSignalTransactionDetails> | null | undefined,
+): number {
+  if (!details) {
+    return 0;
+  }
+  return webhookActionRank(details.action ?? null) * 10 +
+    webhookDetailSourceRank(details.detailSource ?? 'unknown');
+}
+
+function mergeNormalizedWebhookTransactionDetails(
+  existingDetails: StoredSignalTransactionDetails | null,
+  nextDetails: StoredSignalTransactionDetails,
+): StoredSignalTransactionDetails {
+  if (!existingDetails) {
+    return nextDetails;
+  }
+
+  const useNextAsPrimary =
+    scoreStoredSignalTransactionDetails(nextDetails) >=
+    scoreStoredSignalTransactionDetails(existingDetails);
+  const primaryDetails = useNextAsPrimary ? nextDetails : existingDetails;
+  const secondaryDetails = useNextAsPrimary ? existingDetails : nextDetails;
+  const mergedDetails = mergeStoredSignalTransactionDetails(
+    primaryDetails,
+    secondaryDetails,
+  );
+
+  if (primaryDetails.fromWalletAddress) {
+    mergedDetails.fromWalletAddress = primaryDetails.fromWalletAddress;
+  }
+  if (primaryDetails.toWalletAddress) {
+    mergedDetails.toWalletAddress = primaryDetails.toWalletAddress;
+  }
+  if (primaryDetails.primaryWalletAddress) {
+    mergedDetails.primaryWalletAddress = primaryDetails.primaryWalletAddress;
+  }
+  if (primaryDetails.action) {
+    mergedDetails.action = primaryDetails.action;
+  }
+
+  return mergedDetails;
+}
+
+function deriveWebhookTransactionLogStatus(input: {
+  details: StoredSignalTransactionDetails;
+  processed: boolean;
+  errorMessage: string | null;
+}): 'PENDING' | 'CONFIRMED' | 'FAILED' {
+  if (input.errorMessage || input.details.transactionStatus === 'FAILED') {
+    return 'FAILED';
+  }
+  if (!input.processed || input.details.transactionStatus === 'PENDING') {
+    return 'PENDING';
+  }
+  return 'CONFIRMED';
+}
+
+export async function dbUpsertWebhookTransactionLog(
+  db: D1Database,
+  input: {
+    userId: number;
+    tokenId: number | null;
+    tokenContractAddress: string;
+    source: 'webhook' | 'rpc_reconcile';
+    eventType: string;
+    txSignature: string | null;
+    externalId: string;
+    walletAddress: string | null;
+    details: StoredSignalTransactionDetails;
+    processed: boolean;
+    errorMessage: string | null;
+    createdAt: number;
+    updatedAt?: number;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  const groupKey = buildWebhookTransactionLogGroupKey(
+    input.txSignature,
+    input.externalId,
+    input.tokenContractAddress,
+  );
+  const existing = await db
+    .prepare(
+      `SELECT
+         id,
+         user_id,
+         group_key,
+         token_id,
+         token_contract_address,
+         wallet_address,
+         from_wallet_address,
+         to_wallet_address,
+         action,
+         usdc_amount,
+         token_amount,
+         fee_amount_usd,
+         source,
+         event_type,
+         tx_signature,
+         status,
+         error_message,
+         detail_source,
+         details_json,
+         metadata_json,
+         created_at,
+         updated_at
+       FROM webhook_transaction_logs
+       WHERE user_id = ?1 AND group_key = ?2
+       LIMIT 1`,
+    )
+    .bind(input.userId, groupKey)
+    .first<PersistedWebhookTransactionLogRow>();
+
+  const existingDetails = existing
+    ? buildStoredSignalTransactionDetailsFromWebhookLogRow(existing)
+    : null;
+  const mergedDetails = mergeNormalizedWebhookTransactionDetails(
+    existingDetails,
+    input.details,
+  );
+  const mergedMetadata = {
+    ...parseStoredRecord(existing?.metadata_json),
+    ...(input.metadata ?? {}),
+    lastExternalId: input.externalId,
+    lastSource: input.source,
+    lastEventType: input.eventType,
+  };
+  const createdAt = existing?.created_at ?? input.createdAt;
+  const updatedAt = input.updatedAt ?? nowTs();
+  const walletAddress =
+    input.walletAddress ??
+    mergedDetails.primaryWalletAddress ??
+    existing?.wallet_address ??
+    null;
+  const status = deriveWebhookTransactionLogStatus({
+    details: mergedDetails,
+    processed: input.processed,
+    errorMessage: input.errorMessage,
+  });
+
+  await db
+    .prepare(
+      `INSERT INTO webhook_transaction_logs (
+         user_id,
+         group_key,
+         token_id,
+         token_contract_address,
+         wallet_address,
+         from_wallet_address,
+         to_wallet_address,
+         action,
+         usdc_amount,
+         token_amount,
+         fee_amount_usd,
+         source,
+         event_type,
+         tx_signature,
+         status,
+         error_message,
+         detail_source,
+         details_json,
+         metadata_json,
+         created_at,
+         updated_at
+       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+       ON CONFLICT(user_id, group_key)
+       DO UPDATE SET
+         token_id = excluded.token_id,
+         token_contract_address = excluded.token_contract_address,
+         wallet_address = excluded.wallet_address,
+         from_wallet_address = excluded.from_wallet_address,
+         to_wallet_address = excluded.to_wallet_address,
+         action = excluded.action,
+         usdc_amount = excluded.usdc_amount,
+         token_amount = excluded.token_amount,
+         fee_amount_usd = excluded.fee_amount_usd,
+         source = excluded.source,
+         tx_signature = excluded.tx_signature,
+         status = excluded.status,
+         error_message = excluded.error_message,
+         detail_source = excluded.detail_source,
+         details_json = excluded.details_json,
+         metadata_json = excluded.metadata_json,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(
+      input.userId,
+      groupKey,
+      input.tokenId ?? existing?.token_id ?? null,
+      input.tokenContractAddress,
+      walletAddress,
+      mergedDetails.fromWalletAddress,
+      mergedDetails.toWalletAddress,
+      mergedDetails.action,
+      mergedDetails.usdcAmount,
+      mergedDetails.tokenAmount,
+      mergedDetails.feeAmountUsd,
+      mergedDetails.source,
+      existing?.event_type ?? input.eventType,
+      input.txSignature,
+      status,
+      status === 'FAILED' ? input.errorMessage : null,
+      mergedDetails.detailSource,
+      JSON.stringify(mergedDetails),
+      JSON.stringify(mergedMetadata),
+      createdAt,
+      updatedAt,
+    )
+    .run();
+}
+
 const SIGNAL_SOL_PRICE_CACHE_TTL_MS = 30_000;
 const SIGNAL_SOL_PRICE_FAILURE_TTL_MS = 5_000;
 
@@ -622,6 +926,23 @@ export async function reconcileWebhookTransactionDetailsInWindow(
       preferredWalletAddress,
       correctedDetails,
     );
+    await dbUpsertWebhookTransactionLog(db, {
+      userId,
+      tokenId,
+      tokenContractAddress: contractAddress,
+      source: correctedDetails.source,
+      eventType: group.rows[0]?.event_type ?? 'webhook:transaction',
+      txSignature: group.txSignature,
+      externalId: group.groupKey,
+      walletAddress: preferredWalletAddress,
+      details: correctedDetails,
+      processed: group.rows.every((row) => row.processed === 1),
+      errorMessage: group.rows.find((row) => row.error_message)?.error_message ?? null,
+      createdAt: group.rows[0]?.created_at ?? nowTs(),
+      metadata: {
+        updateReason: 'signal_detail_reconcile',
+      },
+    });
     const detailsChanged =
       JSON.stringify(group.mergedDetails) !== JSON.stringify(correctedDetails) ||
       preferredWalletAddress !== (group.rows[0]?.wallet_address ?? null);
@@ -836,7 +1157,7 @@ export async function reconcileTokenTransactionsFromRpc(
     mergedDetails.primaryWalletAddress = preferredWalletAddress;
     const source = `rpc_reconcile:refresh:user:${userId}`;
     const externalId = `${txSignature}:${contractAddress}`;
-    await dbCreateSignal(db, {
+    const createdSignal = await dbCreateSignal(db, {
       source,
       externalId,
       eventType: 'rpc_reconcile:transaction',
@@ -853,6 +1174,25 @@ export async function reconcileTokenTransactionsFromRpc(
       detailsJson: JSON.stringify(mergedDetails),
     });
     await dbMarkSignalProcessed(db, source, externalId);
+    await dbUpsertWebhookTransactionLog(db, {
+      userId,
+      tokenId,
+      tokenContractAddress: contractAddress,
+      source: mergedDetails.source,
+      eventType: 'rpc_reconcile:transaction',
+      txSignature,
+      externalId,
+      walletAddress: preferredWalletAddress,
+      details: mergedDetails,
+      processed: true,
+      errorMessage: null,
+      createdAt: createdSignal.signal.createdAt,
+      metadata: {
+        updateReason: 'rpc_reconcile_insert',
+        scannedAddress: signatureMeta.address,
+        blockTimeMs: signatureMeta.blockTimeMs,
+      },
+    });
     insertedSignals += 1;
   }
   return {

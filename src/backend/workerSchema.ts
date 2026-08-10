@@ -111,6 +111,36 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     created_at INTEGER NOT NULL,
     UNIQUE(source, external_id)
   )`,
+  `CREATE TABLE IF NOT EXISTS webhook_transaction_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    group_key TEXT NOT NULL,
+    token_id INTEGER,
+    token_contract_address TEXT NOT NULL,
+    wallet_address TEXT,
+    from_wallet_address TEXT,
+    to_wallet_address TEXT,
+    action TEXT CHECK(action IN ('BUY', 'SELL', 'TRANSFER')),
+    usdc_amount REAL,
+    token_amount REAL,
+    fee_amount_usd REAL,
+    source TEXT NOT NULL DEFAULT 'webhook'
+      CHECK(source IN ('webhook', 'rpc_reconcile')),
+    event_type TEXT NOT NULL,
+    tx_signature TEXT,
+    status TEXT NOT NULL DEFAULT 'PENDING'
+      CHECK(status IN ('PENDING', 'CONFIRMED', 'FAILED')),
+    error_message TEXT,
+    detail_source TEXT NOT NULL DEFAULT 'unknown'
+      CHECK(detail_source IN ('payload', 'rpc', 'payload+rpc', 'unknown')),
+    details_json TEXT NOT NULL DEFAULT '{}',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(user_id, group_key),
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE SET NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     wallet_address TEXT NOT NULL,
@@ -315,6 +345,8 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_positions_wallet ON positions(wallet_address)',
   'CREATE INDEX IF NOT EXISTS idx_signals_processed_created ON signals(processed, created_at)',
   'CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source)',
+  'CREATE INDEX IF NOT EXISTS idx_webhook_transaction_logs_user_created ON webhook_transaction_logs(user_id, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_webhook_transaction_logs_user_tx ON webhook_transaction_logs(user_id, tx_signature)',
   'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_token_fetched ON token_market_snapshots(token_id, fetched_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_contract_fetched ON token_market_snapshots(network, base_token_address, fetched_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_token_created ON trade_logs(token_id, created_at DESC)',

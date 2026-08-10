@@ -3,10 +3,7 @@ import { dbGetLatestTokenMarketSnapshot, dbListRpcEndpoints, dbListTradableToken
 import {
   dbGetTokenHolderAggregate,
   dbGetTokenHolderSyncState,
-  dbHasTokenHolderRows,
   dbListOutsideTokenHoldersPage,
-  dbComputeTokenHolderAggregateFromStage,
-  dbRecomputeTokenHolderAggregate,
 } from '../tokenHolders';
 import {
   dbGetManagedAccountSummary,
@@ -34,7 +31,10 @@ import { SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID } from '../wo
 import { requireAdmin, requireUser } from '../services/accessControl';
 import { dbComputeManagedProfitUsdc, dbListHistoricalSetups } from '../services/historyMetricsService';
 import { dbGetMarketRefreshState } from '../services/marketRefreshStateService';
-import { reconcileTokenTransactionsFromRpc } from '../services/signalStore';
+import {
+  reconcileTokenTransactionsFromRpc,
+  reconcileWebhookTransactionDetailsInWindow,
+} from '../services/signalStore';
 import { StrategyAutomationService } from '../services/strategyAutomationService';
 import {
   dbGetActiveStrategyVersion,
@@ -376,32 +376,6 @@ export async function handleStateRoutes(
             env.TRADINGBOT_DB,
             tokenId,
           );
-          if (
-            tokenHolderSyncState?.runId &&
-            (tokenHolderSyncState.status === 'running' || tokenHolderSyncState.status === 'failed')
-          ) {
-            tokenHolderAggregate =
-              (await dbComputeTokenHolderAggregateFromStage(
-                env.TRADINGBOT_DB,
-                user.id,
-                tokenId,
-                tokenHolderSyncState.runId,
-                tokenHolderSyncState.updatedAt,
-              )) ?? tokenHolderAggregate;
-          }
-          if (
-            !tokenHolderAggregate &&
-            (await dbHasTokenHolderRows(env.TRADINGBOT_DB, tokenId))
-          ) {
-            tokenHolderAggregate = await dbRecomputeTokenHolderAggregate(
-              env.TRADINGBOT_DB,
-              user.id,
-              tokenId,
-              {
-                source: 'state_recompute',
-              },
-            );
-          }
         }
       } catch (err: unknown) {
         console.warn(
@@ -499,11 +473,20 @@ export async function handleStateRoutes(
         endTimeMs,
       },
     );
+    const detailReconciliation = await reconcileWebhookTransactionDetailsInWindow(
+      env.TRADINGBOT_DB,
+      user.id,
+      contractAddress,
+      rpcUrls,
+      startTimeMs,
+      endTimeMs,
+    );
 
     return jsonResponse({
       ok: true,
       contractAddress,
       reconciliation,
+      detailReconciliation,
     });
   }
 

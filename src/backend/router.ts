@@ -13,12 +13,16 @@ import { errorResponse, jsonResponse } from './workerCore';
 import type { Env } from './workerShared';
 
 const DEFAULT_API_TIMEOUT_MS = 10_000;
+const STATE_API_TIMEOUT_MS = 15_000;
 const LONG_RUNNING_API_TIMEOUT_MS = 25_000;
 const HEALTH_API_TIMEOUT_MS = 2_000;
 
 function resolveApiTimeoutMs(pathname: string): number {
   if (pathname === '/api/health') {
     return HEALTH_API_TIMEOUT_MS;
+  }
+  if (pathname === '/api/state') {
+    return STATE_API_TIMEOUT_MS;
   }
   if (pathname === '/api/transaction-logs/refresh') {
     return LONG_RUNNING_API_TIMEOUT_MS;

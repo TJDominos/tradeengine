@@ -39,6 +39,7 @@ import {
   dbMarkSignalFailed,
   dbMarkSignalProcessed,
   dbResolvePreferredSignalWalletAddress,
+  dbUpsertWebhookTransactionLog,
   dbUpdateSignalTransactionDetails,
   fetchSolanaWebhookTransactionDetailsFromRpc,
 } from '../services/signalStore';
@@ -255,6 +256,8 @@ async function handleRustNodeWebhook(
         );
 
     if (claimed) {
+      let latestDetails = mergeStoredSignalTransactionDetails(initialDetails);
+      let latestWalletAddress = payload.wallet_address;
       try {
         const rpcUrls = await dbResolveSolanaRpcUrls(
           env.TRADINGBOT_DB,
@@ -293,6 +296,8 @@ async function handleRustNodeWebhook(
           payload.wallet_address,
         );
         mergedDetails.primaryWalletAddress = preferredWalletAddress;
+        latestDetails = mergedDetails;
+        latestWalletAddress = preferredWalletAddress ?? payload.wallet_address;
         await dbUpdateSignalTransactionDetails(
           env.TRADINGBOT_DB,
           targetSource,
@@ -316,13 +321,52 @@ async function handleRustNodeWebhook(
           targetSource,
           targetExternalId,
         );
+        await dbUpsertWebhookTransactionLog(env.TRADINGBOT_DB, {
+          userId: activeTarget.record.config.userId,
+          tokenId,
+          tokenContractAddress: payload.contractAddress,
+          source: mergedDetails.source,
+          eventType: payload.type,
+          txSignature: payload.txHash,
+          externalId: signalExternalId,
+          walletAddress: latestWalletAddress,
+          details: latestDetails,
+          processed: true,
+          errorMessage: null,
+          createdAt: signalTarget.signal.createdAt,
+          metadata: {
+            updateReason: 'strategy_webhook_process',
+            signalSource,
+            signalExternalId,
+          },
+        });
       } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
         await dbMarkSignalFailed(
           env.TRADINGBOT_DB,
           targetSource,
           targetExternalId,
-          err instanceof Error ? err.message : String(err),
+          errorMessage,
         );
+        await dbUpsertWebhookTransactionLog(env.TRADINGBOT_DB, {
+          userId: activeTarget.record.config.userId,
+          tokenId: null,
+          tokenContractAddress: payload.contractAddress,
+          source: latestDetails.source,
+          eventType: payload.type,
+          txSignature: payload.txHash,
+          externalId: signalExternalId,
+          walletAddress: latestWalletAddress,
+          details: latestDetails,
+          processed: false,
+          errorMessage,
+          createdAt: signalTarget.signal.createdAt,
+          metadata: {
+            updateReason: 'strategy_webhook_failed',
+            signalSource,
+            signalExternalId,
+          },
+        });
       }
     }
   }
@@ -759,6 +803,14 @@ async function processTokenActivitySignal(
   }
 
   try {
+    let latestDetails = mergeStoredSignalTransactionDetails({
+      tokenContractAddress: normalizedContractAddress,
+      primaryWalletAddress: input.walletAddress,
+      transactionStatus: 'PENDING',
+      detailSource: 'unknown',
+      source: 'webhook',
+    });
+    let latestWalletAddress = input.walletAddress;
     const rpcUrls = await dbResolveSolanaRpcUrls(
       env.TRADINGBOT_DB,
       input.userId,
@@ -809,6 +861,8 @@ async function processTokenActivitySignal(
       input.walletAddress,
     );
     correctedDetails.primaryWalletAddress = preferredWalletAddress;
+    latestDetails = correctedDetails;
+    latestWalletAddress = preferredWalletAddress ?? input.walletAddress;
     await dbUpdateSignalTransactionDetails(
       env.TRADINGBOT_DB,
       targetSource,
@@ -827,6 +881,25 @@ async function processTokenActivitySignal(
         console.warn(`Failed to apply token holder delta for ${input.txSignature}:`, err);
       });
     }
+    await dbUpsertWebhookTransactionLog(env.TRADINGBOT_DB, {
+      userId: input.userId,
+      tokenId,
+      tokenContractAddress: normalizedContractAddress,
+      source: correctedDetails.source,
+      eventType: input.eventType,
+      txSignature: input.txSignature,
+      externalId: input.externalId,
+      walletAddress: latestWalletAddress,
+      details: latestDetails,
+      processed: true,
+      errorMessage: null,
+      createdAt: signalTarget.signal.createdAt,
+      metadata: {
+        updateReason: 'alchemy_notify_process',
+        providerLabel: input.providerLabel,
+        signalSource: input.source,
+      },
+    });
 
     let marketSnapshot: TokenMarketSnapshot | null = null;
     try {
@@ -953,6 +1026,37 @@ async function processTokenActivitySignal(
       targetExternalId,
       errorMessage,
     );
+    await dbUpsertWebhookTransactionLog(env.TRADINGBOT_DB, {
+      userId: input.userId,
+      tokenId: null,
+      tokenContractAddress: normalizedContractAddress,
+      source: 'webhook',
+      eventType: input.eventType,
+      txSignature: input.txSignature,
+      externalId: input.externalId,
+      walletAddress: input.walletAddress,
+      details: {
+        tokenContractAddress: normalizedContractAddress,
+        fromWalletAddress: null,
+        toWalletAddress: null,
+        primaryWalletAddress: input.walletAddress,
+        action: null,
+        usdcAmount: null,
+        tokenAmount: null,
+        feeAmountUsd: null,
+        source: 'webhook',
+        transactionStatus: 'PENDING',
+        detailSource: 'unknown',
+      },
+      processed: false,
+      errorMessage,
+      createdAt: signalTarget.signal.createdAt,
+      metadata: {
+        updateReason: 'alchemy_notify_failed',
+        providerLabel: input.providerLabel,
+        signalSource: input.source,
+      },
+    });
     throw err;
   }
 }

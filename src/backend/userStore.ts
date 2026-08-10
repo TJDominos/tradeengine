@@ -1580,210 +1580,69 @@ export async function dbListWebhookTransactionLogs(
   db: D1Database,
   userId: number,
 ): Promise<WebhookTransactionLogRecord[]> {
-  const [rows, tokens, managedAccounts] = await Promise.all([
-    db
-      .prepare(
-        `SELECT
-           id,
-           source,
-           event_type,
-           wallet_address,
-           tx_signature,
-           payload,
-           details_json,
-           processed,
-           error_message,
-           created_at
-         FROM signals
-         WHERE source LIKE ?1
-         ORDER BY created_at DESC, id DESC
-         LIMIT 200`,
-      )
-      .bind(`%:user:${userId}`)
-      .all<{
-        id: number;
-        source: string;
-        event_type: string;
-        wallet_address: string | null;
-        tx_signature: string | null;
-        payload: string;
-        details_json: string | null;
-        processed: number;
-        error_message: string | null;
-        created_at: number;
-      }>(),
-    db
-      .prepare(
-        'SELECT base_token_address AS contract_address, symbol, amm_pool_address FROM tradable_tokens WHERE network = ?1',
-      )
-      .bind('solana')
-      .all<{
-        contract_address: string;
-        symbol: string | null;
-        amm_pool_address: string | null;
-      }>(),
-    db
-      .prepare(
-        "SELECT wallet_address FROM accounts WHERE user_id = ?1 AND type = 'managed'",
-      )
-      .bind(userId)
-      .all<{ wallet_address: string }>(),
-  ]);
-
-  const tokenMetaByContract = new Map<string, { symbol: string | null; ammPoolAddress: string | null }>();
-  for (const token of tokens.results) {
-    tokenMetaByContract.set(normalizePubkey(token.contract_address), {
-      symbol: token.symbol,
-      ammPoolAddress: token.amm_pool_address,
-    });
-  }
-  const managedAddressSet = new Set(
-    managedAccounts.results.map((row) => row.wallet_address),
-  );
-
-  const grouped = new Map<string, typeof rows.results>();
-  const orderedKeys: string[] = [];
-
-  for (const row of rows.results) {
-    const key = row.tx_signature?.trim() || `signal:${row.id}`;
-    const existing = grouped.get(key);
-    if (!existing) {
-      grouped.set(key, [row]);
-      orderedKeys.push(key);
-    } else {
-      existing.push(row);
-    }
-  }
-
-  return orderedKeys.slice(0, 50).map((key) => {
-    const group = grouped.get(key) ?? [];
-    const firstRow = group[0];
-    const parsedGroupDetails = group.map((row) => parseStoredSignalTransactionDetails(row.details_json));
-    const derivedSource: WebhookTransactionLogRecord['source'] = group.some(
-      (row) => row.source.includes('rpc_reconcile'),
+  const rows = await db
+    .prepare(
+      `SELECT
+         wtl.id,
+         wtl.token_contract_address,
+         tt.symbol AS token_symbol,
+         wtl.wallet_address,
+         wtl.from_wallet_address,
+         wtl.to_wallet_address,
+         wtl.action,
+         wtl.usdc_amount,
+         wtl.token_amount,
+         wtl.fee_amount_usd,
+         wtl.source,
+         wtl.event_type,
+         wtl.tx_signature,
+         wtl.status,
+         wtl.error_message,
+         wtl.created_at
+       FROM webhook_transaction_logs wtl
+       LEFT JOIN tradable_tokens tt ON tt.id = wtl.token_id
+       WHERE wtl.user_id = ?1
+       ORDER BY wtl.created_at DESC, wtl.id DESC
+       LIMIT 50`,
     )
-      ? 'rpc_reconcile'
-      : 'webhook';
-    const mergedDetails = mergeStoredSignalTransactionDetails(
-      ...parsedGroupDetails,
-      {
-        tokenContractAddress:
-          group
-            .flatMap((row) => extractStoredSignalContractAddresses(row.payload))
-            .find((address) => address !== SOLANA_USDC_MINT) ??
-          group.flatMap((row) => extractStoredSignalContractAddresses(row.payload))[0] ??
-          null,
-        source: derivedSource,
-      },
-    );
-    const tokenContractAddress = mergedDetails.tokenContractAddress;
-    const hasFailed = group.some(
-      (row) => !!row.error_message || mergedDetails.transactionStatus === 'FAILED',
-    );
-    const hasPending = group.some(
-      (row) => !row.error_message && row.processed !== 1,
-    );
-    const status: WebhookTransactionLogRecord['status'] = hasFailed
-      ? 'FAILED'
-      : hasPending || mergedDetails.transactionStatus === 'PENDING'
-        ? 'PENDING'
-        : 'CONFIRMED';
-    const tokenMeta = tokenContractAddress ? tokenMetaByContract.get(tokenContractAddress) ?? null : null;
-    const preferredDetails = [...parsedGroupDetails]
-      .filter((details): details is StoredSignalTransactionDetails => details != null)
-      .sort((left, right) => {
-        const actionRank = (action: WebhookTransactionLogRecord['action']) =>
-          action === 'BUY' || action === 'SELL'
-            ? 3
-            : action === 'TRANSFER'
-              ? 2
-              : 1;
-        const detailRank = (detailSource: StoredSignalTransactionDetails['detailSource']) =>
-          detailSource === 'payload+rpc'
-            ? 3
-            : detailSource === 'rpc'
-              ? 2
-              : detailSource === 'payload'
-                ? 1
-                : 0;
-        const leftScore = actionRank(left.action) * 10 + detailRank(left.detailSource);
-        const rightScore = actionRank(right.action) * 10 + detailRank(right.detailSource);
-        return rightScore - leftScore;
-      })[0] ?? null;
-    const displayDetails = preferredDetails
-      ? {
-          ...mergedDetails,
-          fromWalletAddress:
-            preferredDetails.fromWalletAddress ?? mergedDetails.fromWalletAddress,
-          toWalletAddress:
-            preferredDetails.toWalletAddress ?? mergedDetails.toWalletAddress,
-          primaryWalletAddress:
-            preferredDetails.primaryWalletAddress ?? mergedDetails.primaryWalletAddress,
-          action: preferredDetails.action ?? mergedDetails.action,
-        }
-      : mergedDetails;
-    const fromIsManaged =
-      !!displayDetails.fromWalletAddress &&
-      managedAddressSet.has(displayDetails.fromWalletAddress);
-    const toIsManaged =
-      !!displayDetails.toWalletAddress &&
-      managedAddressSet.has(displayDetails.toWalletAddress);
-    const normalizedAction: WebhookTransactionLogRecord['action'] =
-      displayDetails.action ?? (
-        fromIsManaged && !toIsManaged
-          ? 'SELL'
-          : toIsManaged && !fromIsManaged
-            ? 'BUY'
-            : displayDetails.fromWalletAddress && displayDetails.toWalletAddress
-              ? 'TRANSFER'
-              : null
-      );
-    const lpParticipantWalletAddress =
-      tokenMeta?.ammPoolAddress && displayDetails.fromWalletAddress === tokenMeta.ammPoolAddress
-        ? displayDetails.toWalletAddress
-        : tokenMeta?.ammPoolAddress && displayDetails.toWalletAddress === tokenMeta.ammPoolAddress
-          ? displayDetails.fromWalletAddress
-          : null;
-    const normalizedPrimaryWalletAddress =
-      displayDetails.primaryWalletAddress && displayDetails.primaryWalletAddress !== tokenContractAddress
-        ? displayDetails.primaryWalletAddress
-        : null;
-    const normalizedRowWalletAddress =
-      firstRow.wallet_address && firstRow.wallet_address !== tokenContractAddress
-        ? firstRow.wallet_address
-        : null;
-    const normalizedWalletAddress = fromIsManaged
-      ? displayDetails.fromWalletAddress
-      : toIsManaged
-        ? displayDetails.toWalletAddress
-        : lpParticipantWalletAddress ??
-          normalizedPrimaryWalletAddress ??
-          normalizedRowWalletAddress ??
-          displayDetails.fromWalletAddress ??
-          displayDetails.toWalletAddress ??
-          firstRow.wallet_address;
+    .bind(userId)
+    .all<{
+      id: number;
+      token_contract_address: string | null;
+      token_symbol: string | null;
+      wallet_address: string | null;
+      from_wallet_address: string | null;
+      to_wallet_address: string | null;
+      action: 'BUY' | 'SELL' | 'TRANSFER' | null;
+      usdc_amount: number | null;
+      token_amount: number | null;
+      fee_amount_usd: number | null;
+      source: 'webhook' | 'rpc_reconcile';
+      event_type: string;
+      tx_signature: string | null;
+      status: 'PENDING' | 'CONFIRMED' | 'FAILED';
+      error_message: string | null;
+      created_at: number;
+    }>();
 
-    return {
-      id: firstRow.id,
-      tokenContractAddress,
-      tokenSymbol: tokenContractAddress
-        ? (tokenMetaByContract.get(tokenContractAddress)?.symbol ?? null)
-        : null,
-      walletAddress: normalizedWalletAddress,
-      fromWalletAddress: displayDetails.fromWalletAddress,
-      toWalletAddress: displayDetails.toWalletAddress,
-      action: normalizedAction,
-      usdcAmount: displayDetails.usdcAmount,
-      tokenAmount: displayDetails.tokenAmount,
-      feeAmountUsd: displayDetails.feeAmountUsd,
-      source: derivedSource,
-      eventType: firstRow.event_type,
-      txSignature: firstRow.tx_signature,
-      status,
-      errorMessage: firstRow.error_message,
-      createdAt: firstRow.created_at,
-    };
-  });
+  return rows.results.map((row) => ({
+    id: row.id,
+    tokenContractAddress: row.token_contract_address,
+    tokenSymbol: row.token_symbol,
+    walletAddress: row.wallet_address,
+    fromWalletAddress: row.from_wallet_address,
+    toWalletAddress: row.to_wallet_address,
+    action: row.action,
+    usdcAmount: row.usdc_amount,
+    tokenAmount: row.token_amount,
+    feeAmountUsd: row.fee_amount_usd,
+    source: row.source,
+    eventType: row.event_type,
+    txSignature: row.tx_signature,
+    status: row.status,
+    errorMessage: row.error_message,
+    createdAt: row.created_at,
+  }));
 }
 
 export async function dbListRecentSignalsForDebug(
