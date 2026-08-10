@@ -2,9 +2,7 @@ import { Activity, Clock, Lock, RefreshCw, Shield } from 'lucide-react';
 
 type AppHeaderProps = {
   lastUpdated: string;
-  isTradingActive: boolean;
   isRefreshing: boolean;
-  onToggleTrading: () => void;
   onOpenAdmin: () => void;
   onRefresh: () => void;
   onLogout: () => void;
@@ -12,9 +10,7 @@ type AppHeaderProps = {
 
 export default function AppHeader({
   lastUpdated,
-  isTradingActive,
   isRefreshing,
-  onToggleTrading,
   onOpenAdmin,
   onRefresh,
   onLogout,
@@ -31,14 +27,6 @@ export default function AppHeader({
       </div>
 
       <div className="flex items-center gap-3">
-        <button
-          onClick={onToggleTrading}
-          className={`flex h-10 cursor-pointer items-center gap-2 rounded-md px-4 text-sm font-medium text-white shadow-sm ${
-            isTradingActive ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'
-          }`}
-        >
-          <Activity size={16} /> {isTradingActive ? 'Trading' : 'Start Trading'}
-        </button>
         <button
           onClick={onOpenAdmin}
           className="flex h-10 cursor-pointer items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 text-sm font-medium text-white shadow-sm hover:bg-slate-700"

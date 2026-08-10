@@ -53,6 +53,7 @@ type AccountsPageProps = {
   onInternalPageChange: (page: number) => void;
   onOutsiderPageChange: (page: number) => void;
   onOpenAdmin: () => void;
+  onRefreshInternalAccountBalance: (address: string) => void;
   onRefreshInternalBalances: () => void;
   onRefreshOutsideBalances: () => void;
   onToggleInternalAccountTrading: (account: AccountRecord) => void;
@@ -94,6 +95,7 @@ export default function AccountsPage({
   onInternalPageChange,
   onOutsiderPageChange,
   onOpenAdmin,
+  onRefreshInternalAccountBalance,
   onRefreshInternalBalances,
   onRefreshOutsideBalances,
   onToggleInternalAccountTrading,
@@ -186,6 +188,7 @@ export default function AccountsPage({
         emptyText={internalListLoading ? 'Fetching internal account data...' : 'No internal accounts found.'}
         sortValue={internalSort}
         onSortChange={onInternalSortChange}
+        onRefreshBalance={onRefreshInternalAccountBalance}
         onToggleTradingAccount={onToggleInternalAccountTrading}
         togglePendingAddress={managedAccountStatusUpdatingAddress}
         actionButton={

@@ -136,7 +136,6 @@ export default function App() {
   const [error, setError] = React.useState('');
   const [notice, setNotice] = React.useState('');
   const [lastUpdated, setLastUpdated] = React.useState('-');
-  const [isTradingActive, setIsTradingActive] = React.useState(false);
 
   const [activeTab, setActiveTab] = React.useState<TabId>('dashboard');
   const [dateRange, setDateRange] = React.useState<DateRangeState>(() => createDefaultDateRange());
@@ -544,82 +543,106 @@ export default function App() {
     };
   }, [activeTab, auth?.authenticated, loadState, marketRefreshRunning]);
 
-  const queueWalletBalanceRefresh = React.useCallback(async (
-    addresses: string[],
-    scope: 'internal' | 'outside',
-  ) => {
+  const refreshWalletBalance = React.useCallback(async (address: string) => {
     if (!auth?.authenticated) {
-      return;
+      return false;
     }
 
-    const targetAddresses = Array.from(new Set(addresses.filter(Boolean)));
+    const targetAddress = address.trim();
+    if (!targetAddress) {
+      return false;
+    }
+
+    setWalletBalancePending((current) => ({
+      ...current,
+      [targetAddress]: true,
+    }));
+    setWalletBalanceErrors((current) => {
+      const next = { ...current };
+      delete next[targetAddress];
+      return next;
+    });
+
+    try {
+      const balance = await api<WalletBalance>(`/api/wallets/${encodeURIComponent(targetAddress)}/balance`);
+      setWalletBalances((current) => ({
+        ...current,
+        [targetAddress]: balance,
+      }));
+      return true;
+    } catch (err: unknown) {
+      setWalletBalanceErrors((current) => ({
+        ...current,
+        [targetAddress]: err instanceof Error ? err.message : 'Failed to refresh wallet balance',
+      }));
+      return false;
+    } finally {
+      setWalletBalancePending((current) => ({
+        ...current,
+        [targetAddress]: false,
+      }));
+    }
+  }, [auth?.authenticated]);
+
+  const refreshWalletBalances = React.useCallback(async (addresses: string[]) => {
+    const targetAddresses = Array.from(new Set(addresses.map((address) => address.trim()).filter(Boolean)));
     if (targetAddresses.length === 0) {
       return;
     }
 
-    setWalletBalancePending((current) => {
-      const next = { ...current };
-      for (const address of targetAddresses) {
-        next[address] = true;
-      }
-      return next;
-    });
+    setError('');
+    setNotice('');
+    const results: boolean[] = [];
+    const batchSize = 2;
+    for (let index = 0; index < targetAddresses.length; index += batchSize) {
+      const batch = targetAddresses.slice(index, index + batchSize);
+      const batchResults = await Promise.all(
+        batch.map((address) => refreshWalletBalance(address)),
+      );
+      results.push(...batchResults);
+    }
+    const refreshedCount = results.filter(Boolean).length;
+    const failedCount = targetAddresses.length - refreshedCount;
 
-    await api<{ accepted: boolean; addressCount: number }>('/api/wallet-balances/refresh', {
-      method: 'POST',
-      body: JSON.stringify({ addresses: targetAddresses }),
-    });
+    if (failedCount === 0) {
+      setNotice(`Refreshed ${refreshedCount} wallet balance${refreshedCount === 1 ? '' : 's'}.`);
+      return;
+    }
 
-    setNotice(`Queued background balance refresh for ${targetAddresses.length} wallet(s). Snapshot data will update shortly.`);
-    setWalletBalanceErrors((current) => {
-      const next = { ...current };
-      for (const address of targetAddresses) {
-        delete next[address];
-      }
-      return next;
-    });
+    if (refreshedCount === 0) {
+      setError(`Failed to refresh ${failedCount} wallet balance${failedCount === 1 ? '' : 's'}.`);
+      return;
+    }
 
-    const reloadSnapshots = async () => {
-      if (scope === 'internal') {
-        await loadState();
-        await loadInternalAccountPage();
-        return;
-      }
-      await loadOutsideHolderPage();
-    };
-
-    window.setTimeout(() => {
-      void reloadSnapshots();
-    }, 1500);
-    window.setTimeout(() => {
-      void reloadSnapshots().finally(() => {
-        setWalletBalancePending((current) => {
-          const next = { ...current };
-          for (const address of targetAddresses) {
-            next[address] = false;
-          }
-          return next;
-        });
-      });
-    }, 4500);
-  }, [auth?.authenticated, loadInternalAccountPage, loadOutsideHolderPage, loadState]);
+    setNotice(`Refreshed ${refreshedCount} wallet balances; ${failedCount} failed.`);
+  }, [refreshWalletBalance]);
 
   const refreshInternalWalletBalances = React.useCallback(async () => {
     if (internalAccountPage.items.length === 0) {
       return;
     }
-    await queueWalletBalanceRefresh(
+    await refreshWalletBalances(
       internalAccountPage.items.map((account) => account.address),
-      'internal',
     );
-  }, [internalAccountPage.items, queueWalletBalanceRefresh]);
+  }, [internalAccountPage.items, refreshWalletBalances]);
 
   const refreshOutsideWalletBalances = React.useCallback(async () => {
-    await queueWalletBalanceRefresh(
+    await refreshWalletBalances(
       outsideHolderPage.items.map((holder) => holder.address),
-      'outside',
     );
-  }, [outsideHolderPage.items, queueWalletBalanceRefresh]);
+  }, [outsideHolderPage.items, refreshWalletBalances]);
+
+  const refreshInternalAccountBalance = React.useCallback(async (address: string) => {
+    const refreshed = await refreshWalletBalance(address);
+    if (refreshed) {
+      setError('');
+      setNotice('Wallet balance refreshed.');
+      return;
+    }
+
+    setNotice('');
+    setError('Failed to refresh wallet balance.');
+  }, [refreshWalletBalance]);
 
   const submitWithFeedback = async (name: string, action: () => Promise<void>) => {
     if (activeSubmissionRef.current) {
@@ -832,18 +855,6 @@ export default function App() {
       window.clearInterval(intervalId);
     };
   }, [auth?.authenticated, loadState, marketRefreshRunning]);
-
-  const handleStartTrading = () => {
-    setIsTradingActive((current) => {
-      const next = !current;
-      setNotice(
-        next
-          ? 'Trading status switched to active. Automated execution is still backend-gated.'
-          : 'Trading status switched back to idle.',
-      );
-      return next;
-    });
-  };
 
   const handleSaveConfig = () =>
     submitWithFeedback('settings', async () => {
@@ -1722,6 +1733,7 @@ export default function App() {
       onInternalPageChange={setInternalPage}
       onOutsiderPageChange={setOutsiderPage}
       onOpenAdmin={() => setIsAdminModalOpen(true)}
+      onRefreshInternalAccountBalance={(address) => void refreshInternalAccountBalance(address)}
       onRefreshInternalBalances={() => void refreshInternalWalletBalances()}
       onRefreshOutsideBalances={() => void refreshOutsideWalletBalances()}
       onToggleInternalAccountTrading={(account) => void handleManagedAccountTradingToggle(account.address, !account.isActive)}
@@ -1762,9 +1774,7 @@ export default function App() {
     <div className="flex min-h-screen flex-col bg-slate-950 p-4 font-sans text-slate-200 md:p-6">
       <AppHeader
         lastUpdated={lastUpdated}
-        isTradingActive={isTradingActive}
         isRefreshing={isRefreshPending}
-        onToggleTrading={handleStartTrading}
         onOpenAdmin={() => setIsAdminModalOpen(true)}
         onRefresh={handleRefresh}
         onLogout={handleLogout}

@@ -40,6 +40,15 @@ const tokenMarketCache = new Map<
   { expiresAt: number; value: TokenMarketSnapshot }
 >();
 
+const SOLANA_RPC_DEFAULT_REQUESTS_PER_SECOND = 20;
+const SOLANA_RPC_ALCHEMY_REQUESTS_PER_SECOND = 20;
+const SOLANA_RPC_HELIUS_REQUESTS_PER_SECOND = 3;
+const SOLANA_RPC_RATE_LIMIT_RETRY_DELAY_MS = 3000;
+const SOLANA_RPC_TRANSIENT_RETRY_DELAY_MS = 750;
+
+const solanaRpcSlotReservations = new Map<string, Promise<number>>();
+const solanaRpcRoundRobinCounters = new Map<string, number>();
+
 export interface StrategyTaskExecutionContext {
   env: Env;
   userId: number;
@@ -263,9 +272,24 @@ export function buildTokenHolderSyncSummary(
 }
 
 export function isSolanaRpcRateLimitError(err: unknown): boolean {
+  if (err instanceof SolanaRpcRateLimitError) {
+    return true;
+  }
   const message = err instanceof Error ? err.message : String(err);
   const normalized = message.toLowerCase();
-  return normalized.includes('429') || normalized.includes('too many requests');
+  return normalized.includes('429')
+    || normalized.includes('too many requests')
+    || normalized.includes('rate limit');
+}
+
+class SolanaRpcRateLimitError extends ApiError {
+  constructor(
+    message: string,
+    public readonly retryAfterMs: number | null = null,
+  ) {
+    super(429, message);
+    this.name = 'SolanaRpcRateLimitError';
+  }
 }
 
 // ─── password hashing (PBKDF2 via SubtleCrypto) ───────────────────────────────
@@ -575,6 +599,18 @@ export function isHeliusRpcUrl(value: string): boolean {
   }
 }
 
+export function isAlchemyRpcUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  try {
+    return new URL(trimmed).hostname.toLowerCase().includes('alchemy.com');
+  } catch {
+    return trimmed.toLowerCase().includes('alchemy.com');
+  }
+}
+
 export function normalizeHeliusRpcUrl(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -734,26 +770,139 @@ function waitMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseRetryAfterHeaderMs(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const seconds = Number.parseFloat(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.ceil(seconds * 1000);
+  }
+
+  const retryAt = Date.parse(value);
+  if (Number.isFinite(retryAt)) {
+    return Math.max(0, retryAt - Date.now());
+  }
+
+  return null;
+}
+
+function isRetryableSolanaRpcError(err: unknown): boolean {
+  if (isSolanaRpcRateLimitError(err)) {
+    return true;
+  }
+
+  const message = err instanceof Error ? err.message : String(err);
+  const normalized = message.toLowerCase();
+  return normalized.includes('fetch failed')
+    || normalized.includes('network')
+    || normalized.includes('timeout')
+    || normalized.includes('socket')
+    || normalized.includes('connection')
+    || /request failed with 5\d\d/.test(normalized);
+}
+
+function resolveSolanaRpcRetryDelayMs(
+  err: unknown,
+  attempt: number,
+): number {
+  if (err instanceof SolanaRpcRateLimitError && err.retryAfterMs != null) {
+    return Math.max(err.retryAfterMs, 50);
+  }
+
+  if (isSolanaRpcRateLimitError(err)) {
+    return SOLANA_RPC_RATE_LIMIT_RETRY_DELAY_MS * (attempt + 1);
+  }
+
+  return SOLANA_RPC_TRANSIENT_RETRY_DELAY_MS * (attempt + 1);
+}
+
+function getSolanaRpcRequestsPerSecond(rpcUrl: string): number {
+  if (isHeliusRpcUrl(rpcUrl)) {
+    return SOLANA_RPC_HELIUS_REQUESTS_PER_SECOND;
+  }
+  if (isAlchemyRpcUrl(rpcUrl)) {
+    return SOLANA_RPC_ALCHEMY_REQUESTS_PER_SECOND;
+  }
+  return SOLANA_RPC_DEFAULT_REQUESTS_PER_SECOND;
+}
+
+function getSolanaRpcRequestIntervalMs(rpcUrl: string): number {
+  return Math.ceil(1000 / getSolanaRpcRequestsPerSecond(rpcUrl));
+}
+
+function rotateSolanaRpcPoolForRequest(pool: string[]): string[] {
+  if (pool.length <= 1) {
+    return pool;
+  }
+  const poolKey = pool.join('|');
+  const nextOffset = solanaRpcRoundRobinCounters.get(poolKey) ?? 0;
+  solanaRpcRoundRobinCounters.set(poolKey, nextOffset + 1);
+  const startIndex = nextOffset % pool.length;
+  if (startIndex === 0) {
+    return pool;
+  }
+  return [...pool.slice(startIndex), ...pool.slice(0, startIndex)];
+}
+
+async function reserveSolanaRpcRequestSlot(rpcUrl: string): Promise<void> {
+  const requestIntervalMs = getSolanaRpcRequestIntervalMs(rpcUrl);
+  const previousReservation = solanaRpcSlotReservations.get(rpcUrl)
+    ?? Promise.resolve(Date.now());
+  const nextReservation = previousReservation
+    .catch(() => Date.now())
+    .then(async (nextAvailableAt) => {
+      const now = Date.now();
+      const scheduledAt = Math.max(now, nextAvailableAt);
+      if (scheduledAt > now) {
+        await waitMs(scheduledAt - now);
+      }
+      return scheduledAt + requestIntervalMs;
+    });
+  solanaRpcSlotReservations.set(rpcUrl, nextReservation);
+  await nextReservation;
+}
+
+function pushSolanaRpcRequestCooldown(rpcUrl: string, cooldownMs: number): void {
+  const previousReservation = solanaRpcSlotReservations.get(rpcUrl)
+    ?? Promise.resolve(Date.now());
+  const nextAvailableAt = Date.now() + cooldownMs;
+  solanaRpcSlotReservations.set(
+    rpcUrl,
+    previousReservation
+      .catch(() => Date.now())
+      .then((existingNextAvailableAt) => Math.max(existingNextAvailableAt, nextAvailableAt)),
+  );
+}
+
 export async function solanaRpc<T>(
   rpcUrls: string | string[],
   method: string,
   params: unknown,
 ): Promise<T> {
-  const pool = dedupeStrings(
+  const pool = rotateSolanaRpcPoolForRequest(dedupeStrings(
     (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls]).map((url) => url.trim()),
-  );
+  ));
   const maxAttemptsPerEndpoint = 3;
   let lastErrorMessage = 'Unknown Solana RPC failure';
 
   for (const rpcUrl of pool) {
     for (let attempt = 0; attempt < maxAttemptsPerEndpoint; attempt += 1) {
       try {
+        await reserveSolanaRpcRequestSlot(rpcUrl);
         const response = await fetch(rpcUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ jsonrpc: '2.0', id: method, method, params }),
         });
         if (!response.ok) {
+          if (response.status === 429) {
+            throw new SolanaRpcRateLimitError(
+              'Solana RPC request failed with 429',
+              parseRetryAfterHeaderMs(response.headers.get('Retry-After')),
+            );
+          }
           throw new ApiError(502, `Solana RPC request failed with ${response.status}`);
         }
         const body = await response.json<{
@@ -761,9 +910,13 @@ export async function solanaRpc<T>(
           error?: { code?: number; message?: string };
         }>();
         if (body.error) {
+          const rpcErrorMessage = body.error.message ?? 'unknown error';
+          if (isSolanaRpcRateLimitError(rpcErrorMessage)) {
+            throw new SolanaRpcRateLimitError(`Solana RPC error: ${rpcErrorMessage}`);
+          }
           throw new ApiError(
             502,
-            `Solana RPC error: ${body.error.message ?? 'unknown error'}`,
+            `Solana RPC error: ${rpcErrorMessage}`,
           );
         }
         if (body.result == null) {
@@ -777,8 +930,14 @@ export async function solanaRpc<T>(
         );
 
         const isLastAttempt = attempt + 1 >= maxAttemptsPerEndpoint;
-        if (!isLastAttempt && isSolanaRpcRateLimitError(err)) {
-          await waitMs(3000 * (attempt + 1));
+        if (isSolanaRpcRateLimitError(err)) {
+          pushSolanaRpcRequestCooldown(
+            rpcUrl,
+            resolveSolanaRpcRetryDelayMs(err, attempt),
+          );
+        }
+        if (!isLastAttempt && isRetryableSolanaRpcError(err)) {
+          await waitMs(resolveSolanaRpcRetryDelayMs(err, attempt));
           continue;
         }
         break;

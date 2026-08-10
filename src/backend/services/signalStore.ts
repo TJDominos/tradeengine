@@ -91,6 +91,45 @@ type RpcTransactionMeta = {
   postTokenBalances?: RpcTokenBalanceEntry[];
 };
 
+const SIGNAL_SOL_PRICE_CACHE_TTL_MS = 30_000;
+const SIGNAL_SOL_PRICE_FAILURE_TTL_MS = 5_000;
+
+let cachedSignalSolPriceUsd: {
+  expiresAt: number;
+  value: number | null;
+} | null = null;
+let pendingSignalSolPriceUsd: Promise<number | null> | null = null;
+
+async function loadSignalSolPriceUsd(): Promise<number | null> {
+  const now = Date.now();
+  if (cachedSignalSolPriceUsd && cachedSignalSolPriceUsd.expiresAt > now) {
+    return cachedSignalSolPriceUsd.value;
+  }
+
+  if (pendingSignalSolPriceUsd) {
+    return pendingSignalSolPriceUsd;
+  }
+
+  pendingSignalSolPriceUsd = (async () => {
+    const value =
+      (await fetchJupiterTokenPrice(SOLANA_WRAPPED_SOL_MINT))
+      ?? (await fetchJupiterPriceViaQuote(SOLANA_WRAPPED_SOL_MINT, 9));
+    cachedSignalSolPriceUsd = {
+      value,
+      expiresAt: Date.now() + (value != null
+        ? SIGNAL_SOL_PRICE_CACHE_TTL_MS
+        : SIGNAL_SOL_PRICE_FAILURE_TTL_MS),
+    };
+    return value;
+  })();
+
+  try {
+    return await pendingSignalSolPriceUsd;
+  } finally {
+    pendingSignalSolPriceUsd = null;
+  }
+}
+
 function readRpcUiTokenAmount(balance: RpcTokenBalanceEntry): number | null {
   if (balance.uiTokenAmount?.uiAmountString != null) {
     const parsed = Number.parseFloat(balance.uiTokenAmount.uiAmountString);
@@ -463,6 +502,9 @@ export async function reconcileWebhookTransactionDetailsInWindow(
     endTimeMs,
   );
   const groupsToReconcile = groups.filter((group) => group.txSignature);
+  const solPriceUsd = groupsToReconcile.length > 0
+    ? await loadSignalSolPriceUsd()
+    : null;
   let enrichedTransactions = 0;
   for (const group of groupsToReconcile) {
     const rpcDetails = await fetchSolanaWebhookTransactionDetailsFromRpc(
@@ -470,6 +512,7 @@ export async function reconcileWebhookTransactionDetailsInWindow(
       group.txSignature!,
       contractAddress,
       group.mergedDetails,
+      solPriceUsd,
     );
     const mergedDetails = mergeStoredSignalTransactionDetails(
       group.mergedDetails,
@@ -678,6 +721,9 @@ export async function reconcileTokenTransactionsFromRpc(
   let insertedSignals = 0;
   let duplicates = 0;
   let skippedIrrelevant = 0;
+  const solPriceUsd = signaturePool.size > 0
+    ? await loadSignalSolPriceUsd()
+    : null;
   for (const [txSignature, signatureMeta] of signaturePool.entries()) {
     if (
       signatureMeta.blockTimeMs != null &&
@@ -709,6 +755,7 @@ export async function reconcileTokenTransactionsFromRpc(
       {
         primaryWalletAddress: scannedWalletAddress,
       },
+      solPriceUsd,
     );
     const mergedDetails = applyAmmPoolDirectionCorrection(
       mergeStoredSignalTransactionDetails(
@@ -997,11 +1044,12 @@ export async function fetchSolanaWebhookTransactionDetailsFromRpc(
   txSignature: string,
   trackedContractAddress: string,
   payloadDetails: Partial<StoredSignalTransactionDetails>,
+  solPriceUsd?: number | null,
 ): Promise<Partial<StoredSignalTransactionDetails>> {
   try {
-    const solPriceUsd =
-      (await fetchJupiterTokenPrice(SOLANA_WRAPPED_SOL_MINT)) ??
-      (await fetchJupiterPriceViaQuote(SOLANA_WRAPPED_SOL_MINT, 9));
+    const resolvedSolPriceUsd = solPriceUsd === undefined
+      ? await loadSignalSolPriceUsd()
+      : solPriceUsd;
     const transaction = await solanaRpc<{
       meta?: RpcTransactionMeta;
     }>(rpcUrls, 'getTransaction', [
@@ -1012,7 +1060,7 @@ export async function fetchSolanaWebhookTransactionDetailsFromRpc(
       transaction.meta,
       trackedContractAddress,
       payloadDetails,
-      solPriceUsd,
+      resolvedSolPriceUsd,
     );
   } catch (err: unknown) {
     console.warn(`Failed to enrich webhook transaction ${txSignature} from RPC:`, err);

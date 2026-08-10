@@ -1,4 +1,5 @@
 import React from 'react';
+import { RefreshCw } from 'lucide-react';
 
 import type { AccountRecord, WalletBalance } from '../app/types';
 import { findWalletTokenAmount, formatDate, formatNum, formatUSD, parseAmount } from '../app/utils';
@@ -20,6 +21,7 @@ type AccountsTableProps = {
   actionButton?: React.ReactNode;
   sortValue?: 'newest' | 'usdc' | 'sol' | 'token';
   onSortChange?: (value: 'newest' | 'usdc' | 'sol' | 'token') => void;
+  onRefreshBalance?: (address: string) => void;
   onToggleTradingAccount?: (account: AccountRecord) => void;
   togglePendingAddress?: string | null;
   children?: React.ReactNode;
@@ -41,11 +43,13 @@ export default function AccountsTable({
   actionButton,
   sortValue,
   onSortChange,
+  onRefreshBalance,
   onToggleTradingAccount,
   togglePendingAddress,
   children,
 }: AccountsTableProps) {
   const showTradingControl = typeof onToggleTradingAccount === 'function';
+  const showBalanceRefresh = typeof onRefreshBalance === 'function';
   const sortInteractive = typeof onSortChange === 'function';
 
   const renderSortHeader = (
@@ -122,7 +126,23 @@ export default function AccountsTable({
                     </span>
                   </td>
                   <td className="px-4 py-2 text-xs font-bold text-slate-200">{account.label}</td>
-                  <td className="px-4 py-2 font-mono text-xs text-slate-400">{account.address}</td>
+                  <td className="px-4 py-2 font-mono text-xs text-slate-400">
+                    <div className="flex items-center gap-2">
+                      <span>{account.address}</span>
+                      {showBalanceRefresh ? (
+                        <button
+                          type="button"
+                          onClick={() => onRefreshBalance?.(account.address)}
+                          disabled={pending}
+                          className="rounded border border-slate-700 bg-slate-950 p-1 text-slate-400 transition hover:border-slate-500 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
+                          title={pending ? 'Refreshing wallet balance' : 'Refresh wallet balance'}
+                          aria-label={pending ? `Refreshing ${account.address} wallet balance` : `Refresh ${account.address} wallet balance`}
+                        >
+                          <RefreshCw size={10} className={pending ? 'animate-spin' : ''} />
+                        </button>
+                      ) : null}
+                    </div>
+                  </td>
                   <td className="px-4 py-2 text-right text-xs font-medium">{balance ? formatUSD(parseAmount(balance.usdc)) : pending ? '...' : '-'}</td>
                   <td className="px-4 py-2 text-right text-xs font-medium">{balance ? formatNum(parseAmount(balance.sol)) : pending ? '...' : '-'}</td>
                   <td className="px-4 py-2 text-right text-xs font-medium text-slate-200">
