@@ -95,6 +95,8 @@ function formatNumberInputValue(value: number | null | undefined): string {
   return String(value);
 }
 
+const ORDER_AMOUNT_STEP_USD = 0.01;
+
 function formatCurrency(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) {
     return '$0';
@@ -228,7 +230,7 @@ export default function StrategySchemaForm({
   activeStrategyStatus,
   tradableTokens,
 }: StrategySchemaFormProps) {
-  const { control, register, watch, handleSubmit, reset, getValues, formState } = useForm<StrategyVersionDocument>({
+  const { control, register, watch, handleSubmit, reset, getValues, setValue, formState } = useForm<StrategyVersionDocument>({
     defaultValues: draft,
     mode: 'onChange',
   });
@@ -612,7 +614,20 @@ export default function StrategySchemaForm({
                     value={formatNumberInputValue(field.value)}
                     onChange={(event) => {
                       const parsed = parseBlankableNumber(event.target.value);
-                      field.onChange(parsed == null ? null : Math.max(0.01, parsed));
+                      const minOrderUsd = parsed == null
+                        ? null
+                        : Math.max(ORDER_AMOUNT_STEP_USD, parsed);
+                      field.onChange(minOrderUsd);
+                      if (
+                        minOrderUsd != null &&
+                        (formData.parameters.maxOrderUsd ?? 0) <= minOrderUsd
+                      ) {
+                        setValue(
+                          'parameters.maxOrderUsd',
+                          Number((minOrderUsd + ORDER_AMOUNT_STEP_USD).toFixed(2)),
+                          { shouldDirty: true },
+                        );
+                      }
                     }}
                     className={textInputClassName()}
                   />
@@ -620,7 +635,7 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
-            <FieldShell label="Max Order Amount (USD)" helper="The planner increases the order count when needed so no base-plan order exceeds this amount.">
+            <FieldShell label="Max Order Amount (USD)" helper="Must be larger than Min Order Amount. The planner increases the order count when needed so no executable order exceeds this amount.">
               <Controller
                 control={control}
                 name="parameters.maxOrderUsd"
@@ -628,14 +643,20 @@ export default function StrategySchemaForm({
                   <input
                     type="number"
                     step="0.01"
-                    min="0.01"
+                    min={Math.max(
+                      ORDER_AMOUNT_STEP_USD,
+                      (formData.parameters.minOrderUsd ?? 0) + ORDER_AMOUNT_STEP_USD,
+                    )}
                     value={formatNumberInputValue(field.value)}
                     onChange={(event) => {
                       const parsed = parseBlankableNumber(event.target.value);
                       field.onChange(
                         parsed == null
                           ? null
-                          : Math.max(formData.parameters.minOrderUsd ?? 0.01, parsed),
+                          : Math.max(
+                            (formData.parameters.minOrderUsd ?? 0) + ORDER_AMOUNT_STEP_USD,
+                            parsed,
+                          ),
                       );
                     }}
                     className={textInputClassName()}
@@ -1094,7 +1115,7 @@ export default function StrategySchemaForm({
                             </div>
                           </div>
                           <div className="mt-2 rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
-                            Quote snapshot: {formatCurrency(account.quoteAvailableAmount)}. Remaining quote after planned buys and self-cycling sells: {formatCurrency(account.buyRemainingQuoteUsd)}.
+                            Quote snapshot: {formatCurrency(account.quoteAvailableAmount)}. Planned self-sell proceeds: {formatCurrency(account.plannedSellVolumeUsd)}. Remaining quote after planned buys: {formatCurrency(account.buyRemainingQuoteUsd)}.
                           </div>
                           <div className="mt-2 flex flex-wrap gap-2 text-xs">
                             <span className={`rounded-full px-2.5 py-1 ${account.eligibleForBuy ? 'bg-emerald-500/15 text-emerald-200' : 'bg-slate-700 text-slate-300'}`}>

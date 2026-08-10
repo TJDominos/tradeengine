@@ -101,6 +101,9 @@ function resolveConstrainedOrderCount(
   minOrderUsd: number,
   maxOrderUsd: number,
 ): number {
+  if (totalVolume < minOrderUsd) {
+    return 0;
+  }
   const minimumOrderCount = Math.max(1, Math.ceil(totalVolume / maxOrderUsd));
   const maximumOrderCount = Math.max(1, Math.floor(totalVolume / minOrderUsd));
   if (minimumOrderCount > maximumOrderCount) {
@@ -124,9 +127,13 @@ function buildConstrainedVolumes(
     return [];
   }
 
-  const effectiveMinOrderUsd = totalVolume >= minOrderUsd ? minOrderUsd : 0;
+  if (totalVolume < minOrderUsd) {
+    return [];
+  }
+
+  const effectiveMinOrderUsd = minOrderUsd;
   const effectiveMaxOrderUsd = Math.max(effectiveMinOrderUsd, maxOrderUsd);
-  if (orderCount === 1 || totalVolume < effectiveMinOrderUsd * orderCount) {
+  if (orderCount === 1) {
     return [totalVolume];
   }
 

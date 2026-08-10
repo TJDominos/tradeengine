@@ -1,4 +1,3 @@
-import { allocateVolumeAcrossAccountCaps } from '../services/tradeMath';
 import type { ManagedAccountBalanceRecord } from '../userStore';
 import { buildRandomizedTwapPlan } from './engine';
 import { splitBasePlannedTransactionCount } from './plannedTransactions';
@@ -92,6 +91,12 @@ type MutablePlannerAccount = StrategyPlannerAccount & {
   sellCapacityUsd: number;
 };
 
+type OrderAllocationCandidate = {
+  account: MutablePlannerAccount;
+  maxVolumeUsd: number;
+  existingPlannedVolumeUsd: number;
+};
+
 function roundToSixDecimals(value: number): number {
   return Number(value.toFixed(6));
 }
@@ -101,6 +106,92 @@ function positiveNumber(value: number | null | undefined): number {
     return 0;
   }
   return value;
+}
+
+function rotateCandidates<T>(candidates: T[], offset: number): T[] {
+  if (candidates.length <= 1) {
+    return candidates;
+  }
+  const normalizedOffset = ((offset % candidates.length) + candidates.length) % candidates.length;
+  return [
+    ...candidates.slice(normalizedOffset),
+    ...candidates.slice(0, normalizedOffset),
+  ];
+}
+
+function allocateExecutableOrderVolume(
+  targetVolumeUsd: number,
+  candidates: OrderAllocationCandidate[],
+  options: {
+    minOrderUsd: number;
+    accountCyclingEnabled: boolean;
+    rotationOffset: number;
+    accountDispersionStrength: number;
+  },
+): {
+  allocations: Array<{ accountId: number; volumeUsd: number }>;
+  unallocatedVolumeUsd: number;
+  nextRotationOffset: number;
+} {
+  const normalizedTargetVolumeUsd = roundToSixDecimals(targetVolumeUsd);
+  const minOrderUsd = roundToSixDecimals(Math.max(MIN_VOLUME_EPSILON, options.minOrderUsd));
+  const eligibleCandidates = candidates
+    .filter((candidate) => candidate.maxVolumeUsd + MIN_VOLUME_EPSILON >= minOrderUsd)
+    .sort((left, right) => {
+      if (options.accountDispersionStrength > 0) {
+        const volumeDifference = left.existingPlannedVolumeUsd - right.existingPlannedVolumeUsd;
+        if (Math.abs(volumeDifference) > MIN_VOLUME_EPSILON) {
+          return volumeDifference;
+        }
+      }
+      return left.account.accountId - right.account.accountId;
+    });
+  const orderedCandidates = options.accountCyclingEnabled
+    ? rotateCandidates(eligibleCandidates, options.rotationOffset)
+    : eligibleCandidates;
+  const nextRotationOffset = options.accountCyclingEnabled && eligibleCandidates.length > 0
+    ? (options.rotationOffset + 1) % eligibleCandidates.length
+    : 0;
+
+  if (normalizedTargetVolumeUsd < minOrderUsd || orderedCandidates.length === 0) {
+    return {
+      allocations: [],
+      unallocatedVolumeUsd: normalizedTargetVolumeUsd,
+      nextRotationOffset,
+    };
+  }
+
+  let remainingVolumeUsd = normalizedTargetVolumeUsd;
+  const allocations: Array<{ accountId: number; volumeUsd: number }> = [];
+  for (const candidate of orderedCandidates) {
+    if (remainingVolumeUsd < minOrderUsd) {
+      break;
+    }
+    let volumeUsd = Math.min(candidate.maxVolumeUsd, remainingVolumeUsd);
+    const remainingAfterAllocation = roundToSixDecimals(remainingVolumeUsd - volumeUsd);
+    if (remainingAfterAllocation > 0 && remainingAfterAllocation < minOrderUsd) {
+      const adjustment = minOrderUsd - remainingAfterAllocation;
+      if (volumeUsd - adjustment >= minOrderUsd) {
+        volumeUsd = roundToSixDecimals(volumeUsd - adjustment);
+      }
+    }
+    if (volumeUsd < minOrderUsd) {
+      continue;
+    }
+    allocations.push({
+      accountId: candidate.account.accountId,
+      volumeUsd: roundToSixDecimals(volumeUsd),
+    });
+    remainingVolumeUsd = roundToSixDecimals(
+      Math.max(0, remainingVolumeUsd - volumeUsd),
+    );
+  }
+
+  return {
+    allocations,
+    unallocatedVolumeUsd: remainingVolumeUsd,
+    nextRotationOffset,
+  };
 }
 
 export function createDeterministicRandom(seedText: string): () => number {
@@ -410,7 +501,7 @@ export function buildStrategyPlanningResult(input: {
         eligibleAccounts.map((account) => [account.accountId, account]),
       );
 
-      const allocationPlan = allocateVolumeAcrossAccountCaps(
+      const allocationPlan = allocateExecutableOrderVolume(
         slice.targetVolume,
         eligibleAccounts.map((account) => {
           const existingPlannedVolumeUsd = spec.side === 'buy'
@@ -420,15 +511,13 @@ export function buildStrategyPlanningResult(input: {
             ? account.buyRemainingQuoteUsd
             : Math.max(0, account.sellCapacityUsd - existingPlannedVolumeUsd);
           return {
-            accountId: account.accountId,
+            account,
             maxVolumeUsd,
-            existingVolumeUsd: existingPlannedVolumeUsd,
+            existingPlannedVolumeUsd,
           };
         }),
         {
-          random: createDeterministicRandom(
-            `${seedBase}:allocation:${specIndex}:${spec.side}:${spec.pulse ?? 'base'}:${slice.orderIndex}`,
-          ),
+          minOrderUsd: input.config.minOrderUsd,
           accountCyclingEnabled: input.document.execution.accountCyclingEnabled,
           rotationOffset: rotationOffsets[spec.side],
           accountDispersionStrength: input.document.execution.accountDispersionStrength,
@@ -472,6 +561,13 @@ export function buildStrategyPlanningResult(input: {
         })
         .filter((allocation): allocation is StrategyPlannerTaskAllocation => allocation != null);
 
+      const allocatedVolumeUsd = roundToSixDecimals(
+        allocations.reduce((sum, allocation) => sum + allocation.plannedVolumeUsd, 0),
+      );
+      if (allocatedVolumeUsd <= MIN_VOLUME_EPSILON) {
+        continue;
+      }
+
       tasks.push({
         taskId: `${spec.pulse ?? spec.side}-${specIndex + 1}-${slice.orderIndex}`,
         side: spec.side,
@@ -479,7 +575,7 @@ export function buildStrategyPlanningResult(input: {
         orderIndex: slice.orderIndex,
         totalOrders: plan.orderCount,
         scheduledAt: slice.scheduledAt + spec.scheduledOffsetMs,
-        totalVolumeUsd: roundToSixDecimals(slice.targetVolume),
+        totalVolumeUsd: allocatedVolumeUsd,
         unallocatedVolumeUsd: roundToSixDecimals(allocationPlan.unallocatedVolumeUsd),
         allocations,
       });

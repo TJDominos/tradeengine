@@ -57,7 +57,10 @@ function normalizeParameters(value: unknown): StrategyParameters {
   const quoteTokenAddress = readString(raw.quoteTokenAddress).trim() || SOLANA_USDC_MINT;
   const ammPoolAddress = readString(raw.ammPoolAddress).trim();
   const minOrderUsd = Math.max(0.01, readNumber(raw.minOrderUsd, 1));
-  const maxOrderUsd = Math.max(minOrderUsd, readNumber(raw.maxOrderUsd, 100));
+  const maxOrderUsd = Math.max(
+    minOrderUsd + 0.01,
+    readNumber(raw.maxOrderUsd, 100),
+  );
   return {
     contractAddress: legacyContractAddress || baseTokenAddress,
     baseTokenAddress,
