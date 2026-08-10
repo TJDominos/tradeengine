@@ -83,7 +83,7 @@ export type WebhookTransactionLog = {
   walletAddress: string | null;
   fromWalletAddress: string | null;
   toWalletAddress: string | null;
-  action: 'BUY' | 'SELL' | null;
+  action: 'BUY' | 'SELL' | 'TRANSFER' | null;
   usdcAmount: number | null;
   tokenAmount: number | null;
   feeAmountUsd: number | null;

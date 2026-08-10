@@ -1273,7 +1273,10 @@ export function parseStoredSignalTransactionDetails(
     fromWalletAddress: tryNormalizeSolanaPubkey(payload.fromWalletAddress),
     toWalletAddress: tryNormalizeSolanaPubkey(payload.toWalletAddress),
     primaryWalletAddress: tryNormalizeSolanaPubkey(payload.primaryWalletAddress),
-    action: actionText === 'BUY' || actionText === 'SELL' ? actionText : null,
+    action:
+      actionText === 'BUY' || actionText === 'SELL' || actionText === 'TRANSFER'
+        ? actionText
+        : null,
     usdcAmount: toFiniteNumber(payload.usdcAmount),
     tokenAmount: toFiniteNumber(payload.tokenAmount),
     feeAmountUsd: toFiniteNumber(payload.feeAmountUsd),
@@ -1526,7 +1529,9 @@ export function extractWebhookTransactionDetailsFromPayload(
     fromWalletAddress,
     toWalletAddress,
     primaryWalletAddress,
-    action,
+    action:
+      action ??
+      (isTrackedTokenActivity && fromWalletAddress && toWalletAddress ? 'TRANSFER' : null),
     detailSource: 'payload',
     source: 'webhook',
   };

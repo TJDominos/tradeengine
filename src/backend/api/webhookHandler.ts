@@ -5,6 +5,7 @@ import { type StrategyEngineDurableObjectEventRequest } from '../strategy/strate
 import { buildWebhookStrategyTrigger } from '../strategy/triggers';
 import { nowTs } from '../time';
 import {
+  dbFindTradableTokenById,
   dbGetLatestTokenMarketSnapshot,
   dbResolveSolanaRpcUrls,
   dbResolveTradableTokenId,
@@ -30,6 +31,7 @@ import {
 } from '../workerCore';
 import { parseJsonText } from '../workerSchema';
 import {
+  applyAmmPoolDirectionCorrection,
   dbApplyTokenHolderTransactionDelta,
   dbClaimSignalProcessing,
   dbCreateSignal,
@@ -600,6 +602,9 @@ function deriveAlchemySignalsFromPayload(
         item.tokenAddress,
         item.mint,
         log?.address,
+        log?.contractAddress,
+        log?.tokenAddress,
+        log?.mint,
         ...extractTokenTransferContractAddresses(item.tokenTransfers),
       ]);
       return [
@@ -607,6 +612,7 @@ function deriveAlchemySignalsFromPayload(
           externalId: `${eventId}:${txSignature ?? index}:${index}`,
           eventType: `${payloadType}:${readNonEmptyString(item.category) ?? 'activity'}`,
           walletAddress:
+            tryNormalizeSolanaPubkey(item.walletAddress) ??
             tryNormalizeSolanaPubkey(item.fromAddress) ??
             tryNormalizeSolanaPubkey(item.toAddress),
           txSignature,
@@ -762,6 +768,9 @@ async function processTokenActivitySignal(
       env.TRADINGBOT_DB,
       normalizedContractAddress,
     );
+    const trackedToken = tokenId != null
+      ? await dbFindTradableTokenById(env.TRADINGBOT_DB, tokenId)
+      : null;
     const payloadDetails = extractWebhookTransactionDetailsFromPayload(
       input.payload,
       normalizedContractAddress,
@@ -784,23 +793,28 @@ async function processTokenActivitySignal(
       payloadDetails,
       rpcDetails,
     );
+    const correctedDetails = applyAmmPoolDirectionCorrection(
+      mergedDetails,
+      trackedToken?.ammPoolAddress,
+      payloadDetails,
+    );
     const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
       env.TRADINGBOT_DB,
       input.userId,
       [
-        mergedDetails.primaryWalletAddress,
-        mergedDetails.fromWalletAddress,
-        mergedDetails.toWalletAddress,
+        correctedDetails.primaryWalletAddress,
+        correctedDetails.fromWalletAddress,
+        correctedDetails.toWalletAddress,
       ],
       input.walletAddress,
     );
-    mergedDetails.primaryWalletAddress = preferredWalletAddress;
+    correctedDetails.primaryWalletAddress = preferredWalletAddress;
     await dbUpdateSignalTransactionDetails(
       env.TRADINGBOT_DB,
       targetSource,
       targetExternalId,
       preferredWalletAddress,
-      mergedDetails,
+      correctedDetails,
     );
     if (tokenId && input.txSignature) {
       await dbApplyTokenHolderTransactionDelta(
@@ -808,7 +822,7 @@ async function processTokenActivitySignal(
         input.userId,
         tokenId,
         input.txSignature,
-        mergedDetails,
+        correctedDetails,
       ).catch((err) => {
         console.warn(`Failed to apply token holder delta for ${input.txSignature}:`, err);
       });
@@ -855,7 +869,7 @@ async function processTokenActivitySignal(
           eventType: input.eventType,
           externalId: input.externalId,
           contractAddress: normalizedContractAddress,
-          walletAddress: input.walletAddress,
+          walletAddress: preferredWalletAddress ?? input.walletAddress,
           txSignature: input.txSignature,
           payloadJson: input.payload,
         }),
@@ -873,34 +887,38 @@ async function processTokenActivitySignal(
         activeStrategy.config.baseTokenAddress === normalizedContractAddress &&
         activeStrategy.config.strategyVersionId === strategyResult.version.id
       ) {
-        const stubId = env.STRATEGY_ENGINE_DO.idFromName(
-          `${input.userId}:${normalizedContractAddress}`,
-        );
-        const stub = env.STRATEGY_ENGINE_DO.get(stubId);
-        const eventType = input.eventType.toLowerCase().includes('sell')
-          ? 'whale_sell'
-          : 'whale_buy';
-        const forwardRequest: StrategyEngineDurableObjectEventRequest = {
-          userId: input.userId,
-          versionId: strategyResult.version.id,
-          strategyDocument: strategyResult.version.document,
-          event: {
-            type: eventType,
-            amount: Math.max(0, payloadDetails.usdcAmount ?? payloadDetails.tokenAmount ?? 0),
-            contractAddress: normalizedContractAddress,
-            txHash: input.txSignature ?? input.externalId,
-            wallet_address: input.walletAddress ?? normalizedContractAddress,
-            is_loss_cut: false,
-            payloadJson: input.payload,
-          },
-        };
-        await stub.fetch('https://strategy-engine/webhook', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(forwardRequest),
-        });
+        const strategyAction = correctedDetails.action;
+        if (strategyAction === 'BUY' || strategyAction === 'SELL') {
+          const stubId = env.STRATEGY_ENGINE_DO.idFromName(
+            `${input.userId}:${normalizedContractAddress}`,
+          );
+          const stub = env.STRATEGY_ENGINE_DO.get(stubId);
+          const forwardRequest: StrategyEngineDurableObjectEventRequest = {
+            userId: input.userId,
+            versionId: strategyResult.version.id,
+            strategyDocument: strategyResult.version.document,
+            event: {
+              type: strategyAction === 'SELL' ? 'whale_sell' : 'whale_buy',
+              amount: Math.max(
+                0,
+                correctedDetails.usdcAmount ?? correctedDetails.tokenAmount ?? 0,
+              ),
+              contractAddress: normalizedContractAddress,
+              txHash: input.txSignature ?? input.externalId,
+              wallet_address:
+                preferredWalletAddress ?? input.walletAddress ?? normalizedContractAddress,
+              is_loss_cut: false,
+              payloadJson: input.payload,
+            },
+          };
+          await stub.fetch('https://strategy-engine/webhook', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(forwardRequest),
+          });
+        }
       }
       strategySummary = strategyResult
         ? `Strategy v${strategyResult.version.versionNo}: ${summarizeStrategyRuntime(strategyResult.runtime)}`
@@ -1027,21 +1045,23 @@ async function handleAlchemyNotifyWebhook(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const rawBody = await request.text();
-  await assertAlchemyWebhookSignature(request, env, rawBody);
-  const payload = parseJsonText<AlchemyWebhookPayload>(rawBody);
+  const rawBody = await request.text().catch((err) => {
+    console.error('Failed to read Alchemy webhook body:', err);
+    return '';
+  });
   const contractFromQuery = tryNormalizeSolanaPubkey(
     url.searchParams.get('contractAddress'),
   );
-  const derivedSignals = deriveAlchemySignalsFromPayload(
-    payload,
-    contractFromQuery,
-  );
 
-  // Background processing: handle webhook and update market snapshots
   ctx.waitUntil(
     (async () => {
       try {
+        await assertAlchemyWebhookSignature(request, env, rawBody);
+        const payload = parseJsonText<AlchemyWebhookPayload>(rawBody);
+        const derivedSignals = deriveAlchemySignalsFromPayload(
+          payload,
+          contractFromQuery,
+        );
         const result = await processAlchemyNotifyWebhookPayload(
           env,
           payload,

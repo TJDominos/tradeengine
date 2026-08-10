@@ -35,13 +35,78 @@ import { SOLANA_USDC_MINT, SOLANA_WRAPPED_SOL_MINT } from '../workerShared';
 import { runAndPersistStrategyEvaluation } from './strategyStore';
 import { syncTokenMarketSnapshotForUser } from './tokenMarketService';
 
-function applyAmmPoolDirectionCorrection(
+export function applyAmmPoolDirectionCorrection(
   details: StoredSignalTransactionDetails,
   ammPoolAddress: string | null | undefined,
+  preferredPayloadLeg?: Partial<StoredSignalTransactionDetails> | null,
 ): StoredSignalTransactionDetails {
   const normalizedAmmPoolAddress = tryNormalizeSolanaPubkey(ammPoolAddress);
+  const payloadFromWalletAddress = tryNormalizeSolanaPubkey(
+    preferredPayloadLeg?.fromWalletAddress,
+  );
+  const payloadToWalletAddress = tryNormalizeSolanaPubkey(
+    preferredPayloadLeg?.toWalletAddress,
+  );
+  const payloadPrimaryWalletAddress = tryNormalizeSolanaPubkey(
+    preferredPayloadLeg?.primaryWalletAddress,
+  );
+
+  if (
+    normalizedAmmPoolAddress &&
+    payloadFromWalletAddress === normalizedAmmPoolAddress &&
+    payloadToWalletAddress &&
+    payloadToWalletAddress !== normalizedAmmPoolAddress
+  ) {
+    return {
+      ...details,
+      fromWalletAddress: normalizedAmmPoolAddress,
+      toWalletAddress: payloadToWalletAddress,
+      primaryWalletAddress: payloadToWalletAddress,
+      action: 'BUY',
+    };
+  }
+
+  if (
+    normalizedAmmPoolAddress &&
+    payloadToWalletAddress === normalizedAmmPoolAddress &&
+    payloadFromWalletAddress &&
+    payloadFromWalletAddress !== normalizedAmmPoolAddress
+  ) {
+    return {
+      ...details,
+      fromWalletAddress: payloadFromWalletAddress,
+      toWalletAddress: normalizedAmmPoolAddress,
+      primaryWalletAddress: payloadFromWalletAddress,
+      action: 'SELL',
+    };
+  }
+
+  if (
+    payloadFromWalletAddress &&
+    payloadToWalletAddress &&
+    (!normalizedAmmPoolAddress ||
+      (payloadFromWalletAddress !== normalizedAmmPoolAddress &&
+        payloadToWalletAddress !== normalizedAmmPoolAddress))
+  ) {
+    return {
+      ...details,
+      fromWalletAddress: payloadFromWalletAddress,
+      toWalletAddress: payloadToWalletAddress,
+      primaryWalletAddress:
+        payloadPrimaryWalletAddress ?? payloadFromWalletAddress,
+      action: 'TRANSFER',
+    };
+  }
+
   if (!normalizedAmmPoolAddress) {
-    return details;
+    return details.fromWalletAddress && details.toWalletAddress && details.action == null
+      ? {
+          ...details,
+          primaryWalletAddress:
+            details.primaryWalletAddress ?? details.fromWalletAddress,
+          action: 'TRANSFER',
+        }
+      : details;
   }
 
   if (
@@ -65,6 +130,21 @@ function applyAmmPoolDirectionCorrection(
       ...details,
       action: 'SELL',
       primaryWalletAddress: details.fromWalletAddress,
+    };
+  }
+
+  if (
+    details.fromWalletAddress &&
+    details.toWalletAddress &&
+    details.fromWalletAddress !== normalizedAmmPoolAddress &&
+    details.toWalletAddress !== normalizedAmmPoolAddress &&
+    details.action == null
+  ) {
+    return {
+      ...details,
+      primaryWalletAddress:
+        details.primaryWalletAddress ?? details.fromWalletAddress,
+      action: 'TRANSFER',
     };
   }
 
@@ -228,12 +308,14 @@ export function buildRpcSignalDetailsFromTransactionMeta(
           )
         : null;
 
-  const action: 'BUY' | 'SELL' | null =
+  const action: 'BUY' | 'SELL' | 'TRANSFER' | null =
     focusDelta && focusDelta.tracked > 0
       ? 'BUY'
       : focusDelta && focusDelta.tracked < 0
         ? 'SELL'
-        : null;
+        : inferredTrackedTransferAmount != null && inferredFromWalletAddress && inferredToWalletAddress
+          ? 'TRANSFER'
+          : null;
   const fromWalletAddress =
     (action === 'SELL' ? focusWallet : null) ??
     inferredFromWalletAddress ??
@@ -518,6 +600,9 @@ export async function reconcileWebhookTransactionDetailsInWindow(
     const correctedDetails = applyAmmPoolDirectionCorrection(
       mergedDetails,
       ammPoolAddress,
+      group.rows
+        .map((row) => parseStoredSignalTransactionDetails(row.details_json))
+        .find((details) => details?.fromWalletAddress && details?.toWalletAddress) ?? null,
     );
     const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
       db,

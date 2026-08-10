@@ -21,7 +21,6 @@ import {
   validateUsername,
   verifyPassword,
 } from './workerCore';
-import { analyzeTradeDirection } from './services/webhookParser';
 import type {
   AccountRecord,
   AuditLog,
@@ -1659,13 +1658,14 @@ export async function dbListWebhookTransactionLogs(
   return orderedKeys.slice(0, 50).map((key) => {
     const group = grouped.get(key) ?? [];
     const firstRow = group[0];
+    const parsedGroupDetails = group.map((row) => parseStoredSignalTransactionDetails(row.details_json));
     const derivedSource: WebhookTransactionLogRecord['source'] = group.some(
       (row) => row.source.includes('rpc_reconcile'),
     )
       ? 'rpc_reconcile'
       : 'webhook';
     const mergedDetails = mergeStoredSignalTransactionDetails(
-      ...group.map((row) => parseStoredSignalTransactionDetails(row.details_json)),
+      ...parsedGroupDetails,
       {
         tokenContractAddress:
           group
@@ -1688,78 +1688,79 @@ export async function dbListWebhookTransactionLogs(
       : hasPending || mergedDetails.transactionStatus === 'PENDING'
         ? 'PENDING'
         : 'CONFIRMED';
-    const fromIsManaged =
-      !!mergedDetails.fromWalletAddress &&
-      managedAddressSet.has(mergedDetails.fromWalletAddress);
-    const toIsManaged =
-      !!mergedDetails.toWalletAddress &&
-      managedAddressSet.has(mergedDetails.toWalletAddress);
     const tokenMeta = tokenContractAddress ? tokenMetaByContract.get(tokenContractAddress) ?? null : null;
-    const lpCorrectedAction: WebhookTransactionLogRecord['action'] =
-      tokenContractAddress && tokenMeta?.ammPoolAddress
-        ? (() => {
-            for (const row of group) {
-              try {
-                const payload = JSON.parse(row.payload) as unknown;
-                const corrected = analyzeTradeDirection(payload, {
-                  baseTokenAddress: tokenContractAddress,
-                  ammPoolAddress: tokenMeta.ammPoolAddress,
-                });
-                if (corrected === 'BUY' || corrected === 'SELL') {
-                  return corrected;
-                }
-              } catch {
-                // ignore malformed payloads and keep fallbacks below
-              }
-            }
-            return null;
-          })()
-        : null;
-    const walletLpCorrectedAction: WebhookTransactionLogRecord['action'] =
-      tokenMeta?.ammPoolAddress && mergedDetails.fromWalletAddress === tokenMeta.ammPoolAddress
-        ? 'BUY'
-        : tokenMeta?.ammPoolAddress && mergedDetails.toWalletAddress === tokenMeta.ammPoolAddress
-          ? 'SELL'
-          : null;
+    const preferredDetails = [...parsedGroupDetails]
+      .filter((details): details is StoredSignalTransactionDetails => details != null)
+      .sort((left, right) => {
+        const actionRank = (action: WebhookTransactionLogRecord['action']) =>
+          action === 'BUY' || action === 'SELL'
+            ? 3
+            : action === 'TRANSFER'
+              ? 2
+              : 1;
+        const detailRank = (detailSource: StoredSignalTransactionDetails['detailSource']) =>
+          detailSource === 'payload+rpc'
+            ? 3
+            : detailSource === 'rpc'
+              ? 2
+              : detailSource === 'payload'
+                ? 1
+                : 0;
+        const leftScore = actionRank(left.action) * 10 + detailRank(left.detailSource);
+        const rightScore = actionRank(right.action) * 10 + detailRank(right.detailSource);
+        return rightScore - leftScore;
+      })[0] ?? null;
+    const displayDetails = preferredDetails
+      ? {
+          ...mergedDetails,
+          fromWalletAddress:
+            preferredDetails.fromWalletAddress ?? mergedDetails.fromWalletAddress,
+          toWalletAddress:
+            preferredDetails.toWalletAddress ?? mergedDetails.toWalletAddress,
+          primaryWalletAddress:
+            preferredDetails.primaryWalletAddress ?? mergedDetails.primaryWalletAddress,
+          action: preferredDetails.action ?? mergedDetails.action,
+        }
+      : mergedDetails;
+    const fromIsManaged =
+      !!displayDetails.fromWalletAddress &&
+      managedAddressSet.has(displayDetails.fromWalletAddress);
+    const toIsManaged =
+      !!displayDetails.toWalletAddress &&
+      managedAddressSet.has(displayDetails.toWalletAddress);
     const normalizedAction: WebhookTransactionLogRecord['action'] =
-      lpCorrectedAction ?? walletLpCorrectedAction ?? mergedDetails.action ?? (
+      displayDetails.action ?? (
         fromIsManaged && !toIsManaged
           ? 'SELL'
           : toIsManaged && !fromIsManaged
             ? 'BUY'
-            : mergedDetails.primaryWalletAddress &&
-                mergedDetails.fromWalletAddress &&
-                mergedDetails.primaryWalletAddress === mergedDetails.fromWalletAddress
-              ? 'SELL'
-              : mergedDetails.primaryWalletAddress &&
-                  mergedDetails.toWalletAddress &&
-                  mergedDetails.primaryWalletAddress === mergedDetails.toWalletAddress
-                ? 'BUY'
-                : null
+            : displayDetails.fromWalletAddress && displayDetails.toWalletAddress
+              ? 'TRANSFER'
+              : null
       );
     const lpParticipantWalletAddress =
-      tokenMeta?.ammPoolAddress && mergedDetails.fromWalletAddress === tokenMeta.ammPoolAddress
-        ? mergedDetails.toWalletAddress
-        : tokenMeta?.ammPoolAddress && mergedDetails.toWalletAddress === tokenMeta.ammPoolAddress
-          ? mergedDetails.fromWalletAddress
+      tokenMeta?.ammPoolAddress && displayDetails.fromWalletAddress === tokenMeta.ammPoolAddress
+        ? displayDetails.toWalletAddress
+        : tokenMeta?.ammPoolAddress && displayDetails.toWalletAddress === tokenMeta.ammPoolAddress
+          ? displayDetails.fromWalletAddress
           : null;
     const normalizedPrimaryWalletAddress =
-      mergedDetails.primaryWalletAddress && mergedDetails.primaryWalletAddress !== tokenContractAddress
-        ? mergedDetails.primaryWalletAddress
+      displayDetails.primaryWalletAddress && displayDetails.primaryWalletAddress !== tokenContractAddress
+        ? displayDetails.primaryWalletAddress
         : null;
     const normalizedRowWalletAddress =
       firstRow.wallet_address && firstRow.wallet_address !== tokenContractAddress
         ? firstRow.wallet_address
         : null;
     const normalizedWalletAddress = fromIsManaged
-      ? mergedDetails.fromWalletAddress
+      ? displayDetails.fromWalletAddress
       : toIsManaged
-        ? mergedDetails.toWalletAddress
+        ? displayDetails.toWalletAddress
         : lpParticipantWalletAddress ??
           normalizedPrimaryWalletAddress ??
           normalizedRowWalletAddress ??
-          mergedDetails.fromWalletAddress ??
-          mergedDetails.toWalletAddress ??
+          displayDetails.fromWalletAddress ??
+          displayDetails.toWalletAddress ??
           firstRow.wallet_address;
 
     return {
@@ -1769,12 +1770,12 @@ export async function dbListWebhookTransactionLogs(
         ? (tokenMetaByContract.get(tokenContractAddress)?.symbol ?? null)
         : null,
       walletAddress: normalizedWalletAddress,
-      fromWalletAddress: mergedDetails.fromWalletAddress,
-      toWalletAddress: mergedDetails.toWalletAddress,
+      fromWalletAddress: displayDetails.fromWalletAddress,
+      toWalletAddress: displayDetails.toWalletAddress,
       action: normalizedAction,
-      usdcAmount: mergedDetails.usdcAmount,
-      tokenAmount: mergedDetails.tokenAmount,
-      feeAmountUsd: mergedDetails.feeAmountUsd,
+      usdcAmount: displayDetails.usdcAmount,
+      tokenAmount: displayDetails.tokenAmount,
+      feeAmountUsd: displayDetails.feeAmountUsd,
       source: derivedSource,
       eventType: firstRow.event_type,
       txSignature: firstRow.tx_signature,

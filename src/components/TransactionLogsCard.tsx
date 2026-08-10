@@ -170,6 +170,8 @@ export default function TransactionLogsCard({
                     ? 'text-emerald-400'
                     : normalizedWebhookAction === 'SELL'
                       ? 'text-amber-300'
+                      : normalizedWebhookAction === 'TRANSFER'
+                        ? 'text-sky-300'
                       : 'text-sky-300'
                   : log.action === 'BUY'
                     ? 'text-emerald-400'

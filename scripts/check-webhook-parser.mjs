@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { analyzeTradeDirection } from '../src/backend/services/webhookParser.ts';
+import { analyzeTradeDirection, classifyTrackedTokenActivity } from '../src/backend/services/webhookParser.ts';
 import { buildRpcSignalDetailsFromTransactionMeta } from '../src/backend/services/signalStore.ts';
 import {
   extractStoredSignalContractAddresses,
@@ -122,6 +122,7 @@ assert.equal(analyzeTradeDirection(sellPayloadWithTokenAccounts, config), 'SELL'
 assert.equal(analyzeTradeDirection(unknownPayload, config), 'UNKNOWN');
 assert.equal(analyzeTradeDirection(buyPayload, missingPoolConfig), 'UNKNOWN');
 assert.equal(analyzeTradeDirection(alchemyActivityPayload, config), 'BUY');
+assert.equal(classifyTrackedTokenActivity(alchemyActivityPayload, config), 'BUY');
 
 const transferOnlySignalPayload = JSON.stringify({
   activity: {
@@ -150,6 +151,26 @@ assert.equal(transferOnlyDetails.primaryWalletAddress, traderAddress);
 assert.equal(transferOnlyDetails.tokenAmount, 12.5);
 assert.equal(transferOnlyDetails.source, 'webhook');
 assert.equal(transferOnlyDetails.detailSource, 'payload');
+assert.equal(transferOnlyDetails.action, 'TRANSFER');
+
+const buyThenTransferPayload = {
+  tokenTransfers: [
+    {
+      mint: baseTokenAddress,
+      sourceOwner: ammPoolAddress,
+      destinationOwner: traderAddress,
+      tokenAmount: 48_511.721397,
+    },
+    {
+      mint: baseTokenAddress,
+      sourceOwner: traderAddress,
+      destinationOwner: '6SuFNrdbnRSHUJigiaERtbVm5x7et3JuiDbAUoKEF1pd',
+      tokenAmount: 48_511.721397,
+    },
+  ],
+};
+
+assert.equal(classifyTrackedTokenActivity(buyThenTransferPayload, config), 'BUY');
 
 const ataOwnerDetails = extractWebhookTransactionDetailsFromPayload(
   alchemyActivityPayloadWithAtaAddresses,
@@ -200,7 +221,7 @@ assert.equal(rpcTransferOnlyDetails.fromWalletAddress, traderAddress);
 assert.equal(rpcTransferOnlyDetails.toWalletAddress, ammPoolAddress);
 assert.equal(rpcTransferOnlyDetails.primaryWalletAddress, traderAddress);
 assert.equal(rpcTransferOnlyDetails.tokenAmount, 12.5);
-assert.equal(rpcTransferOnlyDetails.action, null);
+assert.equal(rpcTransferOnlyDetails.action, 'TRANSFER');
 assert.equal(rpcTransferOnlyDetails.source, 'rpc_reconcile');
 assert.equal(rpcTransferOnlyDetails.detailSource, 'rpc');
 

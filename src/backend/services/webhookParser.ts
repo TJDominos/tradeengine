@@ -1,6 +1,14 @@
 import type { StrategyParameters } from '../strategy/types.ts';
 
 export type TradeDirection = 'BUY' | 'SELL' | 'UNKNOWN';
+export type TradeAction = 'BUY' | 'SELL' | 'TRANSFER' | 'UNKNOWN';
+
+export interface TrackedTokenTransferLeg {
+  action: 'BUY' | 'SELL' | 'TRANSFER';
+  fromWalletAddress: string | null;
+  toWalletAddress: string | null;
+  primaryWalletAddress: string | null;
+}
 
 type StrategyConfig = Pick<StrategyParameters, 'baseTokenAddress'> & {
   ammPoolAddress?: string | null;
@@ -189,20 +197,29 @@ function collectNormalizedAddresses(values: unknown[]): string[] {
   return [...addresses];
 }
 
-export function analyzeTradeDirection(
+function firstNonMatchingAddress(addresses: string[], excluded: string | null): string | null {
+  if (excluded) {
+    const candidate = addresses.find((address) => address !== excluded);
+    if (candidate) {
+      return candidate;
+    }
+  }
+  return addresses[0] ?? null;
+}
+
+export function resolveTrackedTokenTransferLeg(
   webhookPayload: unknown,
   config: StrategyConfig,
-): TradeDirection {
+): TrackedTokenTransferLeg | null {
   const baseTokenAddress = config.baseTokenAddress.trim();
-  const ammPoolAddress = config.ammPoolAddress.trim();
-
-  if (!baseTokenAddress || !ammPoolAddress) {
-    return 'UNKNOWN';
+  if (!baseTokenAddress) {
+    return null;
   }
 
   const normalizedBaseTokenAddress = normalizePubkey(baseTokenAddress);
-  const normalizedAmmPoolAddress = normalizePubkey(ammPoolAddress);
+  const normalizedAmmPoolAddress = tryNormalizeSolanaPubkey(config.ammPoolAddress);
   const transfers = readTransfers(webhookPayload);
+  let transferLeg: TrackedTokenTransferLeg | null = null;
 
   for (const transfer of transfers) {
     const transferMint = readNormalizedMint(transfer);
@@ -222,14 +239,68 @@ export function analyzeTradeDirection(
       transfer.toOwner,
       transfer.toAddress,
     ]);
+    const senderOutsidePool = firstNonMatchingAddress(
+      senders,
+      normalizedAmmPoolAddress,
+    );
+    const receiverOutsidePool = firstNonMatchingAddress(
+      receivers,
+      normalizedAmmPoolAddress,
+    );
 
-    if (senders.includes(normalizedAmmPoolAddress)) {
-      return 'BUY';
+    if (
+      normalizedAmmPoolAddress &&
+      senders.includes(normalizedAmmPoolAddress) &&
+      !receivers.includes(normalizedAmmPoolAddress)
+    ) {
+      return {
+        action: 'BUY',
+        fromWalletAddress: normalizedAmmPoolAddress,
+        toWalletAddress: receiverOutsidePool,
+        primaryWalletAddress: receiverOutsidePool,
+      };
     }
-    if (receivers.includes(normalizedAmmPoolAddress)) {
-      return 'SELL';
+
+    if (
+      normalizedAmmPoolAddress &&
+      receivers.includes(normalizedAmmPoolAddress) &&
+      !senders.includes(normalizedAmmPoolAddress)
+    ) {
+      return {
+        action: 'SELL',
+        fromWalletAddress: senderOutsidePool,
+        toWalletAddress: normalizedAmmPoolAddress,
+        primaryWalletAddress: senderOutsidePool,
+      };
+    }
+
+    if (!transferLeg && (senders.length > 0 || receivers.length > 0)) {
+      const fallbackFrom = senders[0] ?? null;
+      const fallbackTo = receivers[0] ?? null;
+      transferLeg = {
+        action: 'TRANSFER',
+        fromWalletAddress: fallbackFrom,
+        toWalletAddress: fallbackTo,
+        primaryWalletAddress:
+          senderOutsidePool ?? receiverOutsidePool ?? fallbackFrom ?? fallbackTo,
+      };
     }
   }
 
-  return 'UNKNOWN';
+  return transferLeg;
+}
+
+export function classifyTrackedTokenActivity(
+  webhookPayload: unknown,
+  config: StrategyConfig,
+): TradeAction {
+  return resolveTrackedTokenTransferLeg(webhookPayload, config)?.action ?? 'UNKNOWN';
+}
+
+export function analyzeTradeDirection(
+  webhookPayload: unknown,
+  config: StrategyConfig,
+): TradeDirection {
+  const action = classifyTrackedTokenActivity(webhookPayload, config);
+  return action === 'BUY' || action === 'SELL' ? action : 'UNKNOWN';
 }

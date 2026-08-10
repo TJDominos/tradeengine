@@ -139,7 +139,7 @@ export interface WebhookTransactionLogRecord {
   walletAddress: string | null;
   fromWalletAddress: string | null;
   toWalletAddress: string | null;
-  action: 'BUY' | 'SELL' | null;
+  action: 'BUY' | 'SELL' | 'TRANSFER' | null;
   usdcAmount: number | null;
   tokenAmount: number | null;
   feeAmountUsd: number | null;
@@ -237,7 +237,7 @@ export interface StoredSignalTransactionDetails {
   fromWalletAddress: string | null;
   toWalletAddress: string | null;
   primaryWalletAddress: string | null;
-  action: 'BUY' | 'SELL' | null;
+  action: 'BUY' | 'SELL' | 'TRANSFER' | null;
   usdcAmount: number | null;
   tokenAmount: number | null;
   feeAmountUsd: number | null;
@@ -964,7 +964,10 @@ export function parseStoredSignalTransactionDetails(
       fromWalletAddress: tryNormalizeSolanaPubkey(parsed.fromWalletAddress) ?? null,
       toWalletAddress: tryNormalizeSolanaPubkey(parsed.toWalletAddress) ?? null,
       primaryWalletAddress: tryNormalizeSolanaPubkey(parsed.primaryWalletAddress) ?? null,
-      action: parsed.action === 'BUY' || parsed.action === 'SELL' ? parsed.action : null,
+      action:
+        parsed.action === 'BUY' || parsed.action === 'SELL' || parsed.action === 'TRANSFER'
+          ? parsed.action
+          : null,
       usdcAmount: toFiniteNumber(parsed.usdcAmount),
       tokenAmount: toFiniteNumber(parsed.tokenAmount),
       feeAmountUsd: toFiniteNumber(parsed.feeAmountUsd),
