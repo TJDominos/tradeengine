@@ -66,6 +66,8 @@ export interface StrategyParameters {
   timeRangeTarget: string;
   minTransactions: number;
   maxTransactions: number;
+  minOrderUsd: number;
+  maxOrderUsd: number;
   maxSlippageBps: number;
   notes: string;
 }
@@ -112,6 +114,8 @@ export interface StrategyExecutionPlanningInput {
   orderCount: number;
   durationMs: number;
   startTime: number;
+  minOrderUsd?: number;
+  maxOrderUsd?: number;
   random?: () => number;
   baseTokenAddress?: string;
 }
@@ -237,6 +241,8 @@ export interface StrategyRecordConfig {
   baseOrderCount: number;
   baseTotalVolumeUsd: number;
   baseDurationMs: number;
+  minOrderUsd: number;
+  maxOrderUsd: number;
   distributionChunkCount: number;
   distributionChunkDelayJitterMs: number;
 }

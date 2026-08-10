@@ -88,6 +88,92 @@ function randomInRange(random: () => number, min: number, max: number): number {
   return min + (max - min) * random();
 }
 
+function normalizeOrderLimit(value: number | undefined, fallback: number): number {
+  if (value == null || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  return value;
+}
+
+function resolveConstrainedOrderCount(
+  totalVolume: number,
+  requestedOrderCount: number,
+  minOrderUsd: number,
+  maxOrderUsd: number,
+): number {
+  const minimumOrderCount = Math.max(1, Math.ceil(totalVolume / maxOrderUsd));
+  const maximumOrderCount = Math.max(1, Math.floor(totalVolume / minOrderUsd));
+  if (minimumOrderCount > maximumOrderCount) {
+    return 1;
+  }
+  return Math.min(
+    maximumOrderCount,
+    Math.max(minimumOrderCount, Math.max(1, Math.floor(requestedOrderCount))),
+  );
+}
+
+function buildConstrainedVolumes(
+  totalVolume: number,
+  orderCount: number,
+  minOrderUsd: number,
+  maxOrderUsd: number,
+  jitterRatio: number,
+  random: () => number,
+): number[] {
+  if (orderCount <= 0 || totalVolume <= 0) {
+    return [];
+  }
+
+  const effectiveMinOrderUsd = totalVolume >= minOrderUsd ? minOrderUsd : 0;
+  const effectiveMaxOrderUsd = Math.max(effectiveMinOrderUsd, maxOrderUsd);
+  if (orderCount === 1 || totalVolume < effectiveMinOrderUsd * orderCount) {
+    return [totalVolume];
+  }
+
+  if (effectiveMaxOrderUsd <= effectiveMinOrderUsd) {
+    return Array.from({ length: orderCount }, () => totalVolume / orderCount);
+  }
+
+  const volumes = Array.from({ length: orderCount }, () => effectiveMinOrderUsd);
+  const capacities = Array.from(
+    { length: orderCount },
+    () => effectiveMaxOrderUsd - effectiveMinOrderUsd,
+  );
+  let remainingVolume = totalVolume - effectiveMinOrderUsd * orderCount;
+  let eligibleIndices = capacities
+    .map((capacity, index) => ({ capacity, index }))
+    .filter(({ capacity }) => capacity > MIN_PLAN_WEIGHT)
+    .map(({ index }) => index);
+
+  while (remainingVolume > MIN_PLAN_WEIGHT && eligibleIndices.length > 0) {
+    const weights = buildNormalizedWeights(eligibleIndices.length, jitterRatio, random);
+    let allocatedThisRound = 0;
+    const nextEligibleIndices: number[] = [];
+    for (let weightIndex = 0; weightIndex < eligibleIndices.length; weightIndex += 1) {
+      const index = eligibleIndices[weightIndex]!;
+      const volume = Math.min(
+        remainingVolume * (weights[weightIndex] ?? 0),
+        capacities[index] ?? 0,
+      );
+      volumes[index] = (volumes[index] ?? 0) + volume;
+      capacities[index] = Math.max(0, (capacities[index] ?? 0) - volume);
+      allocatedThisRound += volume;
+      if ((capacities[index] ?? 0) > MIN_PLAN_WEIGHT) {
+        nextEligibleIndices.push(index);
+      }
+    }
+    if (allocatedThisRound <= MIN_PLAN_WEIGHT) {
+      break;
+    }
+    remainingVolume = Math.max(0, remainingVolume - allocatedThisRound);
+    eligibleIndices = nextEligibleIndices;
+  }
+
+  const allocatedVolume = volumes.reduce((sum, volume) => sum + volume, 0);
+  volumes[volumes.length - 1] = (volumes[volumes.length - 1] ?? 0) + (totalVolume - allocatedVolume);
+  return volumes;
+}
+
 function buildNormalizedWeights(
   count: number,
   jitterRatio: number,
@@ -173,14 +259,27 @@ export function buildRandomizedTwapPlan(
   input: StrategyExecutionPlanningInput,
 ): StrategyExecutionPlan {
   const totalVolume = sanitizePositiveNumber(input.totalVolume);
-  const orderCount = Math.max(1, Math.floor(input.orderCount));
+  const minOrderUsd = normalizeOrderLimit(input.minOrderUsd, 0.01);
+  const maxOrderUsd = Math.max(
+    minOrderUsd,
+    normalizeOrderLimit(input.maxOrderUsd, Number.POSITIVE_INFINITY),
+  );
+  const orderCount = resolveConstrainedOrderCount(
+    totalVolume,
+    input.orderCount,
+    minOrderUsd,
+    maxOrderUsd,
+  );
   const durationMs = Math.max(0, Math.round(input.durationMs));
   const random = input.random ?? Math.random;
   const startTime = Math.round(input.startTime);
   const baseVolume = orderCount > 0 ? totalVolume / orderCount : 0;
   const baseIntervalMs = orderCount > 1 ? durationMs / (orderCount - 1) : durationMs;
-  const volumeWeights = buildNormalizedWeights(
+  const targetVolumes = buildConstrainedVolumes(
+    totalVolume,
     orderCount,
+    minOrderUsd,
+    maxOrderUsd,
     execution.volumeJitterRatio,
     random,
   );
@@ -193,12 +292,8 @@ export function buildRandomizedTwapPlan(
   );
 
   let cumulativeTargetVolume = 0;
-  const slices: StrategyExecutionPlanSlice[] = volumeWeights.map((weight, index) => {
-    const remainingVolume = Math.max(0, totalVolume - cumulativeTargetVolume);
-    const targetVolume =
-      index === orderCount - 1
-        ? remainingVolume
-        : Math.min(remainingVolume, totalVolume * weight);
+  const slices: StrategyExecutionPlanSlice[] = targetVolumes.map((volume, index) => {
+    const targetVolume = Math.max(0, volume);
     cumulativeTargetVolume += targetVolume;
     const previousTime = index === 0 ? startTime : schedule[index - 1] ?? startTime;
     const scheduledAt = schedule[index] ?? Math.round(startTime + durationMs);

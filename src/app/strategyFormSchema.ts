@@ -421,6 +421,8 @@ export function createStrategyDraftFromSettings(
       timeRangeTarget: settings.timeRangeTarget,
       minTransactions: 1,
       maxTransactions: settings.maxTransactions,
+      minOrderUsd: 1,
+      maxOrderUsd: 100,
       maxSlippageBps: Math.round(settings.maxSlippage * 100),
       notes: settings.strategyNotes,
     },

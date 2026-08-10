@@ -708,6 +708,8 @@ export class StrategyEngineDurableObject {
       baseOrderCount: config.baseOrderCount,
       baseTotalVolumeUsd: config.targetTotalVolumeUsd,
       baseDurationMs: config.baseDurationMs,
+      minOrderUsd: config.strategyDocument.parameters.minOrderUsd,
+      maxOrderUsd: config.strategyDocument.parameters.maxOrderUsd,
       execution: config.execution,
       baseTokenAddress: config.baseTokenAddress,
       quoteTokenAddress: config.strategyDocument.parameters.quoteTokenAddress.trim(),

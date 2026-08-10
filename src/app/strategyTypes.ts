@@ -58,6 +58,8 @@ export interface StrategyParameters {
   timeRangeTarget: string;
   minTransactions: number;
   maxTransactions: number;
+  minOrderUsd: number;
+  maxOrderUsd: number;
   maxSlippageBps: number;
   notes: string;
 }
@@ -175,6 +177,8 @@ export type StrategyFieldPath =
   | 'parameters.timeRangeTarget'
   | 'parameters.minTransactions'
   | 'parameters.maxTransactions'
+  | 'parameters.minOrderUsd'
+  | 'parameters.maxOrderUsd'
   | 'parameters.maxSlippageBps'
   | 'parameters.notes'
   | 'triggers.sources'

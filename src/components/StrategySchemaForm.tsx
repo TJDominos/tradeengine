@@ -600,6 +600,50 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
+            <FieldShell label="Min Order Amount (USD)" helper="Every base-plan order is sized to this floor when the configured campaign volume permits it.">
+              <Controller
+                control={control}
+                name="parameters.minOrderUsd"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => {
+                      const parsed = parseBlankableNumber(event.target.value);
+                      field.onChange(parsed == null ? null : Math.max(0.01, parsed));
+                    }}
+                    className={textInputClassName()}
+                  />
+                )}
+              />
+            </FieldShell>
+
+            <FieldShell label="Max Order Amount (USD)" helper="The planner increases the order count when needed so no base-plan order exceeds this amount.">
+              <Controller
+                control={control}
+                name="parameters.maxOrderUsd"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => {
+                      const parsed = parseBlankableNumber(event.target.value);
+                      field.onChange(
+                        parsed == null
+                          ? null
+                          : Math.max(formData.parameters.minOrderUsd ?? 0.01, parsed),
+                      );
+                    }}
+                    className={textInputClassName()}
+                  />
+                )}
+              />
+            </FieldShell>
+
             <FieldShell label="Max Slippage (%)" helper="Stored internally as basis points, edited here as a percentage.">
               <Controller
                 control={control}
@@ -1050,7 +1094,7 @@ export default function StrategySchemaForm({
                             </div>
                           </div>
                           <div className="mt-2 rounded-lg border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
-                            Current quote snapshot: {formatCurrency(account.quoteAvailableAmount)}. Planner participation is based on eligibility, not per-account cap enforcement.
+                            Quote snapshot: {formatCurrency(account.quoteAvailableAmount)}. Remaining quote after planned buys and self-cycling sells: {formatCurrency(account.buyRemainingQuoteUsd)}.
                           </div>
                           <div className="mt-2 flex flex-wrap gap-2 text-xs">
                             <span className={`rounded-full px-2.5 py-1 ${account.eligibleForBuy ? 'bg-emerald-500/15 text-emerald-200' : 'bg-slate-700 text-slate-300'}`}>

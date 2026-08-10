@@ -74,6 +74,8 @@ export type StrategyPlannerConfig = {
   baseOrderCount: number;
   baseTotalVolumeUsd: number;
   baseDurationMs: number;
+  minOrderUsd: number;
+  maxOrderUsd: number;
   execution: StrategyExecutionConfig;
   baseTokenAddress: string;
   quoteTokenAddress: string;
@@ -173,6 +175,22 @@ function resolveSelfCyclingOrderSplit(
   };
 }
 
+function resolveSelfCyclingSellVolume(
+  config: StrategyPlannerConfig,
+  netBuyAmountUsd: number,
+): number {
+  const baseVolumeUsd = positiveNumber(config.baseTotalVolumeUsd);
+  const existingSellVolumeUsd = Math.max(0, (baseVolumeUsd - netBuyAmountUsd) / 2);
+  const tacticRatio = config.macroObjective === 'shakeout'
+    ? Math.min(0.45, Math.max(0.1, config.execution.tactics.dumpRatio * 0.15))
+    : Math.min(0.25, Math.max(0.05, config.execution.tactics.absorbRatio * 0.1));
+  const requiredSelfCyclingSellUsd = Math.max(
+    config.minOrderUsd,
+    baseVolumeUsd * tacticRatio,
+  );
+  return roundToSixDecimals(Math.max(existingSellVolumeUsd, requiredSelfCyclingSellUsd));
+}
+
 export function buildStrategyPlanTaskSpecs(
   config: StrategyPlannerConfig,
   requiredNetBuyAmount: number,
@@ -211,29 +229,13 @@ export function buildStrategyPlanTaskSpecs(
         totalVolumeUsd,
         positiveNumber(requiredNetBuyAmount),
       );
-      const sellVolumeUsd = Math.max(0, (totalVolumeUsd - netBuyAmountUsd) / 2);
-      const buyVolumeUsd = Math.max(0, totalVolumeUsd - sellVolumeUsd);
+      const sellVolumeUsd = resolveSelfCyclingSellVolume(config, netBuyAmountUsd);
+      const buyVolumeUsd = roundToSixDecimals(netBuyAmountUsd + sellVolumeUsd);
       const { buyCount, sellCount } = resolveSelfCyclingOrderSplit(
         plannerOrderCeiling,
         buyVolumeUsd,
         sellVolumeUsd,
       );
-
-      if (sellVolumeUsd <= MIN_VOLUME_EPSILON) {
-        return [
-          {
-            side: 'buy',
-            pulse: config.macroObjective === 'accumulation' ? 'slow_buy' : 'trend',
-            totalVolumeUsd,
-            orderCount: buyCount,
-            durationMs:
-              config.macroObjective === 'accumulation'
-                ? Math.round(config.baseDurationMs * 1.5)
-                : config.baseDurationMs,
-            scheduledOffsetMs: 0,
-          },
-        ];
-      }
 
       return [
         {
@@ -253,7 +255,7 @@ export function buildStrategyPlanTaskSpecs(
             config.macroObjective === 'accumulation'
               ? Math.round(config.baseDurationMs * 1.5)
               : config.baseDurationMs,
-          scheduledOffsetMs: 750,
+          scheduledOffsetMs: config.baseDurationMs + 750,
         },
       ];
     }
@@ -275,6 +277,8 @@ function buildPlanningSeedBase(
     baseOrderCount: config.baseOrderCount,
     baseTotalVolumeUsd: config.baseTotalVolumeUsd,
     baseDurationMs: config.baseDurationMs,
+    minOrderUsd: config.minOrderUsd,
+    maxOrderUsd: config.maxOrderUsd,
     seedContext,
   });
 }
@@ -308,7 +312,10 @@ function toMutablePlannerAccount(
     plannedBuyVolumeUsd: 0,
     plannedSellVolumeUsd: 0,
     buyOverAllocationUsd: 0,
-    buyRemainingQuoteUsd: account.quoteAvailableAmount,
+    buyRemainingQuoteUsd: Math.max(
+      0,
+      account.quoteAvailableAmount - (existingVolumes.buy.get(account.id) ?? 0),
+    ),
     isBuyOverAllocated: false,
     pairCompatible: account.pairCompatible,
     eligibleForBuy: account.pairCompatible && account.quoteAvailableAmount > 0,
@@ -385,6 +392,8 @@ export function buildStrategyPlanningResult(input: {
       orderCount: spec.orderCount,
       durationMs: spec.durationMs,
       startTime: input.startTime,
+      minOrderUsd: input.config.minOrderUsd,
+      maxOrderUsd: input.config.maxOrderUsd,
       baseTokenAddress: input.config.baseTokenAddress,
       random: createDeterministicRandom(
         `${seedBase}:plan:${specIndex}:${spec.side}:${spec.pulse ?? 'base'}`,
@@ -393,7 +402,9 @@ export function buildStrategyPlanningResult(input: {
 
     for (const slice of plan.slices) {
       const eligibleAccounts = [...accountSummaries.values()].filter((account) =>
-        spec.side === 'buy' ? account.eligibleForBuy : account.eligibleForSell,
+        spec.side === 'buy'
+          ? account.pairCompatible && account.buyRemainingQuoteUsd > MIN_VOLUME_EPSILON
+          : account.eligibleForSell,
       );
       const eligibleAccountsById = new Map(
         eligibleAccounts.map((account) => [account.accountId, account]),
@@ -406,7 +417,7 @@ export function buildStrategyPlanningResult(input: {
             ? account.existingPlannedBuyVolumeUsd + account.plannedBuyVolumeUsd
             : account.existingPlannedSellVolumeUsd + account.plannedSellVolumeUsd;
           const maxVolumeUsd = spec.side === 'buy'
-            ? Math.max(0, account.quoteAvailableAmount - existingPlannedVolumeUsd)
+            ? account.buyRemainingQuoteUsd
             : Math.max(0, account.sellCapacityUsd - existingPlannedVolumeUsd);
           return {
             accountId: account.accountId,
@@ -436,9 +447,15 @@ export function buildStrategyPlanningResult(input: {
             account.plannedBuyVolumeUsd = roundToSixDecimals(
               account.plannedBuyVolumeUsd + plannedVolumeUsd,
             );
+            account.buyRemainingQuoteUsd = roundToSixDecimals(
+              Math.max(0, account.buyRemainingQuoteUsd - plannedVolumeUsd),
+            );
           } else {
             account.plannedSellVolumeUsd = roundToSixDecimals(
               account.plannedSellVolumeUsd + plannedVolumeUsd,
+            );
+            account.buyRemainingQuoteUsd = roundToSixDecimals(
+              account.buyRemainingQuoteUsd + plannedVolumeUsd,
             );
           }
           return {
@@ -480,11 +497,14 @@ export function buildStrategyPlanningResult(input: {
 
   for (const account of accountList) {
     account.buyOverAllocationUsd = roundToSixDecimals(
-      Math.max(0, account.plannedBuyVolumeUsd - account.quoteAvailableAmount),
+      Math.max(
+        0,
+        account.plannedBuyVolumeUsd + account.existingPlannedBuyVolumeUsd -
+          account.quoteAvailableAmount - account.plannedSellVolumeUsd -
+          account.existingPlannedSellVolumeUsd,
+      ),
     );
-    account.buyRemainingQuoteUsd = roundToSixDecimals(
-      Math.max(0, account.quoteAvailableAmount - account.plannedBuyVolumeUsd),
-    );
+    account.buyRemainingQuoteUsd = roundToSixDecimals(account.buyRemainingQuoteUsd);
     account.isBuyOverAllocated = account.buyOverAllocationUsd > 0;
   }
 
