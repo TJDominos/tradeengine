@@ -5,6 +5,10 @@ import { fetchSolanaMintDecimals, normalizePubkey } from '../workerCore';
 import { SOLANA_USDC_MINT, type Env } from '../workerShared';
 import { buildRandomizedTwapPlan, type EngineState, type MacroObjective } from './engine';
 import { normalizeStrategyDocument } from './migrations';
+import {
+  resolveBasePlannedTransactionCount,
+  splitBasePlannedTransactionCount,
+} from './plannedTransactions';
 import type { ExecutionReport, StrategyExecutionConfig, StrategyVersionDocument } from './types';
 import type { ExternalTradeEvent } from './triggers';
 import { initializeAllSchemas } from '../services/dbSetup';
@@ -366,6 +370,7 @@ export class StrategyEngineDurableObject {
   ): Promise<void> {
     const normalizedDocument = normalizeStrategyDocument(input.strategyDocument);
     const baseTokenAddress = normalizePubkey(normalizedDocument.parameters.baseTokenAddress);
+    const basePlannedTransactionCount = resolveBasePlannedTransactionCount(normalizedDocument);
     const nextConfig: StrategyEngineDurableObjectConfig = {
       userId: input.userId,
       versionId: input.versionId,
@@ -375,10 +380,7 @@ export class StrategyEngineDurableObject {
         normalizedDocument.riskControls.maxPositionUsd ?? normalizedDocument.targets.volumeUsdMin,
         DEFAULT_STRATEGY_TASK_BASE_VOLUME_USD,
       ),
-      baseOrderCount: Math.max(
-        1,
-        Math.min(12, Math.max(3, normalizedDocument.riskControls.maxConcurrentOrders * 3)),
-      ),
+      baseOrderCount: basePlannedTransactionCount,
       baseDurationMs: parseTimeRangeTargetToDurationMs(
         normalizedDocument.parameters.timeRangeTarget,
       ),
@@ -855,6 +857,11 @@ export class StrategyEngineDurableObject {
       return;
     }
 
+    const { buyCount, sellCount } = splitBasePlannedTransactionCount(
+      config.macroObjective,
+      config.baseOrderCount,
+    );
+
     const hasBaseTasks = this.persistedState.pendingTasks.some(
       (task) => task.source === 'base',
     );
@@ -867,7 +874,7 @@ export class StrategyEngineDurableObject {
         this.enqueuePlan(
           'buy',
           config.targetTotalVolumeUsd / 2,
-          Math.max(1, Math.floor(config.baseOrderCount / 2)),
+          buyCount,
           config.baseDurationMs,
           'base',
           startTime,
@@ -876,7 +883,7 @@ export class StrategyEngineDurableObject {
         this.enqueuePlan(
           'sell',
           config.targetTotalVolumeUsd / 2,
-          Math.max(1, Math.floor(config.baseOrderCount / 2)),
+          sellCount,
           config.baseDurationMs,
           'base',
           startTime,
@@ -889,7 +896,7 @@ export class StrategyEngineDurableObject {
         this.enqueuePlan(
           'buy',
           config.targetTotalVolumeUsd,
-          Math.max(1, Math.ceil(config.baseOrderCount / 2)),
+          buyCount,
           Math.round(config.baseDurationMs * 1.5),
           'base',
           startTime,

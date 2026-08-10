@@ -9,8 +9,6 @@ import { nowTs, normalizeTimestampMs } from '../time';
 import { dbFindTradableTokenById, dbResolveTradableTokenId } from '../tokenStore';
 import {
   dbAddAuditLog,
-  dbListAccounts,
-  dbListManagedAccountAddresses,
   dbLoadSettings,
 } from '../userStore';
 import { dbRecomputeTokenHolderAggregate } from '../tokenHolders';
@@ -24,7 +22,6 @@ import type {
 } from '../workerShared';
 import { parseJsonText } from '../workerSchema';
 import {
-  dedupeStrings,
   extractStoredSignalContractAddresses,
   extractWebhookTransactionDetailsFromPayload,
   mergeStoredSignalTransactionDetails,
@@ -635,10 +632,7 @@ export async function reconcileTokenTransactionsFromRpc(
   rpcUrls: string | string[],
   options?: {
     perAddressLimit?: number;
-    additionalAddresses?: Array<string | null | undefined>;
-    backfillAddresses?: Array<string | null | undefined>;
-    backfillPerAddressLimit?: number;
-    backfillMaxPages?: number;
+    perAddressMaxPages?: number;
     startTimeMs?: number | null;
     endTimeMs?: number | null;
   },
@@ -652,23 +646,8 @@ export async function reconcileTokenTransactionsFromRpc(
   const trackedToken = tokenId != null ? await dbFindTradableTokenById(db, tokenId) : null;
   const ammPoolAddress = trackedToken?.ammPoolAddress ?? null;
   const perAddressLimit = options?.perAddressLimit ?? 100;
-  const [managed, watched] = await Promise.all([
-    dbListManagedAccountAddresses(db, userId),
-    dbListAccounts(db, userId, 'watch'),
-  ]);
-  const candidateAddresses = dedupeStrings([
-    contractAddress,
-    ...(options?.additionalAddresses ?? []),
-    ...managed,
-    ...watched.map((account) => account.address),
-  ]);
-  const baseAddressSet = new Set(candidateAddresses);
-  const backfillAddresses = dedupeStrings(
-    (options?.backfillAddresses ?? []).filter(
-      (address): address is string => typeof address === 'string',
-    ),
-  ).filter((address) => !baseAddressSet.has(address));
-  if (candidateAddresses.length === 0 && backfillAddresses.length === 0) {
+  const perAddressMaxPages = options?.perAddressMaxPages ?? 10;
+  if (!contractAddress.trim()) {
     return {
       scannedSignatures: 0,
       insertedSignals: 0,
@@ -677,46 +656,27 @@ export async function reconcileTokenTransactionsFromRpc(
     };
   }
 
-  const addressScanPlans = [
-    {
-      addresses: candidateAddresses,
-      pageSize: perAddressLimit,
-      maxPages: 10,
-    },
-  ];
-  if (backfillAddresses.length > 0) {
-    addressScanPlans.push({
-      addresses: backfillAddresses,
-      pageSize: options?.backfillPerAddressLimit ?? 20,
-      maxPages: options?.backfillMaxPages ?? 2,
-    });
-  }
-
   const signaturePool = new Map<string, { address: string; blockTimeMs: number | null }>();
-  for (const plan of addressScanPlans) {
-    for (const address of plan.addresses) {
-      try {
-        const signatures = await fetchSolanaSignaturesForAddressInWindow(
-          rpcUrls,
-          address,
-          {
-            pageSize: plan.pageSize,
-            maxPages: plan.maxPages,
-            startTimeMs: options?.startTimeMs,
-            endTimeMs: options?.endTimeMs,
-          },
-        );
-        for (const entry of signatures) {
-          if (!entry.signature || signaturePool.has(entry.signature)) continue;
-          signaturePool.set(entry.signature, {
-            address,
-            blockTimeMs: signatureBlockTimeToMs(entry.blockTime),
-          });
-        }
-      } catch (err: unknown) {
-        console.warn(`Failed to fetch signatures for ${address}:`, err);
-      }
+  try {
+    const signatures = await fetchSolanaSignaturesForAddressInWindow(
+      rpcUrls,
+      contractAddress,
+      {
+        pageSize: perAddressLimit,
+        maxPages: perAddressMaxPages,
+        startTimeMs: options?.startTimeMs,
+        endTimeMs: options?.endTimeMs,
+      },
+    );
+    for (const entry of signatures) {
+      if (!entry.signature || signaturePool.has(entry.signature)) continue;
+      signaturePool.set(entry.signature, {
+        address: contractAddress,
+        blockTimeMs: signatureBlockTimeToMs(entry.blockTime),
+      });
     }
+  } catch (err: unknown) {
+    console.warn(`Failed to fetch signatures for ${contractAddress}:`, err);
   }
   let insertedSignals = 0;
   let duplicates = 0;

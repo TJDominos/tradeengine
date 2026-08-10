@@ -4,6 +4,7 @@ import {
   PRIMARY_STRATEGY_NAME,
 } from '../strategy/config';
 import { normalizeStrategyDocument } from '../strategy/migrations';
+import { resolveBasePlannedTransactionCount } from '../strategy/plannedTransactions';
 import {
   buildStrategyDocumentFromSettings,
   runStrategyRuntime,
@@ -197,6 +198,7 @@ export function buildStrategyRecordConfigFromDocument(
   },
 ): StrategyRecordConfig {
   const document = normalizeStrategyDocument(documentInput);
+  const basePlannedTransactionCount = resolveBasePlannedTransactionCount(document);
   return {
     userId,
     strategyVersionId: options?.strategyVersionId ?? null,
@@ -210,10 +212,7 @@ export function buildStrategyRecordConfigFromDocument(
       ...document.execution.tactics,
     },
     execution: buildQueuedExecutionConfig(document.execution),
-    baseOrderCount: Math.max(
-      1,
-      Math.min(12, Math.max(3, document.riskControls.maxConcurrentOrders * 3)),
-    ),
+    baseOrderCount: basePlannedTransactionCount,
     baseTotalVolumeUsd:
       document.riskControls.maxPositionUsd ??
       (document.targets.volumeUsdMin > 0

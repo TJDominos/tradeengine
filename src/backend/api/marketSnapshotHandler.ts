@@ -1,19 +1,12 @@
 import {
-  buildRefreshAuditDetails,
-  buildRefreshSummaryText,
-  EMPTY_REFRESH_RPC_RECONCILIATION,
-  EMPTY_REFRESH_WINDOW_COMPLETENESS,
   parseRefreshControlRequestId,
-  runWithFallback,
-  type RefreshRpcReconciliation,
-  type RefreshWindowCompleteness,
 } from '../marketRefresh';
-import { nowMs, nowTs, normalizeTimestampMs } from '../time';
-import { dbListOutsideTokenHoldersPage } from '../tokenHolders';
+import { nowMs, normalizeTimestampMs } from '../time';
+import { dbGetTokenHolderAggregate } from '../tokenHolders';
 import { dbGetTokenMarketSnapshotsByTimeRange, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
 import { dbAddAuditLog, dbLoadSettings } from '../userStore';
-import { buildTokenHolderSyncSummary, jsonResponse } from '../workerCore';
-import { TOKEN_HOLDER_SYNC_SHARDS_PER_REFRESH, TOKEN_HOLDER_SYNC_TOTAL_SHARDS, type Env, type SessionUser, type SettingsState, type TokenHolderSyncSummary, type TokenMarketSnapshot } from '../workerShared';
+import { jsonResponse } from '../workerCore';
+import { type Env, type SessionUser, type TokenMarketSnapshot } from '../workerShared';
 import { requireAdmin } from '../services/accessControl';
 import {
   assertMarketRefreshLeaseActive,
@@ -23,61 +16,46 @@ import {
   dbGetMarketRefreshState,
   dbTryStartMarketRefresh,
 } from '../services/marketRefreshStateService';
-import { reconcileTokenTransactionsFromRpc, reconcileWebhookTransactionDetailsInWindow } from '../services/signalStore';
-import { runAndPersistStrategyEvaluation } from '../services/strategyStore';
 import { loadStoredMarketSnapshotByContractAddress, syncTokenMarketSnapshotForUser } from '../services/tokenMarketService';
 import { syncSolanaTokenHolderBalancesPaged } from '../services/tokenHolderSyncService';
-import { buildManualRefreshStrategyTrigger } from '../strategy/triggers';
-import { summarizeStrategyRuntime } from '../strategy/runtime';
 
-const MANUAL_REFRESH_HOLDER_BACKFILL_ADDRESS_LIMIT = 50;
-const MANUAL_REFRESH_HOLDER_BACKFILL_SIGNATURE_LIMIT = 20;
-const MANUAL_REFRESH_HOLDER_BACKFILL_MAX_PAGES = 2;
-const MANUAL_REFRESH_HOLDER_SYNC_TIME_BUDGET_MS = 12_000;
+function buildDashboardRefreshSummaryText(
+  marketSnapshot: TokenMarketSnapshot | null,
+  outsideAccountRefreshScheduled: boolean,
+): string {
+  if (!marketSnapshot) {
+    return 'Dashboard market data refresh completed, but no live market snapshot is available.';
+  }
 
-function mergeRpcReconciliation(
-  left: RefreshRpcReconciliation,
-  right: RefreshRpcReconciliation,
-): RefreshRpcReconciliation {
-  return {
-    scannedSignatures: left.scannedSignatures + right.scannedSignatures,
-    insertedSignals: left.insertedSignals + right.insertedSignals,
-    duplicates: left.duplicates + right.duplicates,
-    skippedIrrelevant: left.skippedIrrelevant + right.skippedIrrelevant,
-  };
-}
+  if (marketSnapshot.priceUsd == null) {
+    return 'Dashboard market data refreshed. Price data is not yet available in Jupiter.';
+  }
 
-async function loadManualRefreshBackfillAddresses(
-  db: D1Database,
-  userId: number,
-  tokenId: number,
-): Promise<string[]> {
-  const holderPage = await dbListOutsideTokenHoldersPage(db, userId, tokenId, {
-    page: 1,
-    pageSize: MANUAL_REFRESH_HOLDER_BACKFILL_ADDRESS_LIMIT,
-    sort: 'newest',
-  });
-  return holderPage.items.map((holder) => holder.address);
+  const holderCountMessage =
+    marketSnapshot.totalHolders != null
+      ? ` Holder count reported: ${marketSnapshot.totalHolders}.`
+      : '';
+
+  const outsideAccountRefreshMessage = outsideAccountRefreshScheduled
+    ? ' Outside account refresh scheduled.'
+    : '';
+
+  return `Dashboard market data refreshed.${holderCountMessage}${outsideAccountRefreshMessage}`;
 }
 
 async function runManualMarketRefreshWorkflow(
   env: Env,
   user: SessionUser,
-  settings: SettingsState,
   contractAddress: string,
   rpcUrls: string[],
-  startTimeMs: number | null,
-  endTimeMs: number | null,
+  knownHolderCount: number,
   options?: {
     ensureActive?: () => Promise<void>;
   },
 ): Promise<{
   marketSnapshot: TokenMarketSnapshot | null;
-  strategyEvaluation: Record<string, unknown> | null;
-  rpcReconciliation: RefreshRpcReconciliation;
-  windowCompleteness: RefreshWindowCompleteness;
-  holderSyncSummary: TokenHolderSyncSummary;
   summaryText: string;
+  shouldRefreshOutsideAccounts: boolean;
 }> {
   const ensureActive = options?.ensureActive ?? (async () => {});
 
@@ -94,199 +72,30 @@ async function runManualMarketRefreshWorkflow(
     },
   );
 
-  const tokenId = await dbResolveTradableTokenId(
-    env.TRADINGBOT_DB,
-    contractAddress,
-  );
-  let holderBackfillAddresses: string[] = [];
-  if (tokenId) {
-    await ensureActive();
-    holderBackfillAddresses = await runWithFallback(
-      () => loadManualRefreshBackfillAddresses(env.TRADINGBOT_DB, user.id, tokenId),
-      `Failed to load holder backfill addresses for ${contractAddress}:`,
-      [],
-    );
-  }
-
-  let rpcReconciliation = await runWithFallback(
-    () =>
-      reconcileTokenTransactionsFromRpc(
-        env.TRADINGBOT_DB,
-        user.id,
-        contractAddress,
-        rpcUrls,
-        {
-          additionalAddresses: [marketSnapshot?.pairAddress ?? null],
-          backfillAddresses: holderBackfillAddresses,
-          backfillPerAddressLimit: MANUAL_REFRESH_HOLDER_BACKFILL_SIGNATURE_LIMIT,
-          backfillMaxPages: MANUAL_REFRESH_HOLDER_BACKFILL_MAX_PAGES,
-          startTimeMs,
-          endTimeMs,
-        },
-      ),
-    `RPC reconciliation failed for ${contractAddress}:`,
-    EMPTY_REFRESH_RPC_RECONCILIATION,
-  );
-
-  await ensureActive();
-
-  const windowCompleteness = await runWithFallback(
-    () =>
-      reconcileWebhookTransactionDetailsInWindow(
-        env.TRADINGBOT_DB,
-        user.id,
-        contractAddress,
-        rpcUrls,
-        startTimeMs,
-        endTimeMs,
-      ),
-    `Window detail reconciliation failed for ${contractAddress}:`,
-    EMPTY_REFRESH_WINDOW_COMPLETENESS,
-  );
-
-  await ensureActive();
-
-  let holderSyncSummary = buildTokenHolderSyncSummary(null);
-  if (tokenId) {
-    try {
-      holderSyncSummary = await syncSolanaTokenHolderBalancesPaged(
-        env.TRADINGBOT_DB,
-        user.id,
-        tokenId,
-        contractAddress,
-        rpcUrls,
-        {
-          maxShards: TOKEN_HOLDER_SYNC_SHARDS_PER_REFRESH,
-          timeBudgetMs: MANUAL_REFRESH_HOLDER_SYNC_TIME_BUDGET_MS,
-          allowHeliusDasFullSync: false,
-          ensureActive,
-        },
-      );
-    } catch (err: unknown) {
-      console.warn(`Failed to page holder balances for ${contractAddress}:`, err);
-      holderSyncSummary = buildTokenHolderSyncSummary({
-        tokenId,
-        runId: null,
-        status: 'failed',
-        source: 'rpc_owner_prefix_shards',
-        nextShardIndex: 0,
-        processedShardCount: 0,
-        totalShardCount: TOKEN_HOLDER_SYNC_TOTAL_SHARDS,
-        stagedHolderCount: 0,
-        lastProgramId: null,
-        lastOwnerPrefix: null,
-        errorMessage: err instanceof Error ? err.message : String(err),
-        startedAt: null,
-        updatedAt: nowTs(),
-        lastCompletedAt: null,
-      });
-    }
-
-    await ensureActive();
-
-    const postSyncBackfillAddresses = await runWithFallback(
-      () => loadManualRefreshBackfillAddresses(env.TRADINGBOT_DB, user.id, tokenId),
-      `Failed to reload holder backfill addresses after holder sync for ${contractAddress}:`,
-      [],
-    );
-
-    if (postSyncBackfillAddresses.length > 0) {
-      const postSyncRpcReconciliation = await runWithFallback(
-        () =>
-          reconcileTokenTransactionsFromRpc(
-            env.TRADINGBOT_DB,
-            user.id,
-            contractAddress,
-            rpcUrls,
-            {
-              additionalAddresses: [marketSnapshot?.pairAddress ?? null],
-              backfillAddresses: postSyncBackfillAddresses,
-              backfillPerAddressLimit: MANUAL_REFRESH_HOLDER_BACKFILL_SIGNATURE_LIMIT,
-              backfillMaxPages: MANUAL_REFRESH_HOLDER_BACKFILL_MAX_PAGES,
-              startTimeMs,
-              endTimeMs,
-            },
-          ),
-        `Post-sync RPC reconciliation failed for ${contractAddress}:`,
-        EMPTY_REFRESH_RPC_RECONCILIATION,
-      );
-      rpcReconciliation = mergeRpcReconciliation(
-        rpcReconciliation,
-        postSyncRpcReconciliation,
-      );
-    }
-  }
-
-  let strategyEvaluationSummary: string | null = null;
-  let strategyEvaluationPayload: Record<string, unknown> | null = null;
-  try {
-    const strategyResult = await runAndPersistStrategyEvaluation(
-      env.TRADINGBOT_DB,
-      user.id,
-      {
-        baseTokenAddress: settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress,
-        quoteTokenAddress: settings.activeQuoteTokenAddress?.trim() || '',
-        volatilityTarget: settings.volatilityTarget,
-        pullbackTarget: settings.pullbackTarget,
-        volumeTarget: settings.volumeTarget,
-        netBuyinTarget: settings.netBuyinTarget,
-        timeRangeTarget: settings.timeRangeTarget,
-        maxTransactions: settings.maxTransactions,
-        maxSlippage: settings.maxSlippage,
-        strategyNotes: settings.strategyNotes,
-      },
-      buildManualRefreshStrategyTrigger({
-        contractAddress,
-        externalId: `manual-refresh:${user.id}:${contractAddress}:${nowMs()}`,
-      }),
-      marketSnapshot,
-      {
-        author: user.username,
-        changeNote: 'Manual market snapshot refresh',
-        origin: 'settings-sync',
-      },
-    );
-    if (strategyResult) {
-      strategyEvaluationSummary = `Strategy v${strategyResult.version.versionNo}: ${summarizeStrategyRuntime(strategyResult.runtime)}`;
-      strategyEvaluationPayload = {
-        versionNo: strategyResult.version.versionNo,
-        status: strategyResult.runtime.evaluation.status,
-        qualified: strategyResult.runtime.evaluation.qualified,
-        shouldExecute: strategyResult.runtime.evaluation.shouldExecute,
-        reasons: strategyResult.runtime.evaluation.reasons,
-      };
-    }
-  } catch (err: unknown) {
-    console.warn(`Strategy evaluation failed after manual refresh for ${contractAddress}:`, err);
-  }
-
-  const summaryText = buildRefreshSummaryText({
+  const shouldRefreshOutsideAccounts =
+    marketSnapshot?.totalHolders != null &&
+    marketSnapshot.totalHolders > knownHolderCount;
+  const summaryText = buildDashboardRefreshSummaryText(
     marketSnapshot,
-    holderSyncSummary,
-    windowCompleteness,
-    rpcReconciliation,
-  });
+    shouldRefreshOutsideAccounts,
+  );
 
   await dbAddAuditLog(
     env.TRADINGBOT_DB,
     user.id,
     'market_snapshot.force_refreshed',
     contractAddress,
-    buildRefreshAuditDetails({
-      strategyEvaluationSummary,
-      windowCompleteness,
-      rpcReconciliation,
-      holderSyncSummary,
-    }),
+    marketSnapshot
+      ? shouldRefreshOutsideAccounts
+        ? 'Refreshed dashboard market data, stored a new market snapshot record, and scheduled an outside account refresh.'
+        : 'Refreshed dashboard market data and stored a new market snapshot record.'
+      : 'Attempted to refresh dashboard market data, but no live market snapshot was available.',
   );
 
   return {
     marketSnapshot,
-    strategyEvaluation: strategyEvaluationPayload,
-    rpcReconciliation,
-    windowCompleteness,
-    holderSyncSummary,
     summaryText,
+    shouldRefreshOutsideAccounts,
   };
 }
 
@@ -401,21 +210,23 @@ export async function handleMarketSnapshotRoutes(
       user.id,
       env.SOLANA_RPC_URL,
     );
-    const startTimeMs = (() => {
-      const raw = url.searchParams.get('startTime');
-      const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-      return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
-    })();
-    const endTimeMs = (() => {
-      const raw = url.searchParams.get('endTime');
-      const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-      return Number.isFinite(parsed) && parsed > 0 ? normalizeTimestampMs(parsed) : null;
-    })();
 
     const currentSnapshot = await loadStoredMarketSnapshotByContractAddress(
       env.TRADINGBOT_DB,
       contractAddress,
       quoteTokenAddress,
+    );
+    const tokenId = await dbResolveTradableTokenId(
+      env.TRADINGBOT_DB,
+      contractAddress,
+      quoteTokenAddress,
+    );
+    const tokenHolderAggregate = tokenId
+      ? await dbGetTokenHolderAggregate(env.TRADINGBOT_DB, tokenId).catch(() => null)
+      : null;
+    const knownHolderCount = Math.max(
+      currentSnapshot?.totalHolders ?? 0,
+      tokenHolderAggregate?.activeHolderCount ?? 0,
     );
     const refreshStart = await dbTryStartMarketRefresh(
       env.TRADINGBOT_DB,
@@ -446,11 +257,9 @@ export async function handleMarketSnapshotRoutes(
           const result = await runManualMarketRefreshWorkflow(
             env,
             user,
-            settings,
             contractAddress,
             rpcUrls,
-            startTimeMs,
-            endTimeMs,
+            knownHolderCount,
             {
               ensureActive: async () => {
                 await assertMarketRefreshLeaseActive(
@@ -462,6 +271,21 @@ export async function handleMarketSnapshotRoutes(
               },
             },
           );
+          const outsideAccountRefreshPromise =
+            result.shouldRefreshOutsideAccounts && tokenId
+              ? syncSolanaTokenHolderBalancesPaged(
+                  env.TRADINGBOT_DB,
+                  user.id,
+                  tokenId,
+                  contractAddress,
+                  rpcUrls,
+                ).catch((err: unknown) => {
+                  console.warn(
+                    `Background outside account refresh failed for ${contractAddress}:`,
+                    err,
+                  );
+                })
+              : null;
           await dbCompleteMarketRefresh(
             env.TRADINGBOT_DB,
             user.id,
@@ -469,6 +293,9 @@ export async function handleMarketSnapshotRoutes(
             requestId,
             result.summaryText,
           );
+          if (outsideAccountRefreshPromise) {
+            await outsideAccountRefreshPromise;
+          }
         } catch (err: unknown) {
           const errorMessage = err instanceof Error ? err.message : String(err);
           console.error(`Background market refresh failed for ${contractAddress}:`, err);

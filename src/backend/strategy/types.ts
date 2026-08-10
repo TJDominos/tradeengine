@@ -38,6 +38,7 @@ export type StrategyTriggerSource =
 export interface StrategySettingsInput {
   baseTokenAddress: string;
   quoteTokenAddress: string;
+  minTransactions?: number;
   volatilityTarget: number;
   pullbackTarget: number;
   volumeTarget: number;
@@ -63,6 +64,7 @@ export interface StrategyParameters {
   quoteTokenAddress: string;
   ammPoolAddress: string;
   timeRangeTarget: string;
+  minTransactions: number;
   maxTransactions: number;
   maxSlippageBps: number;
   notes: string;

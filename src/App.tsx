@@ -749,17 +749,14 @@ export default function App() {
   const handleRefresh = () =>
     void submitWithFeedback('refresh', async () => {
       if (auth?.authenticated && activeBaseTokenAddress) {
-        setNotice('Refresh started. Fetching market data and syncing token holders...');
-        const refreshQuery = hasDateRange
-          ? `?startTime=${toRangeStartMs(dateRange.from)}&endTime=${toRangeEndMs(dateRange.to)}`
-          : '';
+        setNotice('Dashboard market refresh started.');
         const result = await api<{
           accepted: boolean;
           status: 'started' | 'running';
           marketSnapshot: TokenMarketSnapshot | null;
           marketRefreshStatus: EngineState['marketRefreshStatus'];
         }>(
-          `/api/market-snapshot/refresh${refreshQuery}`,
+          '/api/market-snapshot/refresh',
           { method: 'POST' },
         );
         if (result.marketSnapshot) {
@@ -784,8 +781,8 @@ export default function App() {
         }
         setNotice(
           result.status === 'running'
-            ? 'Refresh is already running. Waiting for the active request to finish.'
-            : 'Refresh started. Keep this page open while fetching progresses.',
+            ? 'Dashboard market refresh is already running. Waiting for the active request to finish.'
+            : 'Dashboard market refresh started.',
         );
       } else {
         setNotice('No active trading token. Select a token first to refresh market data.');
@@ -799,7 +796,7 @@ export default function App() {
         return;
       }
 
-      const refreshQuery = hasDateRange
+      const refreshQuery = dateFilterReady
         ? `?startTime=${toRangeStartMs(dateRange.from)}&endTime=${toRangeEndMs(dateRange.to)}`
         : '';
       const result = await api<{

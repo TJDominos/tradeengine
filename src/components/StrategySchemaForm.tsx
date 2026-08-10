@@ -400,7 +400,11 @@ export default function StrategySchemaForm({
       value: timeRangeLabels[formData.parameters?.timeRangeTarget ?? '24h'] ?? formData.parameters?.timeRangeTarget ?? '24 hours',
     },
     {
-      label: 'Max Trades',
+      label: 'Min Planned Trades',
+      value: formatNumber(formData.parameters?.minTransactions),
+    },
+    {
+      label: 'Max Transactions',
       value: formatNumber(formData.parameters?.maxTransactions),
     },
     {
@@ -557,7 +561,27 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
-            <FieldShell label="Max Trades" helper="Upper bound for accepted aggregate transaction count in the selected operating window.">
+            <FieldShell label="Min Planned Trades" helper="Planner floor for generated base trades. Use this to force volume to be spread across more transactions instead of a small number of large orders.">
+              <Controller
+                control={control}
+                name="parameters.minTransactions"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => {
+                      const parsed = parseBlankableNumber(event.target.value);
+                      field.onChange(parsed == null ? null : Math.max(1, Math.floor(parsed)));
+                    }}
+                    className={textInputClassName()}
+                  />
+                )}
+              />
+            </FieldShell>
+
+            <FieldShell label="Max Transactions" helper="Upper bound for accepted aggregate market transaction count in the selected operating window. The planner also treats this as its transaction ceiling when min planned trades is set.">
               <Controller
                 control={control}
                 name="parameters.maxTransactions"
@@ -566,7 +590,10 @@ export default function StrategySchemaForm({
                     type="number"
                     step="1"
                     value={formatNumberInputValue(field.value)}
-                    onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
+                    onChange={(event) => {
+                      const parsed = parseBlankableNumber(event.target.value);
+                      field.onChange(parsed == null ? null : Math.max(1, Math.floor(parsed)));
+                    }}
                     className={textInputClassName()}
                   />
                 )}

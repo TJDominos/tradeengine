@@ -41,6 +41,8 @@ import {
 } from '../services/strategyStore';
 
 const strategyAutomationService = new StrategyAutomationService();
+const DEFAULT_TRANSACTION_LOG_REFRESH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const TRANSACTION_LOG_REFRESH_PRIMARY_MAX_PAGES = 5;
 
 async function resolveSolanaTokenAccountOwners(
   rpcUrls: string[],
@@ -141,6 +143,25 @@ function parseOptionalTimestampMs(rawValue: string | null): number | null {
     return null;
   }
   return parsed >= 1_000_000_000_000 ? parsed : parsed * 1000;
+}
+
+function resolveTransactionLogRefreshWindow(url: URL): {
+  startTimeMs: number;
+  endTimeMs: number;
+} {
+  const requestedStartTimeMs = parseOptionalTimestampMs(url.searchParams.get('startTime'));
+  const requestedEndTimeMs = parseOptionalTimestampMs(url.searchParams.get('endTime'));
+  const endTimeMs = requestedEndTimeMs ?? Date.now();
+  const startTimeMs = requestedStartTimeMs ?? Math.max(0, endTimeMs - DEFAULT_TRANSACTION_LOG_REFRESH_WINDOW_MS);
+
+  if (startTimeMs > endTimeMs) {
+    throw new ApiError(400, 'startTime must be less than or equal to endTime');
+  }
+
+  return {
+    startTimeMs,
+    endTimeMs,
+  };
 }
 
 function assertLocalDebugRequest(url: URL): void {
@@ -459,25 +480,13 @@ export async function handleStateRoutes(
       );
     }
 
-    const startTimeMs = parseOptionalTimestampMs(url.searchParams.get('startTime'));
-    const endTimeMs = parseOptionalTimestampMs(url.searchParams.get('endTime'));
-    if (startTimeMs != null && endTimeMs != null && startTimeMs > endTimeMs) {
-      throw new ApiError(400, 'startTime must be less than or equal to endTime');
-    }
+    const { startTimeMs, endTimeMs } = resolveTransactionLogRefreshWindow(url);
 
     const rpcUrls = await dbResolveSolanaRpcUrls(
       env.TRADINGBOT_DB,
       user.id,
       env.SOLANA_RPC_URL,
     );
-    const tokenId = await dbResolveTradableTokenId(
-      env.TRADINGBOT_DB,
-      contractAddress,
-      quoteTokenAddress,
-    );
-    const latestSnapshot = tokenId
-      ? await dbGetLatestTokenMarketSnapshot(env.TRADINGBOT_DB, tokenId).catch(() => null)
-      : null;
 
     const reconciliation = await reconcileTokenTransactionsFromRpc(
       env.TRADINGBOT_DB,
@@ -485,7 +494,7 @@ export async function handleStateRoutes(
       contractAddress,
       rpcUrls,
       {
-        additionalAddresses: [latestSnapshot?.pairAddress],
+          perAddressMaxPages: TRANSACTION_LOG_REFRESH_PRIMARY_MAX_PAGES,
         startTimeMs,
         endTimeMs,
       },

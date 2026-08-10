@@ -33,9 +33,9 @@ import { loadStoredMarketSnapshotByContractAddress } from '../services/tokenMark
 import {
   getManagedBuyCapacitySummary,
   listManagedAccountsWithBalances,
-  listManagedAccountsWithStoredBalances,
   type ManagedAccountBalanceRecord,
 } from '../userStore';
+import { splitBasePlannedTransactionCount } from '../strategy/plannedTransactions';
 
 const strategyAutomationService = new StrategyAutomationService();
 const DEFAULT_STRATEGY_DEPLOY_BUY_AMOUNT = 300;
@@ -154,6 +154,11 @@ function createDeterministicRandom(seedText: string): () => number {
 function buildStrategyPlanTaskSpecs(
   config: StrategyRecordConfig,
 ): StrategyPlanTaskSpec[] {
+  const { buyCount, sellCount } = splitBasePlannedTransactionCount(
+    config.macroObjective,
+    config.baseOrderCount,
+  );
+
   switch (config.macroObjective) {
     case 'distribution':
       return [
@@ -161,7 +166,7 @@ function buildStrategyPlanTaskSpecs(
           side: 'buy',
           pulse: 'wash_buy',
           totalVolumeUsd: config.baseTotalVolumeUsd / 2,
-          orderCount: Math.max(1, Math.floor(config.baseOrderCount / 2)),
+          orderCount: buyCount,
           durationMs: config.baseDurationMs,
           scheduledOffsetMs: 0,
         },
@@ -169,7 +174,7 @@ function buildStrategyPlanTaskSpecs(
           side: 'sell',
           pulse: 'wash_sell',
           totalVolumeUsd: config.baseTotalVolumeUsd / 2,
-          orderCount: Math.max(1, Math.floor(config.baseOrderCount / 2)),
+          orderCount: sellCount,
           durationMs: config.baseDurationMs,
           scheduledOffsetMs: 750,
         },
@@ -180,7 +185,7 @@ function buildStrategyPlanTaskSpecs(
           side: 'buy',
           pulse: 'slow_buy',
           totalVolumeUsd: config.baseTotalVolumeUsd,
-          orderCount: Math.max(1, Math.ceil(config.baseOrderCount / 2)),
+          orderCount: buyCount,
           durationMs: Math.round(config.baseDurationMs * 1.5),
           scheduledOffsetMs: 0,
         },
@@ -550,10 +555,11 @@ export async function handleStrategyRoutes(
       user.id,
     );
     const requiredBuyAmount = deriveRequiredStrategyBuyAmount(normalizedDocument);
-    const accounts = await listManagedAccountsWithStoredBalances(
+    const accounts = await listManagedAccountsWithBalances(
       env.TRADINGBOT_DB,
       user.id,
       {
+        envRpcUrl: env.SOLANA_RPC_URL,
         pair: {
           baseMint: normalizedBaseTokenAddress,
           quoteMint: normalizedQuoteTokenAddress,

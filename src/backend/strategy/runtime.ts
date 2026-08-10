@@ -82,6 +82,7 @@ export function buildStrategyDocumentFromSettings(
       baseTokenAddress: settings.baseTokenAddress,
       quoteTokenAddress: settings.quoteTokenAddress,
       timeRangeTarget: settings.timeRangeTarget,
+      minTransactions: settings.minTransactions ?? 1,
       maxTransactions: settings.maxTransactions,
       maxSlippageBps: Math.max(0, Math.round(settings.maxSlippage * 100)),
       notes: settings.strategyNotes,

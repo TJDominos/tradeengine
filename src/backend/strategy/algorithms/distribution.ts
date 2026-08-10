@@ -2,6 +2,7 @@ import {
   BaseTradingStrategy,
   type TradingStrategyContext,
 } from './baseStrategy';
+import { splitBasePlannedTransactionCount } from '../plannedTransactions';
 
 function sanitizePositiveNumber(value: number): number {
   if (!Number.isFinite(value) || value <= 0) {
@@ -62,13 +63,16 @@ export class DistributionStrategy extends BaseTradingStrategy {
       return;
     }
 
-    const pairCount = Math.max(1, Math.floor(this.context.getBaseOrderCount() / 2));
+    const { buyCount, sellCount } = splitBasePlannedTransactionCount(
+      this.context.macroObjective,
+      this.context.getBaseOrderCount(),
+    );
     const perSideVolumeUsd = this.context.getBaseTotalVolumeUsd() / 2;
 
     await this.context.enqueuePulsePlan({
       side: 'buy',
       totalVolumeUsd: perSideVolumeUsd,
-      orderCount: pairCount,
+      orderCount: buyCount,
       durationMs: this.context.getBaseDurationMs(),
       enqueue: 'normal',
       metadata: {
@@ -78,7 +82,7 @@ export class DistributionStrategy extends BaseTradingStrategy {
     await this.context.enqueuePulsePlan({
       side: 'sell',
       totalVolumeUsd: perSideVolumeUsd,
-      orderCount: pairCount,
+      orderCount: sellCount,
       durationMs: this.context.getBaseDurationMs(),
       enqueue: 'normal',
       scheduledOffsetMs: 750,

@@ -58,7 +58,7 @@ export class AccumulationStrategy extends BaseTradingStrategy {
     await this.context.enqueuePulsePlan({
       side: 'buy',
       totalVolumeUsd: this.context.getBaseTotalVolumeUsd(),
-      orderCount: Math.max(1, Math.ceil(this.context.getBaseOrderCount() / 2)),
+      orderCount: this.context.getBaseOrderCount(),
       durationMs: Math.round(this.context.getBaseDurationMs() * 1.5),
       enqueue: 'normal',
       metadata: {

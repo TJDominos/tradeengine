@@ -56,6 +56,7 @@ export interface StrategyParameters {
   quoteTokenAddress: string;
   ammPoolAddress: string;
   timeRangeTarget: string;
+  minTransactions: number;
   maxTransactions: number;
   maxSlippageBps: number;
   notes: string;
@@ -172,6 +173,7 @@ export type StrategyFieldPath =
   | 'parameters.quoteTokenAddress'
   | 'parameters.ammPoolAddress'
   | 'parameters.timeRangeTarget'
+  | 'parameters.minTransactions'
   | 'parameters.maxTransactions'
   | 'parameters.maxSlippageBps'
   | 'parameters.notes'

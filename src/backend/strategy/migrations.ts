@@ -62,6 +62,7 @@ function normalizeParameters(value: unknown): StrategyParameters {
     quoteTokenAddress,
     ammPoolAddress,
     timeRangeTarget: readString(raw.timeRangeTarget, '24h'),
+    minTransactions: Math.max(1, Math.floor(readNumber(raw.minTransactions, 1))),
     maxTransactions: readNumber(raw.maxTransactions, 100),
     maxSlippageBps: readNumber(raw.maxSlippageBps, 10),
     notes: readString(raw.notes),
