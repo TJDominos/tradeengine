@@ -157,7 +157,11 @@ impl<'conn> SqliteAccountProvider<'conn> {
         user_id: i64,
         config: SqliteAccountProviderConfig,
     ) -> Self {
-        Self { conn, user_id, config }
+        Self {
+            conn,
+            user_id,
+            config,
+        }
     }
 
     fn query_rows(
@@ -415,8 +419,11 @@ impl TradePlanner {
         if planned_total_volume < input.target_total_volume {
             let remaining_total_gap = input.target_total_volume - planned_total_volume;
 
-            let cycling_intents =
-                self.build_volume_cycling_intents(&available_pool, remaining_total_gap)?;
+            let cycling_intents = self.build_volume_cycling_intents(
+                &available_pool,
+                remaining_total_gap,
+                input.micro_task_size_hint,
+            )?;
             intents.extend(cycling_intents);
         }
 
@@ -441,8 +448,7 @@ impl TradePlanner {
         }
         if input.target_total_volume < input.target_buy_volume + input.target_sell_volume {
             return Err(PlannerError::InvalidInput(
-                "target_total_volume cannot be smaller than buy plus sell targets"
-                    .to_string(),
+                "target_total_volume cannot be smaller than buy plus sell targets".to_string(),
             ));
         }
         if input.base_asset.symbol.trim().is_empty() || input.quote_asset.symbol.trim().is_empty() {
@@ -494,8 +500,7 @@ impl TradePlanner {
 
         if remaining > 0.0 {
             return Err(PlannerError::Unsupported(
-                "target volume exceeded current max_micro_tasks planner guardrail"
-                    .to_string(),
+                "target volume exceeded current max_micro_tasks planner guardrail".to_string(),
             ));
         }
 
@@ -517,6 +522,7 @@ impl TradePlanner {
         &self,
         available_pool: &[AccountSnapshot],
         remaining_total_gap: f64,
+        size_hint: f64,
     ) -> Result<Vec<OrderIntent>, PlannerError> {
         if available_pool.is_empty() {
             return Err(PlannerError::AccountPoolUnavailable(
@@ -527,18 +533,131 @@ impl TradePlanner {
             return Ok(Vec::new());
         }
 
-        // Skeleton only:
-        // 1. Detect accounts that can self-cycle (enough base and quote balance).
-        // 2. If none, pair accounts into A/B hedge candidates.
-        // 3. Emit alternating BUY/SELL intents until the remaining total gap is filled.
-        // 4. Reserve balances and rotate accounts fairly to avoid overusing a single wallet.
-        todo!("implement volume cycling routing and fairness rotation")
+        #[derive(Debug, Clone)]
+        struct CyclingAccount {
+            account_id: String,
+            base_free: f64,
+            quote_free: f64,
+        }
+
+        let mut accounts = available_pool
+            .iter()
+            .filter(|account| account.is_available && account.has_any_asset_pair_enabled)
+            .map(|account| CyclingAccount {
+                account_id: account.account_id.clone(),
+                base_free: account.base_free.max(0.0),
+                quote_free: account.quote_free.max(0.0),
+            })
+            .collect::<Vec<_>>();
+
+        let normalized_hint = size_hint.max(self.micro_task_floor).max(1.0);
+        let mut remaining = remaining_total_gap;
+        let mut intents = Vec::new();
+
+        while remaining > 0.000001 {
+            if intents.len() + 2 > self.max_micro_tasks {
+                return Err(PlannerError::Unsupported(
+                    "volume cycling target exceeded current max_micro_tasks planner guardrail"
+                        .to_string(),
+                ));
+            }
+
+            let paired_amount = (remaining / 2.0).min(normalized_hint);
+            if paired_amount <= 0.0 {
+                break;
+            }
+
+            if let Some(account_index) = accounts
+                .iter()
+                .position(|account| account.base_free > 0.0 && account.quote_free > 0.0)
+            {
+                let amount = paired_amount
+                    .min(accounts[account_index].base_free)
+                    .min(accounts[account_index].quote_free);
+                if amount <= 0.0 {
+                    break;
+                }
+
+                let account_id = accounts[account_index].account_id.clone();
+                accounts[account_index].quote_free -= amount;
+                accounts[account_index].base_free -= amount;
+                intents.push(OrderIntent {
+                    intent_id: format!("cycle-self-buy-{}-{}", account_id, intents.len() + 1),
+                    intent_type: IntentType::VolumeCyclingSelf,
+                    side: OrderSide::Buy,
+                    amount,
+                    account_id: account_id.clone(),
+                    paired_account_id: Some(account_id.clone()),
+                    notes: "Self-cycling buy intent planned from available_pool".to_string(),
+                });
+                intents.push(OrderIntent {
+                    intent_id: format!("cycle-self-sell-{}-{}", account_id, intents.len() + 1),
+                    intent_type: IntentType::VolumeCyclingSelf,
+                    side: OrderSide::Sell,
+                    amount,
+                    account_id,
+                    paired_account_id: None,
+                    notes: "Self-cycling sell intent planned from available_pool".to_string(),
+                });
+                remaining = (remaining - amount * 2.0).max(0.0);
+                continue;
+            }
+
+            let buyer_index = accounts.iter().position(|account| account.quote_free > 0.0);
+            let seller_index = accounts.iter().position(|account| account.base_free > 0.0);
+            let (Some(buyer_index), Some(seller_index)) = (buyer_index, seller_index) else {
+                return Err(PlannerError::InsufficientLiquidity(
+                    "No eligible account pair can fund volume cycling intents".to_string(),
+                ));
+            };
+
+            let amount = paired_amount
+                .min(accounts[buyer_index].quote_free)
+                .min(accounts[seller_index].base_free);
+            if amount <= 0.0 {
+                return Err(PlannerError::InsufficientLiquidity(
+                    "Eligible volume cycling accounts do not have enough free balance".to_string(),
+                ));
+            }
+
+            let buyer_account_id = accounts[buyer_index].account_id.clone();
+            let seller_account_id = accounts[seller_index].account_id.clone();
+            accounts[buyer_index].quote_free -= amount;
+            accounts[seller_index].base_free -= amount;
+            intents.push(OrderIntent {
+                intent_id: format!("cycle-hedge-buy-{}-{}", buyer_account_id, intents.len() + 1),
+                intent_type: IntentType::VolumeCyclingHedge,
+                side: OrderSide::Buy,
+                amount,
+                account_id: buyer_account_id,
+                paired_account_id: Some(seller_account_id.clone()),
+                notes: "Hedged cycling buy intent planned from available_pool".to_string(),
+            });
+            intents.push(OrderIntent {
+                intent_id: format!(
+                    "cycle-hedge-sell-{}-{}",
+                    seller_account_id,
+                    intents.len() + 1
+                ),
+                intent_type: IntentType::VolumeCyclingHedge,
+                side: OrderSide::Sell,
+                amount,
+                account_id: seller_account_id,
+                paired_account_id: None,
+                notes: "Hedged cycling sell intent planned from available_pool".to_string(),
+            });
+            remaining = (remaining - amount * 2.0).max(0.0);
+        }
+
+        Ok(intents)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountProvider, AssetDefinition, SqliteAccountProvider, SqliteAccountProviderConfig};
+    use super::{
+        AccountProvider, AssetDefinition, SqliteAccountProvider, SqliteAccountProviderConfig,
+    };
     use rusqlite::{params, Connection};
 
     fn setup_accounts_table(conn: &Connection) {
@@ -612,11 +731,8 @@ mod tests {
         )
         .expect("insert quote balance");
 
-        let provider = SqliteAccountProvider::with_config(
-            &conn,
-            1,
-            SqliteAccountProviderConfig::default(),
-        );
+        let provider =
+            SqliteAccountProvider::with_config(&conn, 1, SqliteAccountProviderConfig::default());
         let base_asset = AssetDefinition {
             symbol: "SOL".to_string(),
             mint: "So11111111111111111111111111111111111111112".to_string(),

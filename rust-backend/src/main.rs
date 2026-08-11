@@ -1,3 +1,4 @@
+mod actor_runtime;
 mod planner;
 mod executor;
 mod strategy;
@@ -33,6 +34,7 @@ const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
 struct AppContext {
     db: Arc<Mutex<Database>>,
     config: Arc<Config>,
+    actors: actor_runtime::ActorRuntime,
 }
 
 #[derive(Clone)]
@@ -122,6 +124,20 @@ struct SettingsState {
     max_slippage: f64,
     #[serde(rename = "strategyNotes")]
     strategy_notes: String,
+    #[serde(rename = "macroObjective")]
+    macro_objective: String,
+    #[serde(rename = "triggerThresholdUsd")]
+    trigger_threshold_usd: f64,
+    #[serde(rename = "minOrderSize")]
+    min_order_size: f64,
+    #[serde(rename = "maxOrderSize")]
+    max_order_size: f64,
+    #[serde(rename = "absorbRatio")]
+    absorb_ratio: f64,
+    #[serde(rename = "followSellRatio")]
+    follow_sell_ratio: f64,
+    #[serde(rename = "dumpRatio")]
+    dump_ratio: f64,
     #[serde(rename = "managedKeyCount")]
     managed_key_count: usize,
 }
@@ -138,6 +154,13 @@ impl Default for SettingsState {
             max_transactions: 100,
             max_slippage: 1.0,
             strategy_notes: "Trading execution is intentionally disabled until a real execution engine is implemented and reviewed.".to_string(),
+            macro_objective: "accumulation".to_string(),
+            trigger_threshold_usd: 1.0,
+            min_order_size: 1.0,
+            max_order_size: 25.0,
+            absorb_ratio: 1.0,
+            follow_sell_ratio: 0.5,
+            dump_ratio: 0.75,
             managed_key_count: 0,
         }
     }
@@ -163,6 +186,20 @@ struct SettingsUpdateRequest {
     max_slippage: f64,
     #[serde(rename = "strategyNotes")]
     strategy_notes: String,
+    #[serde(rename = "macroObjective")]
+    macro_objective: Option<String>,
+    #[serde(rename = "triggerThresholdUsd")]
+    trigger_threshold_usd: Option<f64>,
+    #[serde(rename = "minOrderSize")]
+    min_order_size: Option<f64>,
+    #[serde(rename = "maxOrderSize")]
+    max_order_size: Option<f64>,
+    #[serde(rename = "absorbRatio")]
+    absorb_ratio: Option<f64>,
+    #[serde(rename = "followSellRatio")]
+    follow_sell_ratio: Option<f64>,
+    #[serde(rename = "dumpRatio")]
+    dump_ratio: Option<f64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -342,6 +379,32 @@ struct StrategyExecutionConsumeRequest {
     max_tasks: Option<usize>,
 }
 
+#[derive(Deserialize)]
+struct StrategyExternalTradeEventRequest {
+    #[serde(rename = "eventId")]
+    event_id: Option<String>,
+    #[serde(rename = "eventType")]
+    event_type: String,
+    #[serde(rename = "amountUsd")]
+    amount_usd: f64,
+    #[serde(rename = "contractAddress")]
+    contract_address: Option<String>,
+    #[serde(rename = "walletAddress")]
+    wallet_address: Option<String>,
+    #[serde(rename = "txSignature")]
+    tx_signature: Option<String>,
+    #[serde(rename = "isLossCut")]
+    is_loss_cut: Option<bool>,
+    execute: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct StrategyEventAcceptedResponse {
+    accepted: bool,
+    #[serde(rename = "eventId")]
+    event_id: String,
+}
+
 #[derive(Serialize)]
 struct StrategyExecutionConsumeResponse {
     #[serde(rename = "activeRun")]
@@ -391,9 +454,13 @@ async fn main() {
 
     let config = Config::from_env();
     let database = Database::open(&config.database_path).expect("failed to open database");
+    let db = Arc::new(Mutex::new(database));
+    let config = Arc::new(config.clone());
+    let actors = actor_runtime::spawn_actor_runtime(db.clone(), config.clone());
     let context = AppContext {
-        db: Arc::new(Mutex::new(database)),
-        config: Arc::new(config.clone()),
+        db,
+        config: config.clone(),
+        actors,
     };
 
     let api = api_routes(context.clone());
@@ -1239,6 +1306,40 @@ impl Database {
             return Err(bad_request("Unsupported time range target"));
         }
 
+        let current = self.load_settings(user_id)?;
+        let macro_objective = update
+            .macro_objective
+            .unwrap_or(current.macro_objective)
+            .trim()
+            .to_lowercase();
+        if !matches!(macro_objective.as_str(), "accumulation" | "distribution" | "shakeout") {
+            return Err(bad_request("macroObjective must be accumulation, distribution, or shakeout"));
+        }
+        let trigger_threshold_usd = update.trigger_threshold_usd.unwrap_or(current.trigger_threshold_usd);
+        let min_order_size = update.min_order_size.unwrap_or(current.min_order_size);
+        let max_order_size = update.max_order_size.unwrap_or(current.max_order_size);
+        let absorb_ratio = update.absorb_ratio.unwrap_or(current.absorb_ratio);
+        let follow_sell_ratio = update.follow_sell_ratio.unwrap_or(current.follow_sell_ratio);
+        let dump_ratio = update.dump_ratio.unwrap_or(current.dump_ratio);
+        if trigger_threshold_usd < 0.0 || !trigger_threshold_usd.is_finite() {
+            return Err(bad_request("triggerThresholdUsd must be a non-negative finite number"));
+        }
+        if min_order_size <= 0.0 || !min_order_size.is_finite() {
+            return Err(bad_request("minOrderSize must be a positive finite number"));
+        }
+        if max_order_size < min_order_size || !max_order_size.is_finite() {
+            return Err(bad_request("maxOrderSize must be greater than or equal to minOrderSize"));
+        }
+        for (name, value) in [
+            ("absorbRatio", absorb_ratio),
+            ("followSellRatio", follow_sell_ratio),
+            ("dumpRatio", dump_ratio),
+        ] {
+            if value < 0.0 || !value.is_finite() {
+                return Err(bad_request(format!("{name} must be a non-negative finite number")));
+            }
+        }
+
         let pairs = vec![
             ("contractAddress", update.contract_address.clone()),
             ("volatilityTarget", update.volatility_target.to_string()),
@@ -1249,6 +1350,13 @@ impl Database {
             ("maxTransactions", update.max_transactions.to_string()),
             ("maxSlippage", update.max_slippage.to_string()),
             ("strategyNotes", update.strategy_notes.trim().to_string()),
+            ("macroObjective", macro_objective),
+            ("triggerThresholdUsd", trigger_threshold_usd.to_string()),
+            ("minOrderSize", min_order_size.to_string()),
+            ("maxOrderSize", max_order_size.to_string()),
+            ("absorbRatio", absorb_ratio.to_string()),
+            ("followSellRatio", follow_sell_ratio.to_string()),
+            ("dumpRatio", dump_ratio.to_string()),
         ];
 
         let tx = self.conn.transaction().map_err(internal_error)?;
@@ -1304,6 +1412,13 @@ impl Database {
                 "maxTransactions" => settings.max_transactions = value.parse::<u64>().unwrap_or(settings.max_transactions),
                 "maxSlippage" => settings.max_slippage = value.parse::<f64>().unwrap_or(settings.max_slippage),
                 "strategyNotes" => settings.strategy_notes = value,
+                "macroObjective" => settings.macro_objective = value,
+                "triggerThresholdUsd" => settings.trigger_threshold_usd = value.parse::<f64>().unwrap_or(settings.trigger_threshold_usd),
+                "minOrderSize" => settings.min_order_size = value.parse::<f64>().unwrap_or(settings.min_order_size),
+                "maxOrderSize" => settings.max_order_size = value.parse::<f64>().unwrap_or(settings.max_order_size),
+                "absorbRatio" => settings.absorb_ratio = value.parse::<f64>().unwrap_or(settings.absorb_ratio),
+                "followSellRatio" => settings.follow_sell_ratio = value.parse::<f64>().unwrap_or(settings.follow_sell_ratio),
+                "dumpRatio" => settings.dump_ratio = value.parse::<f64>().unwrap_or(settings.dump_ratio),
                 _ => {}
             }
         }
@@ -1535,7 +1650,8 @@ impl Database {
             stats: StatsState {
                 managed_accounts: managed.len(),
                 watched_accounts: watch.len(),
-                trade_execution_enabled: false,
+                trade_execution_enabled: config.solana_rpc_url.is_some()
+                    && config.private_key_encryption_key.is_some(),
             },
             system: SystemState {
                 backend: "rust",
@@ -1596,6 +1712,13 @@ fn api_routes(context: AppContext) -> impl Filter<Extract = impl Reply, Error = 
         .and(json_body::<StrategyExecutionConsumeRequest>())
         .and_then(handle_consume_strategy_execution);
 
+    let external_trade_event = warp::path!("api" / "strategy" / "events" / "external-trade")
+        .and(warp::post())
+        .and(with_context(context.clone()))
+        .and(warp::header::optional::<String>("cookie"))
+        .and(json_body::<StrategyExternalTradeEventRequest>())
+        .and_then(handle_external_trade_event);
+
     let save_settings = warp::path!("api" / "settings")
         .and(warp::post())
         .and(with_context(context.clone()))
@@ -1632,6 +1755,7 @@ fn api_routes(context: AppContext) -> impl Filter<Extract = impl Reply, Error = 
         .or(get_state)
         .or(get_strategy_execution)
         .or(consume_strategy_execution)
+        .or(external_trade_event)
         .or(save_settings)
         .or(import_private_key)
         .or(import_account)
@@ -1822,10 +1946,89 @@ async fn handle_save_settings(
         Ok(user) => {
             let mut db = context.db.lock().expect("database mutex poisoned");
             match db.save_settings(user.id, request) {
-                Ok(settings) => json_response(StatusCode::OK, &settings),
+                Ok(settings) => {
+                    context.actors.publish(actor_runtime::MarketEvent::SettingsUpdated(
+                        actor_runtime::StrategySettings::from_settings(user.id, &settings),
+                    ));
+                    json_response(StatusCode::OK, &settings)
+                }
                 Err(error) => error_response(error),
             }
         }
+        Err(error) => error_response(error),
+    };
+    Ok(response)
+}
+
+async fn handle_external_trade_event(
+    context: AppContext,
+    cookie_header: Option<String>,
+    request: StrategyExternalTradeEventRequest,
+) -> Result<impl Reply, Infallible> {
+    let response = match require_admin(&context, cookie_header) {
+        Ok(user) => match actor_runtime::ExternalTradeSide::from_event_type(&request.event_type) {
+            Some(side) => {
+                if !request.amount_usd.is_finite() || request.amount_usd <= 0.0 {
+                    return Ok(error_response(bad_request("amountUsd must be a positive finite number")));
+                }
+
+                let fallback_contract_address = {
+                    let db = context.db.lock().expect("database mutex poisoned");
+                    match db.load_settings(user.id) {
+                        Ok(settings) => settings.contract_address,
+                        Err(error) => return Ok(error_response(error)),
+                    }
+                };
+                let contract_address = request
+                    .contract_address
+                    .as_deref()
+                    .unwrap_or(fallback_contract_address.as_str())
+                    .trim()
+                    .to_string();
+                if contract_address.is_empty() {
+                    return Ok(error_response(bad_request("contractAddress is required when settings do not define one")));
+                }
+                if let Err(error) = validate_contract_address(&contract_address) {
+                    return Ok(error_response(error));
+                }
+
+                let wallet_address = match request.wallet_address.as_deref() {
+                    Some(value) if !value.trim().is_empty() => match normalize_pubkey(value) {
+                        Ok(value) => Some(value),
+                        Err(error) => return Ok(error_response(error)),
+                    },
+                    _ => None,
+                };
+                let event_id = request
+                    .event_id
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| format!("external-trade-{}-{}", user.id, now_ts()));
+
+                context.actors.publish(actor_runtime::MarketEvent::ExternalTrade(
+                    actor_runtime::ExternalTradeEvent {
+                        user_id: user.id,
+                        event_id: event_id.clone(),
+                        side,
+                        amount_usd: request.amount_usd,
+                        contract_address,
+                        wallet_address,
+                        tx_signature: request.tx_signature,
+                        is_loss_cut: request.is_loss_cut.unwrap_or(false),
+                        execute: request.execute.unwrap_or(true),
+                        occurred_at: now_ts(),
+                    },
+                ));
+
+                json_response(
+                    StatusCode::ACCEPTED,
+                    &StrategyEventAcceptedResponse {
+                        accepted: true,
+                        event_id,
+                    },
+                )
+            }
+            None => error_response(bad_request("eventType must be whale_buy or whale_sell")),
+        },
         Err(error) => error_response(error),
     };
     Ok(response)
