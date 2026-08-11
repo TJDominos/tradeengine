@@ -390,12 +390,20 @@ export async function handleStateRoutes(
     }
 
     const profitUsdc = activeBaseTokenAddress
-      ? await dbComputeManagedProfitUsdc(
-          env.TRADINGBOT_DB,
-          user.id,
-          activeBaseTokenAddress,
-          marketSnapshot?.priceUsd ?? null,
-        )
+      ? await Promise.race([
+          dbComputeManagedProfitUsdc(
+            env.TRADINGBOT_DB,
+            user.id,
+            activeBaseTokenAddress,
+            marketSnapshot?.priceUsd ?? null,
+          ).catch((err: unknown) => {
+            console.warn('Failed to calculate managed transaction-log P/L:', err);
+            return 0;
+          }),
+          new Promise<number>((resolve) => {
+            setTimeout(() => resolve(0), 1_000);
+          }),
+        ])
       : 0;
 
     if (

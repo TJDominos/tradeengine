@@ -160,28 +160,27 @@ export async function dbComputeManagedTradeLogProfit(
     };
   }
 
-  const rows = await db
-    .prepare(
-      `SELECT
-         tl.wallet_address,
-         tl.action,
-         tl.executed_amount,
-         tl.executed_price
-       FROM trade_logs tl
-       WHERE tl.token_id = ?2
-         AND tl.status = 'SUCCESS'
-         AND (?3 IS NULL OR tl.strategy_run_id = ?3)
-         AND EXISTS (
-           SELECT 1
-           FROM accounts a
-           WHERE a.user_id = ?1
-             AND a.type = 'managed'
-             AND a.wallet_address = tl.wallet_address
-         )
-       ORDER BY COALESCE(tl.chain_time_ms, tl.created_at) ASC, tl.id ASC`,
-    )
-    .bind(userId, tokenId, strategyRunId ?? null)
-    .all<ManagedProfitTradeRow>();
+  const runFilter = strategyRunId ? 'AND tl.strategy_run_id = ?3' : '';
+  const statement = db.prepare(
+    `SELECT
+       tl.wallet_address,
+       tl.action,
+       tl.executed_amount,
+       tl.executed_price
+     FROM trade_logs tl
+     INNER JOIN (
+       SELECT DISTINCT wallet_address
+       FROM accounts
+       WHERE user_id = ?1 AND type = 'managed'
+     ) managed ON managed.wallet_address = tl.wallet_address
+     WHERE tl.token_id = ?2
+       AND tl.status = 'SUCCESS'
+       ${runFilter}
+     ORDER BY tl.created_at ASC, tl.id ASC`,
+  );
+  const rows = strategyRunId
+    ? await statement.bind(userId, tokenId, strategyRunId).all<ManagedProfitTradeRow>()
+    : await statement.bind(userId, tokenId).all<ManagedProfitTradeRow>();
 
   return calculateManagedTradeLogProfit(rows.results, currentPriceUsd);
 }
