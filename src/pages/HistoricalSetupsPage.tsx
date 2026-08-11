@@ -162,6 +162,14 @@ export default function HistoricalSetupsPage() {
   const history = queueState?.history ?? [];
   const metrics = queueState?.currentMetrics ?? null;
   const tasks = queueState?.tasks ?? [];
+  const upcomingTaskCount = tasks.filter((task) => task.nextExecutionTime != null).length;
+  const failedTaskCount = tasks.filter((task) => task.status === 'failed').length;
+  const completedTaskCount = tasks.filter((task) => task.status === 'done').length;
+  const orderedTasks = [...tasks].sort((left, right) => {
+    const leftNextExecution = left.nextExecutionTime ?? Number.POSITIVE_INFINITY;
+    const rightNextExecution = right.nextExecutionTime ?? Number.POSITIVE_INFINITY;
+    return leftNextExecution - rightNextExecution || right.scheduledAt - left.scheduledAt;
+  });
   const queueStatus = queueState?.queueStatus ?? 'active';
   const targetVolume = active?.config.baseTotalVolumeUsd ?? 0;
   const executedVolume = metrics?.actualTotalVolume ?? 0;
@@ -308,6 +316,9 @@ export default function HistoricalSetupsPage() {
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Execution Tasks</p>
                 <h3 className="mt-2 text-xl font-semibold text-white">{tasks.length} planned task{tasks.length === 1 ? '' : 's'}</h3>
+                <p className="mt-1 text-sm text-slate-400">
+                  {upcomingTaskCount} upcoming · {failedTaskCount} failed · {completedTaskCount} completed
+                </p>
               </div>
               <span className={`text-sm font-medium ${queueStatus === 'aborted' ? 'text-rose-300' : queueStatus === 'paused' ? 'text-amber-300' : 'text-emerald-300'}`}>
                 {titleCase(queueStatus)}
@@ -333,7 +344,7 @@ export default function HistoricalSetupsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800 bg-slate-900/70">
-                    {tasks.map((task) => (
+                    {orderedTasks.map((task) => (
                       <tr key={task.id}>
                         <td className="max-w-52 px-4 py-3">
                           <p className="truncate font-medium text-slate-200" title={task.id}>{task.id}</p>
@@ -346,7 +357,7 @@ export default function HistoricalSetupsPage() {
                         <td className="px-4 py-3 text-slate-300">{task.attemptCount}</td>
                         <td className="px-4 py-3">
                           <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold uppercase ${task.status === 'done' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : task.status === 'failed' ? 'border-rose-500/30 bg-rose-500/10 text-rose-300' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>
-                            {task.status}
+                            {task.status === 'failed' && task.nextExecutionTime != null ? 'retrying' : task.status}
                           </span>
                         </td>
                       </tr>

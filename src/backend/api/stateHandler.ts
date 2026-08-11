@@ -23,9 +23,11 @@ import type {
   MarketRefreshStatusRecord,
   OutsideTokenHolderPageRecord,
   OutsideTokenHolderSort,
+  TradeLogRecord,
   TokenHolderAggregateRecord,
   TokenHolderSyncStateRecord,
   TokenMarketSnapshot,
+  WebhookTransactionLogRecord,
 } from '../workerShared';
 import { SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID } from '../workerShared';
 import { requireAdmin, requireUser } from '../services/accessControl';
@@ -44,6 +46,44 @@ import {
 const strategyAutomationService = new StrategyAutomationService();
 const DEFAULT_TRANSACTION_LOG_REFRESH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const TRANSACTION_LOG_REFRESH_PRIMARY_MAX_PAGES = 5;
+
+type TransactionLogRecord =
+  | ({ kind: 'trade' } & TradeLogRecord)
+  | ({ kind: 'webhook' } & WebhookTransactionLogRecord);
+
+function buildTransactionLogs(
+  tradeLogs: TradeLogRecord[],
+  webhookTransactionLogs: WebhookTransactionLogRecord[],
+): TransactionLogRecord[] {
+  const logsBySignature = new Map<string, TransactionLogRecord>();
+  const unsignedLogs: TransactionLogRecord[] = [];
+  const candidates: TransactionLogRecord[] = [
+    ...tradeLogs
+      .filter((log) => log.status !== 'FAILED')
+      .map((log) => ({ kind: 'trade' as const, ...log })),
+    ...webhookTransactionLogs
+      .filter((log) => log.status !== 'FAILED')
+      .map((log) => ({ kind: 'webhook' as const, ...log })),
+  ];
+
+  for (const log of candidates) {
+    const signature = log.txSignature?.trim();
+    if (!signature) {
+      unsignedLogs.push(log);
+    } else if (!logsBySignature.has(signature)) {
+      logsBySignature.set(signature, log);
+    }
+  }
+
+  return [...logsBySignature.values(), ...unsignedLogs].sort((left, right) => {
+    const leftTime = left.txSignature ? left.chainTimeMs : left.createdAt;
+    const rightTime = right.txSignature ? right.chainTimeMs : right.createdAt;
+    if (leftTime == null && rightTime == null) return right.id - left.id;
+    if (leftTime == null) return 1;
+    if (rightTime == null) return -1;
+    return rightTime - leftTime || right.id - left.id;
+  });
+}
 
 async function resolveSolanaTokenAccountOwners(
   rpcUrls: string[],
@@ -420,6 +460,7 @@ export async function handleStateRoutes(
       activityLogs,
       tradeLogs,
       webhookTransactionLogs,
+      transactionLogs: buildTransactionLogs(tradeLogs, webhookTransactionLogs),
       tradableTokens,
       historicalSetups,
       activeStrategyVersion,

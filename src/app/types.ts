@@ -329,6 +329,7 @@ export type EngineState = {
   activityLogs: AuditLog[];
   tradeLogs: TradeLog[];
   webhookTransactionLogs: WebhookTransactionLog[];
+  transactionLogs: DashboardTransactionLog[];
   tradableTokens: TradableToken[];
   historicalSetups: HistoricalSetup[];
   activeStrategyVersion: StrategyVersionRecord | null;

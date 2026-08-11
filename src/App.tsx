@@ -1567,24 +1567,7 @@ export default function App() {
       : latestHistoricalSnapshot ?? liveSnapshotInRange;
   const walletOwnershipLookup = buildWalletOwnershipLookup(engineState);
 
-  const combinedTransactionLogs: DashboardTransactionLog[] = [
-    ...engineState.tradeLogs.map((log) => ({ kind: 'trade' as const, ...log })),
-    ...((engineState.webhookTransactionLogs ?? []).map((log) => ({ kind: 'webhook' as const, ...log }))),
-  ].sort((left, right) => {
-    const leftTimestamp = resolveTransactionLogTimestamp(left);
-    const rightTimestamp = resolveTransactionLogTimestamp(right);
-    if (leftTimestamp == null && rightTimestamp == null) {
-      return right.id - left.id;
-    }
-    if (leftTimestamp == null) {
-      return 1;
-    }
-    if (rightTimestamp == null) {
-      return -1;
-    }
-    const createdAtDelta = normalizeTimestampMs(rightTimestamp) - normalizeTimestampMs(leftTimestamp);
-    return createdAtDelta !== 0 ? createdAtDelta : right.id - left.id;
-  });
+  const combinedTransactionLogs = engineState.transactionLogs;
 
   const rangeTransactionLogs = combinedTransactionLogs.filter((log) =>
     isInSelectedRange(resolveTransactionLogTimestamp(log)),
