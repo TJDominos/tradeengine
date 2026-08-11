@@ -4,12 +4,80 @@ import type { ManagedAccountBalanceRecord } from '../src/backend/userStore';
 import {
   buildStrategyPlanningResult,
   buildStrategyPlanTaskSpecs,
+  deriveRequiredNetBuyAmount,
 } from '../src/backend/strategy/planner';
+import {
+  allocateBoundedOrderVolume,
+  calculateFeasibleTradeCounts,
+  calculateSelfCyclingTradeTotals,
+} from '../src/backend/strategy/plannerMath';
 import { buildStrategyDocumentFromSettings } from '../src/backend/strategy/runtime';
 import { resolveBasePlannedTransactionCount } from '../src/backend/strategy/plannedTransactions';
 
 const baseTokenAddress = 'So11111111111111111111111111111111111111112';
 const quoteTokenAddress = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
+const totals = calculateSelfCyclingTradeTotals(150, 100, 5);
+assert.deepEqual(totals, {
+  buyVolumeUsd: 125,
+  sellVolumeUsd: 25,
+  grossVolumeUsd: 150,
+  netBuyVolumeUsd: 100,
+});
+
+const feasibleCounts = calculateFeasibleTradeCounts(20, 50, 125, 25, 5, 30);
+assert.ok(feasibleCounts, 'trade counts should be feasible within the configured bounds');
+assert.equal(feasibleCounts.buyCount + feasibleCounts.sellCount, 20);
+assert.ok(feasibleCounts.buyCount * 5 <= 125 && feasibleCounts.buyCount * 30 >= 125);
+assert.ok(feasibleCounts.sellCount * 5 <= 25 && feasibleCounts.sellCount * 30 >= 25);
+assert.equal(
+  calculateFeasibleTradeCounts(20, 4, 125, 25, 5, 30),
+  null,
+  'planner should reject a total order cap below the mathematical minimum',
+);
+
+const allocationCandidates = [
+  { accountId: 1, maxVolumeUsd: 10, existingPlannedVolumeUsd: 100 },
+  { accountId: 2, maxVolumeUsd: 6, existingPlannedVolumeUsd: 0 },
+];
+const concentratedAllocation = allocateBoundedOrderVolume(10, allocationCandidates, {
+  minOrderUsd: 5,
+  accountCyclingEnabled: false,
+  rotationOffset: 0,
+  accountDispersionStrength: 0,
+  random: () => 0.5,
+});
+assert.deepEqual(concentratedAllocation.allocations, [{ accountId: 1, volumeUsd: 10 }]);
+
+const dispersedAllocation = allocateBoundedOrderVolume(10, allocationCandidates, {
+  minOrderUsd: 5,
+  accountCyclingEnabled: false,
+  rotationOffset: 0,
+  accountDispersionStrength: 3,
+  random: () => 0.5,
+});
+assert.deepEqual(dispersedAllocation.allocations, [
+  { accountId: 2, volumeUsd: 5 },
+  { accountId: 1, volumeUsd: 5 },
+]);
+assert.equal(dispersedAllocation.unallocatedVolumeUsd, 0);
+
+const tieBreakerValues = [0.9, 0.1];
+const shuffledEqualAllocation = allocateBoundedOrderVolume(10, [
+  { accountId: 1, maxVolumeUsd: 10, existingPlannedVolumeUsd: 0 },
+  { accountId: 2, maxVolumeUsd: 10, existingPlannedVolumeUsd: 0 },
+], {
+  minOrderUsd: 5,
+  accountCyclingEnabled: false,
+  rotationOffset: 0,
+  accountDispersionStrength: 1,
+  random: () => tieBreakerValues.shift() ?? 0.5,
+});
+assert.deepEqual(
+  shuffledEqualAllocation.allocations,
+  [{ accountId: 2, volumeUsd: 10 }],
+  'seeded tie-breaking should shuffle only equally scored accounts',
+);
 
 function buildAccount(
   id: number,
@@ -69,6 +137,58 @@ const config = {
   baseTokenAddress,
   quoteTokenAddress,
 };
+
+const zeroNetDocument = {
+  ...document,
+  targets: {
+    ...document.targets,
+    volumeUsdMin: 100,
+    netBuyinUsdMin: 0,
+  },
+};
+const zeroNetConfig = {
+  ...config,
+  baseTotalVolumeUsd: 100,
+};
+const zeroNetBuyAmount = deriveRequiredNetBuyAmount(zeroNetDocument, 300);
+assert.equal(zeroNetBuyAmount, 0, 'an explicit zero net-buy target must not use the fallback');
+const zeroNetTaskSpecs = buildStrategyPlanTaskSpecs(zeroNetConfig, zeroNetBuyAmount);
+assert.equal(
+  zeroNetTaskSpecs.reduce(
+    (sum, task) => sum + (task.side === 'buy' ? task.totalVolumeUsd : 0),
+    0,
+  ),
+  50,
+);
+assert.equal(
+  zeroNetTaskSpecs.reduce(
+    (sum, task) => sum + (task.side === 'sell' ? task.totalVolumeUsd : 0),
+    0,
+  ),
+  50,
+);
+const zeroNetPlanning = buildStrategyPlanningResult({
+  document: zeroNetDocument,
+  config: zeroNetConfig,
+  accounts: Array.from({ length: 10 }, (_, index) => buildAccount(index + 1, 0, 5)),
+  taskSpecs: zeroNetTaskSpecs,
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'planner-zero-net-buy',
+});
+assert.equal(zeroNetPlanning.isExecutable, true);
+assert.equal(
+  zeroNetPlanning.tasks.reduce((sum, task) => sum + task.totalVolumeUsd, 0),
+  100,
+);
+assert.equal(
+  zeroNetPlanning.tasks.reduce(
+    (sum, task) => sum + (task.side === 'buy' ? task.totalVolumeUsd : -task.totalVolumeUsd),
+    0,
+  ),
+  0,
+);
+
 const accounts = [
   buildAccount(1, 34, 0),
   buildAccount(2, 33, 0),

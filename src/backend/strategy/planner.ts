@@ -1,5 +1,10 @@
 import type { ManagedAccountBalanceRecord } from '../userStore';
 import { buildRandomizedTwapPlan } from './engine';
+import {
+  allocateBoundedOrderVolume,
+  calculateFeasibleTradeCounts,
+  calculateSelfCyclingTradeTotals,
+} from './plannerMath';
 import { splitBasePlannedTransactionCount } from './plannedTransactions';
 import type {
   StrategyExecutionConfig,
@@ -94,12 +99,6 @@ type MutablePlannerAccount = StrategyPlannerAccount & {
   existingPlannedBuyVolumeUsd: number;
   existingPlannedSellVolumeUsd: number;
   sellCapacityUsd: number;
-};
-
-type OrderAllocationCandidate = {
-  account: MutablePlannerAccount;
-  maxVolumeUsd: number;
-  existingPlannedVolumeUsd: number;
 };
 
 type PlannedAccountOrder = {
@@ -365,99 +364,6 @@ function buildAccountAwareSelfCyclingTasks(input: {
   return [];
 }
 
-function rotateCandidates<T>(candidates: T[], offset: number): T[] {
-  if (candidates.length <= 1) {
-    return candidates;
-  }
-  const normalizedOffset = ((offset % candidates.length) + candidates.length) % candidates.length;
-  return [
-    ...candidates.slice(normalizedOffset),
-    ...candidates.slice(0, normalizedOffset),
-  ];
-}
-
-function allocateExecutableOrderVolume(
-  targetVolumeUsd: number,
-  candidates: OrderAllocationCandidate[],
-  options: {
-    minOrderUsd: number;
-    accountCyclingEnabled: boolean;
-    rotationOffset: number;
-    accountDispersionStrength: number;
-  },
-): {
-  allocations: Array<{ accountId: number; volumeUsd: number }>;
-  unallocatedVolumeUsd: number;
-  nextRotationOffset: number;
-} {
-  const normalizedTargetVolumeUsd = roundToSixDecimals(targetVolumeUsd);
-  const minOrderUsd = roundToSixDecimals(Math.max(MIN_VOLUME_EPSILON, options.minOrderUsd));
-  const eligibleCandidates = candidates
-    .filter((candidate) => candidate.maxVolumeUsd + MIN_VOLUME_EPSILON >= minOrderUsd)
-    .sort((left, right) => {
-      const leftCoversTarget = left.maxVolumeUsd + MIN_VOLUME_EPSILON >= normalizedTargetVolumeUsd;
-      const rightCoversTarget = right.maxVolumeUsd + MIN_VOLUME_EPSILON >= normalizedTargetVolumeUsd;
-      if (leftCoversTarget !== rightCoversTarget) {
-        return leftCoversTarget ? -1 : 1;
-      }
-      if (options.accountDispersionStrength > 0) {
-        const volumeDifference = left.existingPlannedVolumeUsd - right.existingPlannedVolumeUsd;
-        if (Math.abs(volumeDifference) > MIN_VOLUME_EPSILON) {
-          return volumeDifference;
-        }
-      }
-      return left.account.accountId - right.account.accountId;
-    });
-  const orderedCandidates = options.accountCyclingEnabled
-    ? rotateCandidates(eligibleCandidates, options.rotationOffset)
-    : eligibleCandidates;
-  const nextRotationOffset = options.accountCyclingEnabled && eligibleCandidates.length > 0
-    ? (options.rotationOffset + 1) % eligibleCandidates.length
-    : 0;
-
-  if (normalizedTargetVolumeUsd < minOrderUsd || orderedCandidates.length === 0) {
-    return {
-      allocations: [],
-      unallocatedVolumeUsd: normalizedTargetVolumeUsd,
-      nextRotationOffset,
-    };
-  }
-
-  let remainingVolumeUsd = normalizedTargetVolumeUsd;
-  const allocations: Array<{ accountId: number; volumeUsd: number }> = [];
-  for (const candidate of orderedCandidates) {
-    if (remainingVolumeUsd + MIN_VOLUME_EPSILON < minOrderUsd) {
-      break;
-    }
-    let volumeUsd = roundToSixDecimals(
-      Math.min(candidate.maxVolumeUsd, remainingVolumeUsd),
-    );
-    const remainingAfterAllocation = roundToSixDecimals(remainingVolumeUsd - volumeUsd);
-    if (remainingAfterAllocation > 0 && remainingAfterAllocation < minOrderUsd) {
-      const adjustment = minOrderUsd - remainingAfterAllocation;
-      if (volumeUsd - adjustment >= minOrderUsd) {
-        volumeUsd = roundToSixDecimals(volumeUsd - adjustment);
-      }
-    }
-    if (volumeUsd + MIN_VOLUME_EPSILON < minOrderUsd) {
-      continue;
-    }
-    allocations.push({
-      accountId: candidate.account.accountId,
-      volumeUsd: roundToSixDecimals(volumeUsd),
-    });
-    remainingVolumeUsd = roundToSixDecimals(
-      Math.max(0, remainingVolumeUsd - volumeUsd),
-    );
-  }
-
-  return {
-    allocations,
-    unallocatedVolumeUsd: remainingVolumeUsd,
-    nextRotationOffset,
-  };
-}
-
 export function createDeterministicRandom(seedText: string): () => number {
   let seed = 2166136261;
   for (let index = 0; index < seedText.length; index += 1) {
@@ -478,22 +384,9 @@ export function deriveRequiredNetBuyAmount(
 ): number {
   if (
     Number.isFinite(document.targets.netBuyinUsdMin) &&
-    document.targets.netBuyinUsdMin > 0
+    document.targets.netBuyinUsdMin >= 0
   ) {
     return document.targets.netBuyinUsdMin;
-  }
-  if (
-    document.riskControls.maxPositionUsd != null &&
-    Number.isFinite(document.riskControls.maxPositionUsd) &&
-    document.riskControls.maxPositionUsd > 0
-  ) {
-    return document.riskControls.maxPositionUsd;
-  }
-  if (
-    Number.isFinite(document.targets.volumeUsdMin) &&
-    document.targets.volumeUsdMin > 0
-  ) {
-    return document.targets.volumeUsdMin;
   }
   return positiveNumber(fallback);
 }
@@ -502,48 +395,17 @@ function normalizePlannerTaskOrderCount(orderCount: number): number {
   return Math.max(1, Math.floor(orderCount));
 }
 
-function resolveSelfCyclingOrderSplit(
-  totalOrders: number,
-  buyVolumeUsd: number,
-  sellVolumeUsd: number,
-): { buyCount: number; sellCount: number } {
-  const normalizedTotalOrders = Math.max(
-    sellVolumeUsd > MIN_VOLUME_EPSILON ? 2 : 1,
-    Math.floor(totalOrders),
-  );
-  if (sellVolumeUsd <= MIN_VOLUME_EPSILON) {
-    return {
-      buyCount: normalizedTotalOrders,
-      sellCount: 0,
-    };
-  }
-
-  const totalVolumeUsd = buyVolumeUsd + sellVolumeUsd;
-  const sellRatio = totalVolumeUsd > 0 ? sellVolumeUsd / totalVolumeUsd : 0;
-  const sellCount = Math.min(
-    normalizedTotalOrders - 1,
-    Math.max(1, Math.round(normalizedTotalOrders * sellRatio)),
-  );
-  return {
-    buyCount: Math.max(1, normalizedTotalOrders - sellCount),
-    sellCount,
-  };
-}
-
-function resolveSelfCyclingSellVolume(
+function resolveMinimumSelfCyclingSellVolume(
   config: StrategyPlannerConfig,
-  netBuyAmountUsd: number,
 ): number {
   const baseVolumeUsd = positiveNumber(config.baseTotalVolumeUsd);
-  const existingSellVolumeUsd = Math.max(0, (baseVolumeUsd - netBuyAmountUsd) / 2);
   const tacticRatio = config.macroObjective === 'shakeout'
     ? Math.min(0.45, Math.max(0.1, config.execution.tactics.dumpRatio * 0.15))
     : Math.min(0.25, Math.max(0.05, config.execution.tactics.absorbRatio * 0.1));
-  const requiredSelfCyclingSellUsd = Math.max(
+  return roundToSixDecimals(Math.max(
     config.minOrderUsd,
     baseVolumeUsd * tacticRatio,
-  );
-  return roundToSixDecimals(Math.max(existingSellVolumeUsd, requiredSelfCyclingSellUsd));
+  ));
 }
 
 export function buildStrategyPlanTaskSpecs(
@@ -580,16 +442,26 @@ export function buildStrategyPlanTaskSpecs(
     }
     case 'accumulation':
     case 'shakeout': {
-      const netBuyAmountUsd = Math.min(
+      const { buyVolumeUsd, sellVolumeUsd } = calculateSelfCyclingTradeTotals(
         totalVolumeUsd,
         positiveNumber(requiredNetBuyAmount),
+        resolveMinimumSelfCyclingSellVolume(config),
       );
-      const sellVolumeUsd = resolveSelfCyclingSellVolume(config, netBuyAmountUsd);
-      const buyVolumeUsd = roundToSixDecimals(netBuyAmountUsd + sellVolumeUsd);
-      const { buyCount, sellCount } = resolveSelfCyclingOrderSplit(
+      const feasibleCounts = calculateFeasibleTradeCounts(
         plannerOrderCount,
+        config.maxOrderCount,
         buyVolumeUsd,
         sellVolumeUsd,
+        config.minOrderUsd,
+        config.maxOrderUsd,
+      );
+      const buyCount = feasibleCounts?.buyCount ?? Math.max(
+        1,
+        Math.ceil(buyVolumeUsd / config.maxOrderUsd),
+      );
+      const sellCount = feasibleCounts?.sellCount ?? Math.max(
+        1,
+        Math.ceil(sellVolumeUsd / config.maxOrderUsd),
       );
 
       return [
@@ -683,6 +555,28 @@ function toMutablePlannerAccount(
     existingPlannedSellVolumeUsd,
     sellCapacityUsd,
   };
+}
+
+function reservePlannedAllocation(
+  account: MutablePlannerAccount,
+  side: 'buy' | 'sell',
+  volumeUsd: number,
+): void {
+  if (side === 'buy') {
+    account.plannedBuyVolumeUsd = roundToSixDecimals(
+      account.plannedBuyVolumeUsd + volumeUsd,
+    );
+    account.buyRemainingQuoteUsd = roundToSixDecimals(
+      Math.max(0, account.buyRemainingQuoteUsd - volumeUsd),
+    );
+    return;
+  }
+  account.plannedSellVolumeUsd = roundToSixDecimals(
+    account.plannedSellVolumeUsd + volumeUsd,
+  );
+  account.buyRemainingQuoteUsd = roundToSixDecimals(
+    account.buyRemainingQuoteUsd + volumeUsd,
+  );
 }
 
 export function createEmptyPlanningVolumeMaps(): PlanningVolumeMaps {
@@ -793,7 +687,11 @@ export function buildStrategyPlanningResult(input: {
         eligibleAccounts.map((account) => [account.accountId, account]),
       );
 
-      const allocationPlan = allocateExecutableOrderVolume(
+      const random = createDeterministicRandom(
+        `${seedBase}:allocation:${specIndex}:${spec.side}:${spec.pulse ?? 'base'}:${slice.orderIndex}`,
+      );
+
+      const allocationPlan = allocateBoundedOrderVolume(
         slice.targetVolume,
         eligibleAccounts.map((account) => {
           const existingPlannedVolumeUsd = spec.side === 'buy'
@@ -803,7 +701,7 @@ export function buildStrategyPlanningResult(input: {
             ? account.buyRemainingQuoteUsd
             : Math.max(0, account.sellCapacityUsd - existingPlannedVolumeUsd);
           return {
-            account,
+            accountId: account.accountId,
             maxVolumeUsd,
             existingPlannedVolumeUsd,
           };
@@ -813,6 +711,7 @@ export function buildStrategyPlanningResult(input: {
           accountCyclingEnabled: input.document.execution.accountCyclingEnabled,
           rotationOffset: rotationOffsets[spec.side],
           accountDispersionStrength: input.document.execution.accountDispersionStrength,
+          random,
         },
       );
       rotationOffsets[spec.side] = allocationPlan.nextRotationOffset;
@@ -824,21 +723,7 @@ export function buildStrategyPlanningResult(input: {
             return null;
           }
           const plannedVolumeUsd = roundToSixDecimals(allocationEntry.volumeUsd);
-          if (spec.side === 'buy') {
-            account.plannedBuyVolumeUsd = roundToSixDecimals(
-              account.plannedBuyVolumeUsd + plannedVolumeUsd,
-            );
-            account.buyRemainingQuoteUsd = roundToSixDecimals(
-              Math.max(0, account.buyRemainingQuoteUsd - plannedVolumeUsd),
-            );
-          } else {
-            account.plannedSellVolumeUsd = roundToSixDecimals(
-              account.plannedSellVolumeUsd + plannedVolumeUsd,
-            );
-            account.buyRemainingQuoteUsd = roundToSixDecimals(
-              account.buyRemainingQuoteUsd + plannedVolumeUsd,
-            );
-          }
+          reservePlannedAllocation(account, spec.side, plannedVolumeUsd);
           return {
             accountId: account.accountId,
             label: account.label,
