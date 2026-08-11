@@ -1,6 +1,6 @@
 import { ApiError } from '../errors';
 import { fetchJupiterTokenMetadata, fetchJupiterTokenPrice } from '../jupiter';
-import { dbFindTradableTokenByPair, dbGetLatestTokenMarketSnapshot, dbResolveTradableTokenId } from '../tokenStore';
+import { dbFindTradableTokenByPair, dbGetLatestTokenMarketSnapshot, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
 import { fetchSolanaMintDecimals, normalizePubkey } from '../workerCore';
 import type { Env } from '../workerShared';
 import type { EngineState, MacroObjective } from './engine';
@@ -1039,6 +1039,11 @@ export class StrategyEngineDurableObject {
     let retryVolumeUsd = Number(
       Math.max(0, task.amountUsd - executablePlannedVolumeUsd).toFixed(6),
     );
+    const rpcUrls = await dbResolveSolanaRpcUrls(
+      this.env.TRADINGBOT_DB,
+      config.userId,
+      this.env.RPC_URL?.trim() || this.env.SOLANA_RPC_URL,
+    );
 
     for (const executableAccount of executableAccounts) {
       const sliceVolumeUsd = executableAccount.allocation.plannedVolumeUsd;
@@ -1061,6 +1066,7 @@ export class StrategyEngineDurableObject {
           {
             slippageBps: Math.max(1, config.strategyDocument.parameters.maxSlippageBps),
             commitment: config.execution.commitment,
+            rpcUrls,
           },
         );
         await this.persistSwapTradeLog(
@@ -1258,7 +1264,11 @@ export class StrategyEngineDurableObject {
       tokenRow?.decimals ??
       jupiterMeta?.decimals ??
       (await fetchSolanaMintDecimals(
-        this.env.RPC_URL?.trim() || this.env.SOLANA_RPC_URL?.trim() || '',
+        await dbResolveSolanaRpcUrls(
+          this.env.TRADINGBOT_DB,
+          config.userId,
+          this.env.RPC_URL?.trim() || this.env.SOLANA_RPC_URL,
+        ),
         baseToken,
       ));
 
@@ -1407,6 +1417,7 @@ export class StrategyEngineDurableObject {
   private buildMetricsResponse() {
     return {
       status: this.persistedState.status,
+      runId: this.persistedState.config?.runId ?? null,
       metrics: this.persistedState.metrics,
       currentEngineState: this.persistedState.currentEngineState,
       config: this.persistedState.config,

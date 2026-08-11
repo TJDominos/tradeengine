@@ -1,8 +1,5 @@
 import type { Env } from '../workerShared';
 import {
-  base58Encode,
-} from '../workerCore';
-import {
   dbLoadManagedKeypairBytesByAccountId,
 } from '../userStore';
 import { ApiError } from '../errors';
@@ -14,7 +11,6 @@ export interface ActiveSigningAccount {
   capabilityBaseMint?: string | null;
   capabilityQuoteMint?: string | null;
   privateKeyBytes: Uint8Array;
-  privateKeyBase58: string;
   createdAt: number;
 }
 
@@ -89,7 +85,6 @@ export async function getActiveAccounts(
           capabilityBaseMint: row.capability_base_mint ?? null,
           capabilityQuoteMint: row.capability_quote_mint ?? null,
         privateKeyBytes,
-        privateKeyBase58: base58Encode(privateKeyBytes),
         createdAt: row.created_at,
       };
       }),

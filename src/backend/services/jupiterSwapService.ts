@@ -34,15 +34,19 @@ export interface JupiterSwapSigner {
   privateKey: Uint8Array | string;
 }
 
-function resolveRpcUrl(env: Env): string {
-  const rpcUrl = env.RPC_URL?.trim() || env.SOLANA_RPC_URL?.trim();
-  if (!rpcUrl) {
+function resolveRpcUrls(env: Env, configuredRpcUrls?: string[]): string[] {
+  const rpcUrls = [
+    ...(configuredRpcUrls ?? []),
+    env.RPC_URL?.trim() ?? '',
+    env.SOLANA_RPC_URL?.trim() ?? '',
+  ].filter((rpcUrl, index, values) => rpcUrl && values.indexOf(rpcUrl) === index);
+  if (rpcUrls.length === 0) {
     throw new ApiError(
       500,
-      'RPC_URL or SOLANA_RPC_URL must be configured for Jupiter swap execution',
+      'An active Solana RPC endpoint must be configured for Jupiter swap execution',
     );
   }
-  return rpcUrl;
+  return rpcUrls;
 }
 
 function decodeSignerKeypair(privateKey: Uint8Array | string): Keypair {
@@ -67,6 +71,22 @@ function decodeSignerKeypair(privateKey: Uint8Array | string): Keypair {
     500,
     'Signer private key must decode to a 32-byte seed or 64-byte keypair',
   );
+}
+
+export function signVersionedTransaction(
+  transaction: VersionedTransaction,
+  signerInput: JupiterSwapSigner,
+): VersionedTransaction {
+  const signer = decodeSignerKeypair(signerInput.privateKey);
+  const expectedPublicKey = signerInput.publicKey.trim();
+  if (signer.publicKey.toBase58() !== expectedPublicKey) {
+    throw new ApiError(
+      500,
+      `Signing key does not match managed wallet ${expectedPublicKey}`,
+    );
+  }
+  transaction.sign([signer]);
+  return transaction;
 }
 
 function normalizeAtomicAmount(amount: string | number | bigint): string {
@@ -143,10 +163,10 @@ export async function executeSwap(
   options?: {
     slippageBps?: number;
     commitment?: Commitment;
+    rpcUrls?: string[];
   },
 ): Promise<JupiterSwapExecutionResult> {
-  const signer = decodeSignerKeypair(keypair.privateKey);
-  const rpcUrl = resolveRpcUrl(env);
+  const rpcUrls = resolveRpcUrls(env, options?.rpcUrls);
   const commitment = options?.commitment ?? 'confirmed';
   const slippageBps = Math.max(1, Math.round(options?.slippageBps ?? DEFAULT_JUPITER_SLIPPAGE_BPS));
   const normalizedAmount = normalizeAtomicAmount(amount);
@@ -167,15 +187,37 @@ export async function executeSwap(
   const transaction = VersionedTransaction.deserialize(
     Uint8Array.from(Buffer.from(swapTransactionBase64, 'base64')),
   );
-  transaction.sign([signer]);
+  signVersionedTransaction(transaction, keypair);
 
-  const connection = new Connection(rpcUrl, commitment);
-  const txid = await connection.sendRawTransaction(transaction.serialize(), {
-    skipPreflight: false,
-    maxRetries: 3,
-    preflightCommitment: commitment,
-  });
-  await connection.confirmTransaction(txid, commitment);
+  let txid = '';
+  let confirmed = false;
+  let lastRpcError: unknown = null;
+  for (const rpcUrl of rpcUrls) {
+    try {
+      const connection = new Connection(rpcUrl, commitment);
+      txid = await connection.sendRawTransaction(transaction.serialize(), {
+        skipPreflight: false,
+        maxRetries: 3,
+        preflightCommitment: commitment,
+      });
+      const confirmation = await connection.confirmTransaction(txid, commitment);
+      if (confirmation.value.err) {
+        throw new ApiError(
+          502,
+          `Solana transaction ${txid} failed: ${JSON.stringify(confirmation.value.err)}`,
+        );
+      }
+      confirmed = true;
+      break;
+    } catch (error: unknown) {
+      lastRpcError = error;
+    }
+  }
+  if (!confirmed) {
+    throw lastRpcError instanceof Error
+      ? lastRpcError
+      : new ApiError(502, 'All configured Solana RPC endpoints failed');
+  }
 
   if (inputMint !== SOLANA_USDC_MINT && outputMint !== SOLANA_USDC_MINT) {
     throw new ApiError(

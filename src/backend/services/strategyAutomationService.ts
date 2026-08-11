@@ -66,6 +66,7 @@ interface StrategyEngineMetrics {
 
 interface StrategyEngineDurableObjectMetricsResponse {
   status: StrategyEngineDurableObjectStatus;
+  runId: string | null;
   metrics: StrategyEngineDurableObjectMetrics;
   currentEngineState: string | null;
   nextExecutionTime: number | null;
@@ -476,6 +477,10 @@ export class StrategyAutomationService {
 
     const response = await this.fetchCurrentMetricsResponse(env, activeRecord);
     if (!response) {
+      return null;
+    }
+
+    if (response.runId !== activeRecord.versionId) {
       return null;
     }
 
