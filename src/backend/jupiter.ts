@@ -96,12 +96,24 @@ function jupiterApiHeaders(apiKey?: string): HeadersInit {
   };
 }
 
+async function requestJupiterSwapOrder(
+  url: URL,
+  apiKey?: string,
+): Promise<{ response: Response; bodyText: string }> {
+  const response = await fetch(url.toString(), {
+    headers: jupiterApiHeaders(apiKey),
+  });
+  return {
+    response,
+    bodyText: await response.text(),
+  };
+}
+
 export async function fetchJupiterSwapOrder(
   inputMint: string,
   outputMint: string,
   amountAtomicUnits: string,
   taker: string,
-  slippageBps: number,
   apiKey?: string,
 ): Promise<JupiterSwapOrderResponse> {
   const url = new URL(`${JUPITER_SWAP_V2_API_BASE_URL}/order`);
@@ -109,19 +121,22 @@ export async function fetchJupiterSwapOrder(
   url.searchParams.set('outputMint', outputMint);
   url.searchParams.set('amount', amountAtomicUnits);
   url.searchParams.set('taker', taker);
-  url.searchParams.set('slippageBps', String(slippageBps));
 
-  const response = await fetch(url.toString(), {
-    headers: jupiterApiHeaders(apiKey),
-  });
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => '');
+  let orderRequest = await requestJupiterSwapOrder(url, apiKey);
+  if (
+    orderRequest.response.status === 400 &&
+    orderRequest.bodyText.includes('Failed to get quotes')
+  ) {
+    url.searchParams.set('excludeRouters', 'jupiterz,dflow,okx');
+    orderRequest = await requestJupiterSwapOrder(url, apiKey);
+  }
+  if (!orderRequest.response.ok) {
     throw new ApiError(
       502,
-      `Jupiter order request failed (${response.status}): ${errorText.slice(0, 200)}`,
+      `Jupiter order request failed (${orderRequest.response.status}): ${orderRequest.bodyText.slice(0, 200)}`,
     );
   }
-  const order = await response.json<JupiterSwapOrderResponse>();
+  const order = JSON.parse(orderRequest.bodyText) as JupiterSwapOrderResponse;
   if (!order.transaction) {
     throw new ApiError(
       502,

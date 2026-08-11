@@ -12,7 +12,6 @@ import {
 } from '../jupiter';
 import { SOLANA_USDC_MINT, type Env } from '../workerShared';
 
-const DEFAULT_JUPITER_SLIPPAGE_BPS = 10;
 const USDC_DECIMALS = 6;
 
 export interface JupiterSwapExecutionResult {
@@ -105,11 +104,7 @@ export async function executeSwap(
   side: 'buy' | 'sell',
   baseToken: string,
   quoteToken: string,
-  options?: {
-    slippageBps?: number;
-  },
 ): Promise<JupiterSwapExecutionResult> {
-  const slippageBps = Math.max(1, Math.round(options?.slippageBps ?? DEFAULT_JUPITER_SLIPPAGE_BPS));
   const normalizedAmount = normalizeAtomicAmount(amount);
   const inputMint = side === 'buy' ? quoteToken : baseToken;
   const outputMint = side === 'buy' ? baseToken : quoteToken;
@@ -119,7 +114,6 @@ export async function executeSwap(
     outputMint,
     normalizedAmount,
     keypair.publicKey,
-    slippageBps,
     env.JUPITER_API_KEY,
   );
   const transaction = VersionedTransaction.deserialize(
@@ -162,7 +156,7 @@ export async function executeSwap(
     outputMint,
     inputAmountAtomic: execution.totalInputAmount,
     outputAmountAtomic: execution.totalOutputAmount,
-    slippageBps,
+    slippageBps: order.slippageBps,
     quoteResponse: order,
   };
 }

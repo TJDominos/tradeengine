@@ -1160,9 +1160,6 @@ export class StrategyEngineDurableObject {
           task.side,
           swapInput.baseToken,
           swapInput.quoteToken,
-          {
-            slippageBps: Math.max(1, config.strategyDocument.parameters.maxSlippageBps),
-          },
         );
         await this.persistSwapTradeLog(
           task,

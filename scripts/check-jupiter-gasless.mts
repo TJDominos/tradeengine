@@ -32,15 +32,33 @@ const unsignedTransaction = Buffer.from(transaction.serialize()).toString('base6
 const originalFetch = globalThis.fetch;
 let gasless = true;
 let executeCalls = 0;
+let failNextDefaultOrder = true;
+let orderCalls = 0;
 
 globalThis.fetch = async (input, init) => {
   const url = String(input);
   if (url.startsWith('https://api.jup.ag/swap/v2/order?')) {
+    orderCalls += 1;
     const requestUrl = new URL(url);
     assert.equal(requestUrl.searchParams.get('taker'), taker.publicKey.toBase58());
     assert.equal(requestUrl.searchParams.get('inputMint'), inputMint);
     assert.equal(requestUrl.searchParams.get('outputMint'), outputMint);
+    assert.equal(requestUrl.searchParams.has('slippageBps'), false);
     assert.equal(new Headers(init?.headers).get('x-api-key'), 'test-api-key');
+    if (!requestUrl.searchParams.has('excludeRouters') && failNextDefaultOrder) {
+      failNextDefaultOrder = false;
+      return Response.json(
+        { requestId: 'failed-quote-request', error: 'Failed to get quotes' },
+        { status: 400 },
+      );
+    }
+    if (orderCalls === 2) {
+      assert.equal(
+        requestUrl.searchParams.get('excludeRouters'),
+        'jupiterz,dflow,okx',
+        'a transient multi-router quote failure should retry through Metis',
+      );
+    }
     return Response.json({
       inputMint,
       inAmount: '10000000',
@@ -103,6 +121,7 @@ try {
   );
   assert.equal(result.txid, 'mock-signature');
   assert.equal(result.executedVolumeUsd, 10);
+  assert.equal(orderCalls, 2);
   assert.equal(executeCalls, 1);
 
   gasless = false;
@@ -117,6 +136,7 @@ try {
     ),
     /did not provide a gasless route/,
   );
+  assert.equal(orderCalls, 3, 'non-gasless validation should not require a fallback retry');
   assert.equal(executeCalls, 1, 'non-gasless orders must be rejected before execute');
 } finally {
   globalThis.fetch = originalFetch;
