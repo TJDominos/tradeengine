@@ -24,7 +24,8 @@ function shouldInitializeCoreAuthSchema(pathname: string): boolean {
 function isReadOnlyStatePath(pathname: string): boolean {
   return pathname === '/api/state' ||
     pathname === '/api/profit' ||
-    pathname === '/api/market-snapshots';
+    pathname === '/api/market-snapshots' ||
+    pathname === '/api/strategy/current';
 }
 
 function resolveApiTimeoutMs(pathname: string): number {
