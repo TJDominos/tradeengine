@@ -24,9 +24,7 @@ import type {
   StrategyVersionRecord,
 } from '../strategy/types';
 import { nowTs } from '../time';
-import { dbResolveTradableTokenId } from '../tokenStore';
 import {
-  normalizePubkey,
   parseJsonText,
   sha256Hex,
 } from '../workerCore';
@@ -40,15 +38,11 @@ const DEFAULT_SERIAL_STRATEGY_BASE_VOLUME_USD = 300;
 const DEFAULT_SERIAL_STRATEGY_DISTRIBUTION_CHUNK_COUNT = 3;
 const DEFAULT_SERIAL_STRATEGY_DISTRIBUTION_DELAY_JITTER_MS = 2_000;
 
-function deepClone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function createStrategyRecordVersionId(): string {
+export function createStrategyExecutionRunId(strategyVersionId: number): string {
   if (typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
+    return `run-${strategyVersionId}-${crypto.randomUUID()}`;
   }
-  return `strategy-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `run-${strategyVersionId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function parseTimeRangeTargetToDurationMs(timeRangeTarget: string): number {
@@ -122,6 +116,7 @@ function mapStrategyStatus(value: string): StrategyStatus {
 }
 
 function mapStrategyRow(row: {
+  id: number;
   version_id: string;
   status: string;
   config: string;
@@ -135,6 +130,7 @@ function mapStrategyRow(row: {
   const updatedAt = normalizeStoredTimestamp(row.updated_at);
   const status = mapStrategyStatus(row.status);
   return {
+    runNumber: row.id,
     versionId: row.version_id,
     status,
     config,
@@ -157,6 +153,7 @@ async function dbGetStrategyRows(
 ): Promise<StrategyRecord[]> {
   const prepared = env.TRADINGBOT_DB.prepare(query).bind(...bindings);
   const result = await prepared.all<{
+    id: number;
     version_id: string;
     status: string;
     config: string;
@@ -272,7 +269,7 @@ export async function getNextPendingStrategy(
 ): Promise<StrategyRecord | null> {
   const records = await dbGetStrategyRows(
     env,
-    `SELECT version_id, status, config, report, created_at, updated_at
+    `SELECT id, version_id, status, config, report, created_at, updated_at
      FROM strategies
      WHERE status = ?1
      ORDER BY datetime(created_at) ASC, id ASC
@@ -287,7 +284,7 @@ export async function getActiveStrategy(
 ): Promise<StrategyRecord | null> {
   const running = await dbGetStrategyRows(
     env,
-    `SELECT version_id, status, config, report, created_at, updated_at
+    `SELECT id, version_id, status, config, report, created_at, updated_at
      FROM strategies
      WHERE status = ?1
      ORDER BY datetime(updated_at) DESC, id DESC`,
@@ -350,7 +347,7 @@ export async function updateStrategyStatus(
 export async function listStrategyRecords(env: Env): Promise<StrategyRecord[]> {
   return dbGetStrategyRows(
     env,
-    `SELECT version_id, status, config, report, created_at, updated_at
+    `SELECT id, version_id, status, config, report, created_at, updated_at
      FROM strategies
      ORDER BY datetime(created_at) ASC, id ASC`,
   );
@@ -387,7 +384,7 @@ export async function getStrategyRecordByVersionId(
 ): Promise<StrategyRecord | null> {
   const records = await dbGetStrategyRows(
     env,
-    `SELECT version_id, status, config, report, created_at, updated_at
+    `SELECT id, version_id, status, config, report, created_at, updated_at
      FROM strategies
      WHERE version_id = ?1
      LIMIT 1`,
@@ -402,9 +399,10 @@ export async function findStrategyRecordByStrategyVersionId(
 ): Promise<StrategyRecord | null> {
   const records = await dbGetStrategyRows(
     env,
-    `SELECT version_id, status, config, report, created_at, updated_at
+    `SELECT id, version_id, status, config, report, created_at, updated_at
      FROM strategies
      WHERE json_extract(config, '$.strategyVersionId') = ?1
+    ORDER BY id DESC
      LIMIT 1`,
     [strategyVersionId],
   );

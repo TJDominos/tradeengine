@@ -63,33 +63,127 @@ export async function dbComputeManagedProfitUsdc(
   baseTokenAddress: string,
   currentPriceUsd: number | null,
 ): Promise<number> {
+  const profit = await dbComputeManagedTradeLogProfit(
+    db,
+    userId,
+    baseTokenAddress,
+    currentPriceUsd,
+  );
+  return profit.totalPnlUsdc;
+}
+
+export type ManagedTradeLogProfit = {
+  realizedPnlUsdc: number;
+  unrealizedPnlUsdc: number;
+  totalPnlUsdc: number;
+  remainingTokenAmount: number;
+  successfulTradeCount: number;
+};
+
+export type ManagedProfitTradeRow = {
+  wallet_address: string;
+  action: 'BUY' | 'SELL';
+  executed_amount: number | null;
+  executed_price: number | null;
+};
+
+export function calculateManagedTradeLogProfit(
+  rows: ManagedProfitTradeRow[],
+  currentPriceUsd: number | null,
+): ManagedTradeLogProfit {
+  const positions = new Map<string, { quantity: number; costBasisUsdc: number }>();
+  let realizedPnlUsdc = 0;
+  let successfulTradeCount = 0;
+  for (const row of rows) {
+    const executedAmount = row.executed_amount ?? 0;
+    const executedPrice = row.executed_price ?? 0;
+    if (executedAmount <= 0 || executedPrice <= 0) {
+      continue;
+    }
+    successfulTradeCount += 1;
+    const position = positions.get(row.wallet_address) ?? {
+      quantity: 0,
+      costBasisUsdc: 0,
+    };
+    if (row.action === 'BUY') {
+      position.quantity += executedAmount;
+      position.costBasisUsdc += executedAmount * executedPrice;
+    } else {
+      const soldQuantity = executedAmount / executedPrice;
+      const averageCost = position.quantity > 0
+        ? position.costBasisUsdc / position.quantity
+        : 0;
+      const matchedQuantity = Math.min(position.quantity, soldQuantity);
+      realizedPnlUsdc += matchedQuantity * (executedPrice - averageCost);
+      position.quantity = Math.max(0, position.quantity - matchedQuantity);
+      position.costBasisUsdc = Math.max(
+        0,
+        position.costBasisUsdc - averageCost * matchedQuantity,
+      );
+    }
+    positions.set(row.wallet_address, position);
+  }
+
+  let remainingTokenAmount = 0;
+  let remainingCostBasisUsdc = 0;
+  for (const position of positions.values()) {
+    remainingTokenAmount += position.quantity;
+    remainingCostBasisUsdc += position.costBasisUsdc;
+  }
+  const unrealizedPnlUsdc = currentPriceUsd != null && currentPriceUsd > 0
+    ? remainingTokenAmount * currentPriceUsd - remainingCostBasisUsdc
+    : 0;
+  return {
+    realizedPnlUsdc,
+    unrealizedPnlUsdc,
+    totalPnlUsdc: realizedPnlUsdc + unrealizedPnlUsdc,
+    remainingTokenAmount,
+    successfulTradeCount,
+  };
+}
+
+export async function dbComputeManagedTradeLogProfit(
+  db: D1Database,
+  userId: number,
+  baseTokenAddress: string,
+  currentPriceUsd: number | null,
+  strategyRunId?: string,
+): Promise<ManagedTradeLogProfit> {
   const tokenId = await dbResolveTradableTokenId(db, baseTokenAddress);
   if (!tokenId) {
-    return 0;
+    return {
+      realizedPnlUsdc: 0,
+      unrealizedPnlUsdc: 0,
+      totalPnlUsdc: 0,
+      remainingTokenAmount: 0,
+      successfulTradeCount: 0,
+    };
   }
 
   const rows = await db
     .prepare(
-      `SELECT p.quantity, p.avg_cost, p.realized_pnl
-       FROM positions p
-       INNER JOIN accounts a ON a.wallet_address = p.wallet_address
-       WHERE a.user_id = ?1 AND a.type = 'managed' AND p.token_id = ?2`,
+      `SELECT
+         tl.wallet_address,
+         tl.action,
+         tl.executed_amount,
+         tl.executed_price
+       FROM trade_logs tl
+       WHERE tl.token_id = ?2
+         AND tl.status = 'SUCCESS'
+         AND (?3 IS NULL OR tl.strategy_run_id = ?3)
+         AND EXISTS (
+           SELECT 1
+           FROM accounts a
+           WHERE a.user_id = ?1
+             AND a.type = 'managed'
+             AND a.wallet_address = tl.wallet_address
+         )
+       ORDER BY COALESCE(tl.chain_time_ms, tl.created_at) ASC, tl.id ASC`,
     )
-    .bind(userId, tokenId)
-    .all<{
-      quantity: number;
-      avg_cost: number;
-      realized_pnl: number;
-    }>();
+    .bind(userId, tokenId, strategyRunId ?? null)
+    .all<ManagedProfitTradeRow>();
 
-  let profitUsdc = 0;
-  for (const row of rows.results) {
-    profitUsdc += row.realized_pnl ?? 0;
-    if (currentPriceUsd != null) {
-      profitUsdc += (currentPriceUsd - (row.avg_cost ?? 0)) * (row.quantity ?? 0);
-    }
-  }
-  return profitUsdc;
+  return calculateManagedTradeLogProfit(rows.results, currentPriceUsd);
 }
 
 export async function dbListHistoricalSetups(

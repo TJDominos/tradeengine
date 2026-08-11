@@ -30,7 +30,7 @@ import {
   getAvailableAccount,
   dbListManagedAccountAddresses,
 } from '../userStore';
-import { dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
+import { dbGetLatestTokenMarketSnapshot, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
 import type { Env } from '../workerShared';
 import {
   executeTradeTask,
@@ -41,13 +41,13 @@ import {
   type StrategyTaskExecutionContext,
   type StrategyTaskExecutionResult,
 } from '../workerCore';
-import { parseJsonBody } from '../workerSchema';
 import { SOLANA_USDC_MINT } from '../workerShared';
-import { dbGetLatestHistoricalSetupId } from './historyMetricsService';
+import { dbComputeManagedTradeLogProfit, dbGetLatestHistoricalSetupId } from './historyMetricsService';
 import { sendSolanaTransaction, signSolanaTransaction } from './solanaTradeService';
 import {
   addStrategy,
   buildStrategyRecordConfigFromVersion,
+  createStrategyExecutionRunId,
   findStrategyRecordByStrategyVersionId,
   getAllStrategies,
   getActiveStrategy,
@@ -303,12 +303,16 @@ export class StrategyAutomationService {
     version: StrategyVersionRecord,
   ): Promise<StrategyRecord> {
     const existing = await findStrategyRecordByStrategyVersionId(env, version.id);
-    if (existing) {
+    if (
+      existing?.status === StrategyStatus.Pending ||
+      existing?.status === StrategyStatus.Running ||
+      existing?.status === StrategyStatus.Paused
+    ) {
       return existing;
     }
     return addStrategy(
       env,
-      `strategy-${version.id}`,
+      createStrategyExecutionRunId(version.id),
       buildStrategyRecordConfigFromVersion(version, userId),
     );
   }
@@ -413,6 +417,7 @@ export class StrategyAutomationService {
     const report = this.buildExecutionReport(activeRecord, currentMetricsResponse?.metrics ?? null, {
       endTime: currentMetricsResponse?.metrics.endTime ?? Date.now(),
     });
+    await this.attachRunProfit(env, activeRecord, report);
     const completedRecord = await updateStrategyStatus(
       env,
       versionId,
@@ -446,7 +451,7 @@ export class StrategyAutomationService {
       env,
       activeRecord.versionId,
       StrategyStatus.Aborted,
-      abortResponse.report,
+      await this.attachRunProfit(env, activeRecord, abortResponse.report),
     );
     return failedRecord;
   }
@@ -475,14 +480,15 @@ export class StrategyAutomationService {
     }
 
     if (response.status === 'aborted') {
+      const report = this.buildExecutionReport(activeRecord, response.metrics, {
+        endTime: response.metrics.endTime ?? Date.now(),
+        abortReason: 'Strategy aborted by durable object',
+      });
       await updateStrategyStatus(
         env,
         activeRecord.versionId,
         StrategyStatus.Aborted,
-        this.buildExecutionReport(activeRecord, response.metrics, {
-          endTime: response.metrics.endTime ?? Date.now(),
-          abortReason: 'Strategy aborted by durable object',
-        }),
+        await this.attachRunProfit(env, activeRecord, report),
       );
       return null;
     }
@@ -491,7 +497,7 @@ export class StrategyAutomationService {
       status: response.status,
       currentEngineState: response.currentEngineState,
       nextExecutionTime: response.nextExecutionTime,
-      metrics: this.mapMetricsResponse(response.metrics),
+      metrics: await this.mapMetricsResponse(env, activeRecord, response.metrics),
     };
   }
 
@@ -544,7 +550,7 @@ export class StrategyAutomationService {
       actualTotalVolume: metrics?.actualTotalVolumeUsd ?? 0,
       actualNetInflow: metrics?.actualNetInflowUsd ?? 0,
       tacticsTriggeredCount: metrics?.tacticsTriggeredCount ?? 0,
-      pnl: metrics?.actualNetInflowUsd ?? 0,
+      pnl: 0,
       startTime:
         metrics?.startTime ??
         activeRecord?.startedAt ??
@@ -570,6 +576,7 @@ export class StrategyAutomationService {
     }
     return {
       userId: record.config.userId,
+      runId: record.versionId,
       versionId: record.config.strategyVersionId,
       strategyDocument: record.config.document,
     };
@@ -600,16 +607,48 @@ export class StrategyAutomationService {
     );
   }
 
-  private mapMetricsResponse(
-    metrics: StrategyEngineDurableObjectMetrics,
-  ): StrategyEngineMetrics {
+  private async attachRunProfit(
+    env: Env,
+    record: StrategyRecord,
+    report: ExecutionReport,
+  ): Promise<ExecutionReport> {
+    const tokenId = await dbResolveTradableTokenId(
+      env.TRADINGBOT_DB,
+      record.config.baseTokenAddress,
+      record.config.quoteTokenAddress,
+    );
+    const snapshot = tokenId
+      ? await dbGetLatestTokenMarketSnapshot(env.TRADINGBOT_DB, tokenId)
+      : null;
+    const profit = await dbComputeManagedTradeLogProfit(
+      env.TRADINGBOT_DB,
+      record.config.userId,
+      record.config.baseTokenAddress,
+      snapshot?.priceUsd ?? null,
+      record.versionId,
+    );
     return {
+      ...report,
+      pnl: profit.totalPnlUsdc,
+      realizedPnl: profit.realizedPnlUsdc,
+      unrealizedPnl: profit.unrealizedPnlUsdc,
+    };
+  }
+
+  private async mapMetricsResponse(
+    env: Env,
+    record: StrategyRecord,
+    metrics: StrategyEngineDurableObjectMetrics,
+  ): Promise<StrategyEngineMetrics> {
+    const report = await this.attachRunProfit(env, record, {
       actualTotalVolume: metrics.actualTotalVolumeUsd,
       actualNetInflow: metrics.actualNetInflowUsd,
       tacticsTriggeredCount: metrics.tacticsTriggeredCount,
-      pnl: metrics.actualNetInflowUsd,
+      pnl: 0,
       startTime: metrics.startTime,
-    };
+      endTime: metrics.endTime ?? Date.now(),
+    });
+    return report;
   }
 
   private async fetchStrategyEngineJson<T>(

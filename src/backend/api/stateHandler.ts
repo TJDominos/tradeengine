@@ -450,7 +450,6 @@ export async function handleStateRoutes(
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
     const contractAddress =
       settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
-    const quoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || undefined;
 
     if (!contractAddress) {
       return jsonResponse(

@@ -13,11 +13,8 @@ import {
 } from '../tokenStore';
 import { dbListManagedAccountAddresses } from '../userStore';
 import {
-  dedupeStrings,
   fetchSolanaMintDecimals,
   formatTokenAmount,
-  isHeliusRpcUrl,
-  normalizeHeliusRpcUrl,
   normalizePubkey,
   readTokenMarketCache,
   solanaRpc,
@@ -30,9 +27,6 @@ import {
   TOKEN_MARKET_CACHE_TTL_MS,
   type TokenMarketSnapshot,
 } from '../workerShared';
-
-const HOLDER_SYNC_PROGRAM_ACCOUNTS_PRIMARY_RPC_URL =
-  'https://api.mainnet-beta.solana.com';
 
 function waitMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

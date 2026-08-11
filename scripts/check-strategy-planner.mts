@@ -228,6 +228,16 @@ assert.equal(
 );
 assert.ok(planning.tasks.every((task) => task.allocations.length > 0), 'every task should have an account allocation');
 assert.ok(planning.tasks.every((task) => task.allocations.length === 1), 'each planned task must map to exactly one on-chain transaction');
+assert.equal(
+  new Set(
+    planning.tasks
+      .filter((task) => task.side === 'buy')
+      .flatMap((task) => task.allocations.map((allocation) => allocation.accountId))
+      .filter((accountId) => accountId <= 3),
+  ).size,
+  3,
+  'self-cycling net buys should use every funded eligible account before concentrating orders',
+);
 assert.ok(planning.tasks.filter((task) => task.side === 'sell').length >= 14, 'at least 14 sells should unlock enough self-cycling accounts');
 assert.ok(planning.tasks.reduce((sum, task) => sum + task.totalVolumeUsd, 0) >= 150, 'planned gross volume should meet the 150 USD minimum');
 assert.equal(

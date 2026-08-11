@@ -8,6 +8,41 @@ CREATE TABLE IF NOT EXISTS strategies (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS strategy_definitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  strategy_type TEXT NOT NULL,
+  current_version_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(user_id, strategy_type),
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS strategy_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  strategy_id INTEGER NOT NULL,
+  version_no INTEGER NOT NULL,
+  schema_version INTEGER NOT NULL,
+  engine_version TEXT NOT NULL,
+  strategy_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  params_json TEXT NOT NULL,
+  triggers_json TEXT NOT NULL,
+  targets_json TEXT NOT NULL,
+  risk_json TEXT NOT NULL,
+  execution_json TEXT NOT NULL,
+  metadata_json TEXT NOT NULL,
+  checksum TEXT NOT NULL,
+  change_note TEXT,
+  created_at INTEGER NOT NULL,
+  activated_at INTEGER,
+  UNIQUE(strategy_id, version_no),
+  FOREIGN KEY(strategy_id) REFERENCES strategy_definitions(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS strategy_evaluations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,

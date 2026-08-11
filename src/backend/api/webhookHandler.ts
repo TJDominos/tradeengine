@@ -6,7 +6,6 @@ import { buildWebhookStrategyTrigger } from '../strategy/triggers';
 import { nowTs } from '../time';
 import {
   dbFindTradableTokenById,
-  dbGetLatestTokenMarketSnapshot,
   dbResolveSolanaRpcUrls,
   dbResolveTradableTokenId,
 } from '../tokenStore';
@@ -611,17 +610,6 @@ function buildCompactAlchemySignalPayload(input: {
       ['log', buildCompactAlchemyLogPayload(input.log ?? null)],
     ]),
   );
-}
-
-async function loadStoredMarketSnapshotByContractAddress(
-  db: D1Database,
-  contractAddress: string,
-): Promise<TokenMarketSnapshot | null> {
-  const tokenId = await dbResolveTradableTokenId(db, contractAddress);
-  if (!tokenId) {
-    return null;
-  }
-  return dbGetLatestTokenMarketSnapshot(db, tokenId);
 }
 
 function deriveAlchemySignalsFromPayload(

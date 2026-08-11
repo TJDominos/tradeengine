@@ -1,6 +1,6 @@
 # tradeengine Rust backend
 
-This directory now contains the active backend for the repository.
+This directory contains an experimental legacy backend. The deployed application uses the Cloudflare Worker at `src/worker.ts`; this Rust server is not wired into `wrangler.jsonc`.
 
 ## Responsibilities
 
@@ -9,7 +9,7 @@ This directory now contains the active backend for the repository.
 - Bootstrap and authenticate the admin user.
 - Protect configuration, account import, and private-key import endpoints behind authenticated admin sessions.
 - Encrypt imported managed private keys at rest.
-- Return `501 Not Implemented` for trade execution until a real executor exists.
+- Preserve the earlier standalone SQLite/Warp implementation for migration evaluation only.
 
 ## Local run
 

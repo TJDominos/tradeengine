@@ -1,22 +1,5 @@
 import React, { useEffect } from 'react';
-import {
-  Activity,
-  Archive,
-  CheckSquare,
-  Clock,
-  FileText,
-  Key,
-  Lock,
-  Plus,
-  RefreshCw,
-  Search,
-  Server,
-  Settings,
-  Shield,
-  Trash2,
-  Users,
-  Wallet,
-} from 'lucide-react';
+import { Server } from 'lucide-react';
 
 import AppHeader from './components/AppHeader';
 import AdminModal from './components/AdminModal';
@@ -44,19 +27,15 @@ import type {
   TokenMarketSnapshot,
   TradableToken,
   WalletBalance,
-  WalletOwnershipMeta,
 } from './app/types';
 import {
   api,
   buildWalletOwnershipLookup,
   createDefaultDateRange,
   formatDate,
-  formatUSD,
   mergeTradableToken,
   normalizeTimestampMs,
-  parseAmount,
   resolveWalletOwnershipMeta,
-  serializeSettings,
   toRangeEndMs,
   toRangeStartMs,
 } from './app/utils';
@@ -976,33 +955,6 @@ export default function App() {
         response.activeStrategyVersion
           ? `Strategy version v${response.activeStrategyVersion.versionNo} saved and activated. Buy-capacity check passed: ${response.deploymentValidation.availableBuyAmount.toFixed(2)} ${response.deploymentValidation.quoteLabel} across ${response.deploymentValidation.eligibleAccountCount}/${response.deploymentValidation.enabledAccountCount} eligible enabled accounts for required ${response.deploymentValidation.requiredBuyAmount.toFixed(2)} ${response.deploymentValidation.quoteLabel}.`
           : 'Strategy configuration saved.',
-      );
-      await refresh();
-    });
-
-  const handleCleanupStrategyVersions = () =>
-    submitWithFeedback('strategy-cleanup', async () => {
-      if (
-        typeof window !== 'undefined' &&
-        !window.confirm(
-          'Clear all previous strategy versions and keep only the current active version?',
-        )
-      ) {
-        return;
-      }
-
-      const response = await api<{
-        deletedVersions: number;
-        deletedEvaluations: number;
-        activeStrategyVersion: EngineState['activeStrategyVersion'];
-      }>('/api/strategy/versions/cleanup', {
-        method: 'POST',
-      });
-
-      setNotice(
-        response.activeStrategyVersion
-          ? `Deleted ${response.deletedVersions} automatic strategy version(s) and ${response.deletedEvaluations} evaluation(s). Kept manual v${response.activeStrategyVersion.versionNo} active.`
-          : `Deleted ${response.deletedVersions} automatic strategy version(s) and ${response.deletedEvaluations} evaluation(s). No manual strategy version remains active.`,
       );
       await refresh();
     });

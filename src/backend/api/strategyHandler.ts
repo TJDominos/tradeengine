@@ -249,7 +249,7 @@ async function parseOptionalJsonObject(request: Request): Promise<unknown | null
 export async function handleStrategyRoutes(
   request: Request,
   env: Env,
-  ctx: ExecutionContext,
+  _ctx: ExecutionContext,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const { method } = request;

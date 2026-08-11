@@ -18,7 +18,7 @@ The product is **Solana-first** and **token-onboarding-first**. There is no pre-
 | Network | **Solana** |
 | Quote asset | **USDC** (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) |
 | Execution path | **Jupiter (jup.ag)** |
-| Execution status | Disabled (returns `501`) until the execution engine is implemented |
+| Execution status | Enabled through the strategy Durable Object and Jupiter v6 |
 
 ## Architecture
 
@@ -35,7 +35,7 @@ The product is **Solana-first** and **token-onboarding-first**. There is no pre-
 - Fetches and persists token market snapshots in D1, including price, FDV, liquidity, volume, transaction count, and outsider holder count.
 - Automatically initializes token market data when a tracked token is activated or explicitly added from the setup UI.
 - Accepts Alchemy Notify webhook events for the active trading token so on-chain activity is stored as signals and can trigger downstream strategy evaluation.
-- Returns `501 Not Implemented` for trade execution until a real executor exists.
+- Executes authenticated manual and strategy trades through Jupiter and persists strategy-run transaction logs in D1.
 
 ## D1 database binding
 
@@ -171,7 +171,7 @@ The CI workflow (`.github/workflows/deploy.yml`) automatically deploys on push t
 | POST | `/api/webhooks/alchemy/notify` | No | Verify the webhook signature, return `200`, then persist `signals` and trigger strategy evaluation in the background with D1-backed idempotency |
 | POST | `/api/private-keys/import` | Admin | Import + encrypt a managed private key |
 | POST | `/api/accounts/import` | Admin | Import a watch-only account |
-| POST | `/api/trade` | Admin | Trade (returns 501 – not implemented) |
+| POST | `/api/trade` | Admin | Submit an authenticated managed-wallet trade through Jupiter |
 
 ### Alchemy Notify webhook setup
 
@@ -231,8 +231,8 @@ The system will trade this token against USDC (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4w
 
 **What is not yet covered** (planned for later phases):
 
-- Balance synchronisation (on-chain → D1) — `accounts` holds no live balance; balances will be polled or pushed via webhooks when the executor is built.
-- Real-time PnL — `positions.realized_pnl` is populated by the executor; the current schema stores the field but no code writes to it yet.
+- Account and holder balances use persisted D1 snapshots refreshed from Solana RPC data.
+- P/L is derived from successful managed-account transaction logs using average cost, with remaining inventory marked against the latest stored market price. Sales without a transaction-log cost basis are not treated as pure profit.
 - Multi-user / role expansion — all tables are `user_id`-scoped, so adding roles is straightforward but not yet wired up.
 
 ## Security notes

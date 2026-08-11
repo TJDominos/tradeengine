@@ -223,6 +223,8 @@ export interface ExecutionReport {
   actualNetInflow: number;
   tacticsTriggeredCount: number;
   pnl: number;
+  realizedPnl?: number;
+  unrealizedPnl?: number;
   startTime: number;
   endTime: number;
   abortReason?: string;
@@ -250,6 +252,7 @@ export interface StrategyRecordConfig {
 }
 
 export interface StrategyRecord {
+  runNumber: number;
   versionId: string;
   status: StrategyStatus;
   config: StrategyRecordConfig;

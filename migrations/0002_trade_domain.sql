@@ -54,6 +54,37 @@ CREATE TABLE IF NOT EXISTS signals (
   UNIQUE(source, external_id)
 );
 
+CREATE TABLE IF NOT EXISTS webhook_transaction_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  group_key TEXT NOT NULL,
+  token_id INTEGER,
+  token_contract_address TEXT NOT NULL,
+  wallet_address TEXT,
+  from_wallet_address TEXT,
+  to_wallet_address TEXT,
+  action TEXT CHECK(action IN ('BUY', 'SELL', 'TRANSFER')),
+  usdc_amount REAL,
+  token_amount REAL,
+  fee_amount_usd REAL,
+  source TEXT NOT NULL DEFAULT 'webhook'
+    CHECK(source IN ('webhook', 'rpc_reconcile')),
+  event_type TEXT NOT NULL,
+  tx_signature TEXT,
+  status TEXT NOT NULL DEFAULT 'PENDING'
+    CHECK(status IN ('PENDING', 'CONFIRMED', 'FAILED')),
+  error_message TEXT,
+  detail_source TEXT NOT NULL DEFAULT 'unknown'
+    CHECK(detail_source IN ('payload', 'rpc', 'payload+rpc', 'unknown')),
+  details_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(user_id, group_key),
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY(token_id) REFERENCES tradable_tokens(id) ON DELETE SET NULL
+);
+
 -- ─── trade_logs ──────────────────────────────────────────────────────────────
 -- One row per proposed or executed trade, linked to a tradable token.
 -- Preserves both what was requested and what actually executed on-chain.

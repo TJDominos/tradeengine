@@ -216,7 +216,7 @@ function buildStrategyDocument(note, volumeUsd) {
       commitment: 'confirmed',
       timeJitterRatio: 0,
       volumeJitterRatio: 0,
-      macroObjective: 'shakeout',
+      macroObjective: 'distribution',
       tactics: {
         dumpRatio: 1.2,
         followSellRatio: 0.8,
@@ -261,8 +261,13 @@ try {
     '--persist-to',
     persistDir,
     '--command',
-    `INSERT INTO tradable_tokens (network, contract_address, symbol, name, decimals, is_active, created_at)
-     VALUES ('solana', ${toSqlString(contractAddress)}, 'SOL', 'Wrapped SOL', 9, 1, strftime('%s','now'))`,
+    `INSERT INTO tradable_tokens (
+       network, contract_address, base_token_address,
+       symbol, name, decimals, is_active, created_at
+     ) VALUES (
+       'solana', ${toSqlString(contractAddress)}, ${toSqlString(contractAddress)},
+       'SOL', 'Wrapped SOL', 9, 1, strftime('%s','now')
+     )`,
   ]);
 
   workerProcess = spawn(
@@ -329,10 +334,32 @@ try {
 
   const authHeaders = { Cookie: sessionCookie };
 
+  runWranglerJson([
+    'execute',
+    'tradingbot',
+    '--local',
+    '--persist-to',
+    persistDir,
+    '--command',
+    `INSERT INTO accounts (
+       user_id, type, label, wallet_address, created_at, is_active,
+       capability_base_mint, capability_quote_mint,
+       wallet_usdc_balance, wallet_sol_balance,
+       wallet_active_token_mint, wallet_active_token_balance, wallet_balance_updated_at
+     ) SELECT id, 'managed', 'CI Managed', ${toSqlString(walletAddress)}, strftime('%s','now'), 1,
+              ${toSqlString(contractAddress)}, 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+              1000, 1, ${toSqlString(contractAddress)}, 1000, strftime('%s','now') * 1000
+       FROM users WHERE username = 'ci-admin-idem';
+     INSERT INTO token_market_snapshots (
+       token_id, network, contract_address, base_token_address, price_usd, fetched_at
+     ) SELECT id, network, ${toSqlString(contractAddress)}, ${toSqlString(contractAddress)}, 1, strftime('%s','now') * 1000
+       FROM tradable_tokens WHERE base_token_address = ${toSqlString(contractAddress)}`,
+  ]);
+
   const activation = await requestJson('/api/strategy/active', {
     method: 'POST',
     headers: authHeaders,
-    body: JSON.stringify(buildStrategyDocument('ci-do-idempotency', 250)),
+    body: JSON.stringify(buildStrategyDocument('ci-do-idempotency', 100)),
   });
   const queueVersionId = activation.payload.queuedStrategy?.versionId;
   assert.ok(queueVersionId, 'strategy activation should enqueue a strategy');

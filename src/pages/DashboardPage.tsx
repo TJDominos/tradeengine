@@ -81,7 +81,6 @@ export default function DashboardPage({
 }: DashboardPageProps) {
   const hasActiveToken = Boolean(activeTokenContractAddress);
   const internalHolderCount = tokenHolderAggregate?.internalHolderCount ?? null;
-  const internalAmountHolding = tokenHolderAggregate?.internalAmountHolding ?? null;
   const outsiderHolderCount = tokenHolderAggregate?.outsiderHolderCount ?? null;
   const totalHolders = dashboardSnapshot?.totalHolders ?? null;
   const outsiderAmountHolding = tokenHolderAggregate

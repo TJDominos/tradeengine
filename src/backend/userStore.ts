@@ -8,7 +8,6 @@ import {
   generateToken,
   hashPassword,
   loadWalletBalance,
-  mergeStoredSignalTransactionDetails,
   normalizePrivateKey,
   normalizePubkey,
   parseStoredSignalTransactionDetails,
@@ -229,38 +228,6 @@ function readBaseTokenAmount(
 ): number {
   const baseBalance = walletBalance.tokens.find((token) => token.mint === baseMint);
   return Math.max(0, toFiniteNumber(baseBalance?.amount) ?? 0);
-}
-
-async function loadWalletBalancesByAddress(
-  accounts: AccountRecord[],
-  settings: SettingsState,
-  tradableTokens: Awaited<ReturnType<typeof dbListTradableTokens>>,
-  rpcUrls: string[],
-): Promise<Record<string, WalletBalanceResponse>> {
-  if (accounts.length === 0) {
-    return {};
-  }
-
-  const results = await Promise.allSettled(
-    accounts.map(async (account) => ({
-      address: account.address,
-      balance: await loadWalletBalance(
-        account.address,
-        settings,
-        tradableTokens,
-        rpcUrls,
-      ),
-    })),
-  );
-
-  const balances: Record<string, WalletBalanceResponse> = {};
-  for (const result of results) {
-    if (result.status !== 'fulfilled') {
-      continue;
-    }
-    balances[result.value.address] = result.value.balance;
-  }
-  return balances;
 }
 
 function buildWalletBalanceFromSnapshot(

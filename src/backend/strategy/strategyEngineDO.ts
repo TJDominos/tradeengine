@@ -2,7 +2,7 @@ import { ApiError } from '../errors';
 import { fetchJupiterTokenMetadata, fetchJupiterTokenPrice } from '../jupiter';
 import { dbFindTradableTokenByPair, dbGetLatestTokenMarketSnapshot, dbResolveTradableTokenId } from '../tokenStore';
 import { fetchSolanaMintDecimals, normalizePubkey } from '../workerCore';
-import { SOLANA_USDC_MINT, type Env } from '../workerShared';
+import type { Env } from '../workerShared';
 import type { EngineState, MacroObjective } from './engine';
 import { normalizeStrategyDocument } from './migrations';
 import {
@@ -22,7 +22,7 @@ import {
 import type { ExecutionReport, StrategyExecutionConfig, StrategyVersionDocument } from './types';
 import type { ExternalTradeEvent } from './triggers';
 import { initializeAllSchemas } from '../services/dbSetup';
-import { executeSwap } from '../services/jupiterSwapService';
+import { executeSwap, type JupiterSwapExecutionResult } from '../services/jupiterSwapService';
 import { getActiveAccounts } from '../services/accountPoolService';
 import { analyzeTradeDirection } from '../services/webhookParser';
 import { listManagedAccountsWithStoredBalances } from '../userStore';
@@ -50,6 +50,7 @@ export interface StrategyEngineDurableObjectMetrics {
 
 export interface StrategyEngineDurableObjectConfig {
   userId: number;
+  runId: string | null;
   versionId: number;
   baseTokenAddress: string;
   macroObjective: MacroObjective;
@@ -75,6 +76,7 @@ export interface StrategyEngineDurableObjectTask {
 
 export interface StrategyEngineDurableObjectConfigureRequest {
   userId: number;
+  runId?: string | null;
   versionId: number;
   strategyDocument: StrategyVersionDocument;
 }
@@ -188,7 +190,7 @@ function buildExecutionReportFromMetrics(
     actualTotalVolume: metrics.actualTotalVolumeUsd,
     actualNetInflow: metrics.actualNetInflowUsd,
     tacticsTriggeredCount: metrics.tacticsTriggeredCount,
-    pnl: metrics.actualNetInflowUsd,
+    pnl: 0,
     startTime: metrics.startTime,
     endTime: metrics.endTime ?? Date.now(),
     ...(abortReason ? { abortReason } : {}),
@@ -383,6 +385,7 @@ export class StrategyEngineDurableObject {
     const basePlannedTransactionCount = resolveBasePlannedTransactionCount(normalizedDocument);
     const nextConfig: StrategyEngineDurableObjectConfig = {
       userId: input.userId,
+      runId: input.runId ?? null,
       versionId: input.versionId,
       baseTokenAddress,
       macroObjective: normalizedDocument.execution.macroObjective,
@@ -404,6 +407,7 @@ export class StrategyEngineDurableObject {
     const previousConfig = this.persistedState.config;
     const configChanged =
       !previousConfig ||
+      previousConfig.runId !== nextConfig.runId ||
       previousConfig.versionId !== nextConfig.versionId ||
       previousConfig.baseTokenAddress !== nextConfig.baseTokenAddress ||
       previousConfig.macroObjective !== nextConfig.macroObjective;
@@ -902,9 +906,19 @@ export class StrategyEngineDurableObject {
             commitment: config.execution.commitment,
           },
         );
+        await this.persistSwapTradeLog(
+          task,
+          executableAccount.allocation,
+          swap,
+        );
         executedVolumeUsd += swap.executedVolumeUsd;
       } catch (error: unknown) {
         retryVolumeUsd += sliceVolumeUsd;
+        await this.persistFailedTradeLog(
+          task,
+          executableAccount.allocation,
+          error,
+        );
         console.error(
           `[StrategyEngineDO] Account ${executableAccount.signingAccount.publicKey} failed ${task.side} slice ${sliceVolumeUsd} on ${config.baseTokenAddress}:`,
           error,
@@ -916,6 +930,119 @@ export class StrategyEngineDurableObject {
       executedVolumeUsd,
       retryVolumeUsd: Number(retryVolumeUsd.toFixed(6)),
     };
+  }
+
+  private async persistSwapTradeLog(
+    task: StrategyEngineDurableObjectTask,
+    allocation: StrategyPlannerTaskAllocation,
+    swap: JupiterSwapExecutionResult,
+  ): Promise<void> {
+    const config = this.persistedState.config;
+    if (!config?.runId) {
+      return;
+    }
+    const tokenId = await dbResolveTradableTokenId(
+      this.env.TRADINGBOT_DB,
+      config.baseTokenAddress,
+    );
+    if (!tokenId) {
+      throw new ApiError(500, 'Cannot persist strategy trade without a tracked token');
+    }
+    const tokenRow = await this.env.TRADINGBOT_DB
+      .prepare('SELECT decimals FROM tradable_tokens WHERE id = ?1')
+      .bind(tokenId)
+      .first<{ decimals: number | null }>();
+    const decimals = tokenRow?.decimals;
+    if (decimals == null) {
+      throw new ApiError(500, 'Cannot persist strategy trade without token decimals');
+    }
+    const baseAmountAtomic = task.side === 'buy'
+      ? swap.outputAmountAtomic
+      : swap.inputAmountAtomic;
+    const baseAmount = Number(baseAmountAtomic) / 10 ** decimals;
+    const executedPrice = baseAmount > 0
+      ? swap.executedVolumeUsd / baseAmount
+      : null;
+    const executedAmount = task.side === 'buy'
+      ? baseAmount
+      : swap.executedVolumeUsd;
+    const timestamp = Date.now();
+
+    await this.env.TRADINGBOT_DB
+      .prepare(
+        `INSERT INTO trade_logs (
+           strategy_run_id, token_id, wallet_address, action,
+           requested_amount, executed_amount, executed_price, tx_signature,
+           execution_trace_json, status, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'SUCCESS', ?10, ?10)`,
+      )
+      .bind(
+        config.runId,
+        tokenId,
+        allocation.walletAddress,
+        task.side.toUpperCase(),
+        allocation.plannedVolumeUsd,
+        executedAmount,
+        executedPrice,
+        swap.txid,
+        JSON.stringify({
+          runId: config.runId,
+          strategyVersionId: config.versionId,
+          taskId: task.id,
+          side: task.side,
+          accountId: allocation.accountId,
+          baseAmount,
+          executedVolumeUsd: swap.executedVolumeUsd,
+          inputAmountAtomic: swap.inputAmountAtomic,
+          outputAmountAtomic: swap.outputAmountAtomic,
+        }),
+        timestamp,
+      )
+      .run();
+  }
+
+  private async persistFailedTradeLog(
+    task: StrategyEngineDurableObjectTask,
+    allocation: StrategyPlannerTaskAllocation,
+    error: unknown,
+  ): Promise<void> {
+    const config = this.persistedState.config;
+    if (!config?.runId) {
+      return;
+    }
+    const tokenId = await dbResolveTradableTokenId(
+      this.env.TRADINGBOT_DB,
+      config.baseTokenAddress,
+    );
+    if (!tokenId) {
+      return;
+    }
+    const timestamp = Date.now();
+    await this.env.TRADINGBOT_DB
+      .prepare(
+        `INSERT INTO trade_logs (
+           strategy_run_id, token_id, wallet_address, action,
+           requested_amount, execution_trace_json, status, error_message,
+           created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'FAILED', ?7, ?8, ?8)`,
+      )
+      .bind(
+        config.runId,
+        tokenId,
+        allocation.walletAddress,
+        task.side.toUpperCase(),
+        allocation.plannedVolumeUsd,
+        JSON.stringify({
+          runId: config.runId,
+          strategyVersionId: config.versionId,
+          taskId: task.id,
+          side: task.side,
+          accountId: allocation.accountId,
+        }),
+        error instanceof Error ? error.message : String(error),
+        timestamp,
+      )
+      .run();
   }
 
   private async resolveSwapInput(

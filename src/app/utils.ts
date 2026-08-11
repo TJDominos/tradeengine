@@ -6,7 +6,6 @@ import type {
   EngineState,
   HistoricalSetup,
   SettingsState,
-  TokenMarketSnapshot,
   TradableToken,
   WalletBalance,
   WalletOwnershipMeta,
@@ -235,14 +234,4 @@ export function getLogsForSetup(
   return logs
     .filter((log) => log.createdAt >= current.createdAt && log.createdAt < newerBoundary)
     .slice(0, 8);
-}
-
-export function loadStoredString(key: string, fallback: string): string {
-  if (typeof window === 'undefined') return fallback;
-  return window.localStorage.getItem(key) ?? fallback;
-}
-
-export function saveStoredString(key: string, value: string) {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(key, value);
 }

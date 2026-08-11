@@ -2,7 +2,6 @@ import React from 'react';
 import { Key, Search, Shield, Trash2 } from 'lucide-react';
 
 import {
-  MAX_RECOVERY_PHRASE_WORD_COUNT,
   RECOVERY_PHRASE_WORD_COUNTS,
 } from '../app/constants';
 import type { AccountRecord, DerivedAccountPreview, WalletBalance } from '../app/types';

@@ -71,11 +71,6 @@ const tacticConfig: Record<
   },
 };
 
-function parseNumber(value: string): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 function parseBlankableNumber(value: string): number | null {
   if (value.trim() === '') {
     return null;
@@ -153,13 +148,6 @@ function contractPreview(contractAddress: string): string {
     return contractAddress || 'No token selected';
   }
   return `${contractAddress.slice(0, 8)}...${contractAddress.slice(-8)}`;
-}
-
-function mintPreview(mintAddress: string): string {
-  if (mintAddress.length <= 18) {
-    return mintAddress || 'Not configured';
-  }
-  return `${mintAddress.slice(0, 8)}...${mintAddress.slice(-8)}`;
 }
 
 function registryPairLabel(token: TradableToken): string {

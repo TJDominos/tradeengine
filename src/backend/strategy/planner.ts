@@ -131,7 +131,6 @@ function splitAccountAmountIntoOrders(
   if (normalizedAmount + MIN_VOLUME_EPSILON < orderCount * minOrderUsd) {
     return null;
   }
-  const baseAmount = normalizedAmount / orderCount;
   const orders: PlannedAccountOrder[] = [];
   let remaining = normalizedAmount;
   for (let index = 0; index < orderCount; index += 1) {
@@ -157,23 +156,51 @@ function allocateNetBuyOrders(
   minOrderUsd: number,
   maxOrderUsd: number,
 ): PlannedAccountOrder[] | null {
-  let remaining = roundToSixDecimals(targetUsd);
   const allocations: PlannedAccountOrder[] = [];
   const fundedAccounts = accounts
     .filter((account) => account.pairCompatible && account.buyRemainingQuoteUsd >= minOrderUsd)
-    .sort((left, right) => right.buyRemainingQuoteUsd - left.buyRemainingQuoteUsd);
+    .sort((left, right) => left.accountId - right.accountId);
+  const usableAccountCount = Math.min(
+    fundedAccounts.length,
+    Math.max(1, Math.floor(targetUsd / minOrderUsd)),
+  );
+  const selectedAccounts = fundedAccounts.slice(0, usableAccountCount);
+  const accountAmounts = new Map<number, number>();
+  let remaining = roundToSixDecimals(targetUsd);
+  let activeAccounts = [...selectedAccounts];
 
-  for (let index = 0; index < fundedAccounts.length && remaining > MIN_VOLUME_EPSILON; index += 1) {
-    const account = fundedAccounts[index]!;
-    const remainingCapacity = fundedAccounts
-      .slice(index + 1)
-      .reduce((sum, candidate) => sum + candidate.buyRemainingQuoteUsd, 0);
-    const amountUsd = roundToSixDecimals(
-      Math.min(account.buyRemainingQuoteUsd, remaining),
-    );
-    if (remaining - amountUsd > remainingCapacity + MIN_VOLUME_EPSILON) {
-      return null;
+  while (remaining > MIN_VOLUME_EPSILON && activeAccounts.length > 0) {
+    const equalShare = roundToSixDecimals(remaining / activeAccounts.length);
+    let distributed = 0;
+    const nextActiveAccounts: MutablePlannerAccount[] = [];
+    for (const account of activeAccounts) {
+      const alreadyAllocated = accountAmounts.get(account.accountId) ?? 0;
+      const available = roundToSixDecimals(
+        Math.max(0, account.buyRemainingQuoteUsd - alreadyAllocated),
+      );
+      const amountUsd = roundToSixDecimals(Math.min(equalShare, available));
+      accountAmounts.set(
+        account.accountId,
+        roundToSixDecimals(alreadyAllocated + amountUsd),
+      );
+      distributed = roundToSixDecimals(distributed + amountUsd);
+      if (available - amountUsd > MIN_VOLUME_EPSILON) {
+        nextActiveAccounts.push(account);
+      }
     }
+    if (distributed <= MIN_VOLUME_EPSILON) {
+      break;
+    }
+    remaining = roundToSixDecimals(remaining - distributed);
+    activeAccounts = nextActiveAccounts;
+  }
+
+  if (remaining > MIN_VOLUME_EPSILON) {
+    return null;
+  }
+
+  for (const account of selectedAccounts) {
+    const amountUsd = accountAmounts.get(account.accountId) ?? 0;
     const accountOrders = splitAccountAmountIntoOrders(
       account,
       amountUsd,
@@ -184,10 +211,9 @@ function allocateNetBuyOrders(
       return null;
     }
     allocations.push(...accountOrders);
-    remaining = roundToSixDecimals(remaining - amountUsd);
   }
 
-  return remaining <= MIN_VOLUME_EPSILON ? allocations : null;
+  return allocations;
 }
 
 function buildAccountAwareSelfCyclingTasks(input: {

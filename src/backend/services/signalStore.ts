@@ -1,39 +1,26 @@
-import { ApiError } from '../errors';
 import {
   fetchJupiterPriceViaQuote,
   fetchJupiterTokenPrice,
 } from '../jupiter';
-import { summarizeStrategyRuntime } from '../strategy/runtime';
-import { buildWebhookStrategyTrigger } from '../strategy/triggers';
-import { nowTs, normalizeTimestampMs } from '../time';
+import { nowTs } from '../time';
 import { dbFindTradableTokenById, dbResolveTradableTokenId } from '../tokenStore';
-import {
-  dbAddAuditLog,
-  dbLoadSettings,
-} from '../userStore';
 import { dbRecomputeTokenHolderAggregate } from '../tokenHolders';
 import type {
-  Env,
   SignalCreateRequest,
   SignalRecord,
   StoredSignalTransactionDetails,
-  TokenMarketSnapshot,
   TradeLogCreateRequest,
 } from '../workerShared';
 import { parseJsonText } from '../workerSchema';
 import {
   extractStoredSignalContractAddresses,
-  extractWebhookTransactionDetailsFromPayload,
   mergeStoredSignalTransactionDetails,
-  normalizePubkey,
   parseStoredSignalTransactionDetails,
   solanaRpc,
   tryNormalizeSolanaPubkey,
   uniqueSolanaPubkeys,
 } from '../workerCore';
 import { SOLANA_USDC_MINT, SOLANA_WRAPPED_SOL_MINT } from '../workerShared';
-import { runAndPersistStrategyEvaluation } from './strategyStore';
-import { syncTokenMarketSnapshotForUser } from './tokenMarketService';
 
 export function applyAmmPoolDirectionCorrection(
   details: StoredSignalTransactionDetails,

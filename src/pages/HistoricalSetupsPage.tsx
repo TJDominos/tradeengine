@@ -2,11 +2,9 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
-  Clock3,
   FileText,
   LoaderCircle,
   Play,
-  SquareChartGantt,
   Trash2,
 } from 'lucide-react';
 import React from 'react';
@@ -39,6 +37,7 @@ type QueueStrategyConfig = {
 };
 
 type QueueStrategyRecord = {
+  runNumber: number;
   versionId: string;
   status: 'pending' | 'running' | 'completed' | 'aborted' | 'failed' | 'paused';
   config: QueueStrategyConfig;
@@ -75,9 +74,10 @@ function titleCase(value: string): string {
 }
 
 function strategyVersionLabel(record: QueueStrategyRecord): string {
-  return record.config.strategyVersionNo != null
+  const versionLabel = record.config.strategyVersionNo != null
     ? `v${record.config.strategyVersionNo}`
     : record.versionId.slice(0, 8);
+  return `Run #${record.runNumber} · ${versionLabel}`;
 }
 
 function resolveDisplayStatus(record: QueueStrategyRecord): string {

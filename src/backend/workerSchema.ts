@@ -155,6 +155,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   )`,
   `CREATE TABLE IF NOT EXISTS trade_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_run_id TEXT,
     token_id INTEGER NOT NULL,
     signal_id INTEGER,
     setup_id INTEGER,
@@ -353,6 +354,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
   'CREATE INDEX IF NOT EXISTS idx_token_market_snapshots_contract_fetched ON token_market_snapshots(network, base_token_address, fetched_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_token_created ON trade_logs(token_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_trade_logs_wallet_created ON trade_logs(wallet_address, created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS idx_trade_logs_strategy_run ON trade_logs(strategy_run_id, created_at ASC, id ASC)',
   'CREATE INDEX IF NOT EXISTS idx_strategy_definitions_user_type ON strategy_definitions(user_id, strategy_type)',
   'CREATE INDEX IF NOT EXISTS idx_strategy_versions_strategy_created ON strategy_versions(strategy_id, created_at DESC)',
   'CREATE INDEX IF NOT EXISTS idx_strategy_evaluations_version_created ON strategy_evaluations(strategy_version_id, created_at DESC)',
@@ -636,6 +638,12 @@ export async function dbEnsureTradeDomainSchema(db: D1Database): Promise<void> {
           )
           .bind(SOLANA_USDC_MINT)
           .run();
+        await dbEnsureTableColumn(
+          db,
+          'trade_logs',
+          'strategy_run_id',
+          'TEXT',
+        );
         await dbEnsureTableColumn(
           db,
           'trade_logs',
