@@ -2,6 +2,7 @@ import { ApiError } from './errors';
 
 const SOLANA_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const JUPITER_SWAP_API_BASE_URL = 'https://lite-api.jup.ag/swap/v1';
+const JUPITER_SWAP_V2_API_BASE_URL = 'https://api.jup.ag/swap/v2';
 
 export interface JupiterTokenMetadata {
   address: string;
@@ -33,6 +34,30 @@ export type JupiterQuoteResponse = {
   contextSlot?: number;
 };
 
+export interface JupiterSwapOrderResponse extends JupiterQuoteResponse {
+  transaction: string | null;
+  requestId: string;
+  router: 'metis' | 'jupiterz' | 'dflow' | 'okx';
+  mode: string;
+  gasless: boolean;
+  signatureFeePayer: string | null;
+  feeBps: number;
+  feeMint: string;
+  errorCode?: number;
+  errorMessage?: string;
+}
+
+export interface JupiterSwapExecuteResponse {
+  status: 'Success' | 'Failed';
+  signature: string;
+  code: number;
+  totalInputAmount: string;
+  totalOutputAmount: string;
+  inputAmountResult: string;
+  outputAmountResult: string;
+  error?: string;
+}
+
 export interface JupiterSwapRequestPayload {
   quoteResponse: JupiterQuoteResponse;
   userPublicKey: string;
@@ -61,6 +86,85 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0
     ? value.trim()
     : null;
+}
+
+function jupiterApiHeaders(apiKey?: string): HeadersInit {
+  const normalizedApiKey = apiKey?.trim();
+  return {
+    Accept: 'application/json',
+    ...(normalizedApiKey ? { 'x-api-key': normalizedApiKey } : {}),
+  };
+}
+
+export async function fetchJupiterSwapOrder(
+  inputMint: string,
+  outputMint: string,
+  amountAtomicUnits: string,
+  taker: string,
+  slippageBps: number,
+  apiKey?: string,
+): Promise<JupiterSwapOrderResponse> {
+  const url = new URL(`${JUPITER_SWAP_V2_API_BASE_URL}/order`);
+  url.searchParams.set('inputMint', inputMint);
+  url.searchParams.set('outputMint', outputMint);
+  url.searchParams.set('amount', amountAtomicUnits);
+  url.searchParams.set('taker', taker);
+  url.searchParams.set('slippageBps', String(slippageBps));
+
+  const response = await fetch(url.toString(), {
+    headers: jupiterApiHeaders(apiKey),
+  });
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new ApiError(
+      502,
+      `Jupiter order request failed (${response.status}): ${errorText.slice(0, 200)}`,
+    );
+  }
+  const order = await response.json<JupiterSwapOrderResponse>();
+  if (!order.transaction) {
+    throw new ApiError(
+      502,
+      `Jupiter ${order.router ?? 'unknown'} order ${order.errorCode ?? 'unknown'} could not build a transaction: ${order.errorMessage ?? 'Unknown error'}`,
+    );
+  }
+  if (!order.gasless || !order.signatureFeePayer || order.signatureFeePayer === taker) {
+    throw new ApiError(
+      409,
+      'Jupiter did not provide a gasless route for this order; the managed wallet will not be charged SOL',
+    );
+  }
+  return order;
+}
+
+export async function executeJupiterSwapOrder(
+  signedTransaction: string,
+  requestId: string,
+  apiKey?: string,
+): Promise<JupiterSwapExecuteResponse> {
+  const response = await fetch(`${JUPITER_SWAP_V2_API_BASE_URL}/execute`, {
+    method: 'POST',
+    headers: {
+      ...jupiterApiHeaders(apiKey),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ signedTransaction, requestId }),
+  });
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    throw new ApiError(
+      502,
+      `Jupiter execute request failed (${response.status}): ${errorText.slice(0, 200)}`,
+    );
+  }
+  const result = await response.json<JupiterSwapExecuteResponse>();
+  if (result.status !== 'Success' || result.code !== 0 || !result.signature) {
+    throw new ApiError(
+      502,
+      `Jupiter gasless execution failed (${result.code}): ${result.error ?? 'Unknown error'}`,
+    );
+  }
+  return result;
 }
 
 export async function fetchJupiterTokenMetadata(

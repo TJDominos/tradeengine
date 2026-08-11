@@ -345,8 +345,6 @@ function buildAccountAwareSelfCyclingTasks(input: {
   );
   let sellOrders: PlannedAccountOrder[] | null = null;
   let netBuyOrders: PlannedAccountOrder[] | null = null;
-  let sellOrderCount = input.taskSpecs[0].orderCount;
-  let buyOrderCount = input.taskSpecs[1].orderCount;
   const countRandom = createDeterministicRandom(`${input.seedBase}:self-cycling:trade-count`);
   const candidateTotals = Array.from(
     { length: Math.max(0, input.config.maxOrderCount - input.config.baseOrderCount + 1) },
@@ -404,8 +402,6 @@ function buildAccountAwareSelfCyclingTasks(input: {
       if (candidateSellOrders && candidateNetBuyOrders) {
         sellOrders = candidateSellOrders;
         netBuyOrders = candidateNetBuyOrders;
-        sellOrderCount = candidateSellCount;
-        buyOrderCount = candidateBuyCount;
         break;
       }
     }
@@ -485,20 +481,14 @@ function buildAccountAwareSelfCyclingTasks(input: {
     strictOrderCount: true,
     random: createDeterministicRandom(`${input.seedBase}:self-cycling:schedule`),
   });
-  const sideOrderIndices = { buy: 0, sell: 0 };
-  const totalOrdersBySide = {
-    buy: buyOrderCount,
-    sell: sellOrderCount,
-  };
   const tasks = rankedOrders.map((entry, index) => {
-    sideOrderIndices[entry.side] += 1;
     const spec = entry.side === 'buy' ? input.taskSpecs[1] : input.taskSpecs[0];
     return {
-      taskId: `${spec.pulse ?? entry.side}-${entry.side}-${sideOrderIndices[entry.side]}`,
+      taskId: `${spec.pulse ?? entry.side}-${entry.side}-${index + 1}`,
       side: entry.side,
       pulse: spec.pulse,
-      orderIndex: sideOrderIndices[entry.side],
-      totalOrders: totalOrdersBySide[entry.side],
+      orderIndex: index + 1,
+      totalOrders: rankedOrders.length,
       scheduledAt: schedulePlan.slices[index]?.scheduledAt ?? input.startTime,
       totalVolumeUsd: entry.order.volumeUsd,
       unallocatedVolumeUsd: 0,

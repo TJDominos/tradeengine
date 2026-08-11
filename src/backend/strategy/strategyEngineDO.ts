@@ -1142,12 +1142,6 @@ export class StrategyEngineDurableObject {
     let lastError: string | null = retryVolumeUsd > 0
       ? 'Task volume could not be allocated to an active account'
       : null;
-    const rpcUrls = await dbResolveSolanaRpcUrls(
-      this.env.TRADINGBOT_DB,
-      config.userId,
-      this.env.RPC_URL?.trim() || this.env.SOLANA_RPC_URL,
-    );
-
     for (const executableAccount of executableAccounts) {
       const sliceVolumeUsd = executableAccount.allocation.plannedVolumeUsd;
       if (!Number.isFinite(sliceVolumeUsd) || sliceVolumeUsd <= 0) {
@@ -1168,8 +1162,6 @@ export class StrategyEngineDurableObject {
           swapInput.quoteToken,
           {
             slippageBps: Math.max(1, config.strategyDocument.parameters.maxSlippageBps),
-            commitment: config.execution.commitment,
-            rpcUrls,
           },
         );
         await this.persistSwapTradeLog(

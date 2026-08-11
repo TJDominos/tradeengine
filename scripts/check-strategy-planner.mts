@@ -258,6 +258,15 @@ assert.equal(
 );
 assert.ok(planning.tasks.every((task) => task.allocations.length > 0), 'every task should have an account allocation');
 assert.ok(planning.tasks.every((task) => task.allocations.length === 1), 'each planned task must map to exactly one on-chain transaction');
+assert.deepEqual(
+  planning.tasks.map((task) => task.orderIndex),
+  planning.tasks.map((_, index) => index + 1),
+  'preview order indices should form one global sequence across buy and sell tasks',
+);
+assert.ok(
+  planning.tasks.every((task) => task.totalOrders === planning.tasks.length),
+  'every preview task should display the same global order total',
+);
 assert.equal(
   new Set(
     planning.tasks

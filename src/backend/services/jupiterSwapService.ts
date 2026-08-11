@@ -1,15 +1,13 @@
 import bs58 from 'bs58';
 import {
-  Connection,
   Keypair,
   VersionedTransaction,
-  type Commitment,
 } from '@solana/web3.js';
 
 import { ApiError } from '../errors';
 import {
-  buildJupiterSwapTransactionWithTrace,
-  fetchJupiterSwapQuote,
+  executeJupiterSwapOrder,
+  fetchJupiterSwapOrder,
   type JupiterQuoteResponse,
 } from '../jupiter';
 import { SOLANA_USDC_MINT, type Env } from '../workerShared';
@@ -33,21 +31,6 @@ export interface JupiterSwapExecutionResult {
 export interface JupiterSwapSigner {
   publicKey: string;
   privateKey: Uint8Array | string;
-}
-
-function resolveRpcUrls(env: Env, configuredRpcUrls?: string[]): string[] {
-  const rpcUrls = [
-    ...(configuredRpcUrls ?? []),
-    env.RPC_URL?.trim() ?? '',
-    env.SOLANA_RPC_URL?.trim() ?? '',
-  ].filter((rpcUrl, index, values) => rpcUrl && values.indexOf(rpcUrl) === index);
-  if (rpcUrls.length === 0) {
-    throw new ApiError(
-      500,
-      'An active Solana RPC endpoint must be configured for Jupiter swap execution',
-    );
-  }
-  return rpcUrls;
 }
 
 function decodeSignerKeypair(privateKey: Uint8Array | string): Keypair {
@@ -124,62 +107,34 @@ export async function executeSwap(
   quoteToken: string,
   options?: {
     slippageBps?: number;
-    commitment?: Commitment;
-    rpcUrls?: string[];
   },
 ): Promise<JupiterSwapExecutionResult> {
-  const rpcUrls = resolveRpcUrls(env, options?.rpcUrls);
-  const commitment = options?.commitment ?? 'confirmed';
   const slippageBps = Math.max(1, Math.round(options?.slippageBps ?? DEFAULT_JUPITER_SLIPPAGE_BPS));
   const normalizedAmount = normalizeAtomicAmount(amount);
   const inputMint = side === 'buy' ? quoteToken : baseToken;
   const outputMint = side === 'buy' ? baseToken : quoteToken;
 
-  const quoteResponse = await fetchJupiterSwapQuote(
+  const order = await fetchJupiterSwapOrder(
     inputMint,
     outputMint,
     normalizedAmount,
-    slippageBps,
-  );
-
-  const swapBuild = await buildJupiterSwapTransactionWithTrace(
-    quoteResponse,
     keypair.publicKey,
+    slippageBps,
+    env.JUPITER_API_KEY,
   );
   const transaction = VersionedTransaction.deserialize(
-    swapBuild.swapTransactionBytes,
+    Uint8Array.from(atob(order.transaction!), (character) => character.charCodeAt(0)),
   );
   signVersionedTransaction(transaction, keypair);
-
-  let txid = '';
-  let confirmed = false;
-  let lastRpcError: unknown = null;
-  for (const rpcUrl of rpcUrls) {
-    try {
-      const connection = new Connection(rpcUrl, commitment);
-      txid = await connection.sendRawTransaction(transaction.serialize(), {
-        skipPreflight: false,
-        maxRetries: 3,
-        preflightCommitment: commitment,
-      });
-      const confirmation = await connection.confirmTransaction(txid, commitment);
-      if (confirmation.value.err) {
-        throw new ApiError(
-          502,
-          `Solana transaction ${txid} failed: ${JSON.stringify(confirmation.value.err)}`,
-        );
-      }
-      confirmed = true;
-      break;
-    } catch (error: unknown) {
-      lastRpcError = error;
-    }
-  }
-  if (!confirmed) {
-    throw lastRpcError instanceof Error
-      ? lastRpcError
-      : new ApiError(502, 'All configured Solana RPC endpoints failed');
-  }
+  let signedTransaction = '';
+  transaction.serialize().forEach((byte) => {
+    signedTransaction += String.fromCharCode(byte);
+  });
+  const execution = await executeJupiterSwapOrder(
+    btoa(signedTransaction),
+    order.requestId,
+    env.JUPITER_API_KEY,
+  );
 
   if (inputMint !== SOLANA_USDC_MINT && outputMint !== SOLANA_USDC_MINT) {
     throw new ApiError(
@@ -188,10 +143,10 @@ export async function executeSwap(
     );
   }
 
-  const executedAmountAtomic = quoteResponse.outAmount;
+  const executedAmountAtomic = execution.totalOutputAmount;
   const executedAmount = Number(executedAmountAtomic);
   const executedVolumeUsdAtomic =
-    side === 'buy' ? quoteResponse.inAmount : quoteResponse.outAmount;
+    side === 'buy' ? execution.totalInputAmount : execution.totalOutputAmount;
   const executedVolumeUsd = Number(executedVolumeUsdAtomic) / 10 ** USDC_DECIMALS;
 
   if (!Number.isFinite(executedAmount) || !Number.isFinite(executedVolumeUsd)) {
@@ -199,15 +154,15 @@ export async function executeSwap(
   }
 
   return {
-    txid,
+    txid: execution.signature,
     executedAmountAtomic,
     executedAmount,
     executedVolumeUsd,
     inputMint,
     outputMint,
-    inputAmountAtomic: quoteResponse.inAmount,
-    outputAmountAtomic: quoteResponse.outAmount,
+    inputAmountAtomic: execution.totalInputAmount,
+    outputAmountAtomic: execution.totalOutputAmount,
     slippageBps,
-    quoteResponse,
+    quoteResponse: order,
   };
 }

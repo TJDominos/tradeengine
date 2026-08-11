@@ -12,6 +12,7 @@ export interface Env {
   PRIVATE_KEY_ENCRYPTION_KEY?: string;
   RPC_URL?: string;
   SOLANA_RPC_URL?: string;
+  JUPITER_API_KEY?: string;
   ALCHEMY_WEBHOOK_SIGNING_KEY?: string;
   ALCHEMY_WEBHOOK_SECRET?: string;
 }

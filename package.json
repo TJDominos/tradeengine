@@ -17,6 +17,7 @@
     "check:strategy-task-retry": "npx --yes tsx scripts/check-strategy-task-retry.mts",
     "check:strategy-planner": "npx --yes tsx scripts/check-strategy-planner.mts",
     "check:auto-signing": "npx --yes tsx scripts/check-auto-signing.mts",
+    "check:jupiter-gasless": "npx --yes tsx scripts/check-jupiter-gasless.mts",
     "check:trade-pnl": "npx --yes tsx scripts/check-trade-pnl.mts",
     "check:max-lines": "node scripts/check-max-lines.mjs",
     "cleanup:token-account-holders": "node scripts/cleanup-token-account-holders.mjs",
