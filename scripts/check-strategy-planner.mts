@@ -10,6 +10,7 @@ import { buildStrategyPriceCurveReview } from '../src/backend/strategy/priceCurv
 import {
   allocateBoundedOrderVolume,
   calculateFeasibleTradeCounts,
+  calculateRemainingPlanVolumes,
   calculateSelfCyclingTradeTotals,
 } from '../src/backend/strategy/plannerMath';
 import { buildStrategyDocumentFromSettings } from '../src/backend/strategy/runtime';
@@ -25,6 +26,34 @@ assert.deepEqual(totals, {
   grossVolumeUsd: 150,
   netBuyVolumeUsd: 100,
 });
+
+assert.deepEqual(
+  calculateRemainingPlanVolumes(125, 25, [
+    { side: 'buy', volumeUsd: 30, source: 'managed' },
+    { side: 'sell', volumeUsd: 10, source: 'managed' },
+    {
+      side: 'sell',
+      volumeUsd: 40,
+      source: 'external',
+      responseBuyVolumeUsd: 20,
+    },
+    {
+      side: 'sell',
+      volumeUsd: 10,
+      source: 'external',
+      responseBuyVolumeUsd: 5,
+    },
+  ]),
+  {
+    desiredBuyVolumeUsd: 150,
+    desiredSellVolumeUsd: 25,
+    executedBuyVolumeUsd: 30,
+    executedSellVolumeUsd: 10,
+    remainingBuyVolumeUsd: 120,
+    remainingSellVolumeUsd: 15,
+  },
+  'event replanning should include every managed fill and every external response',
+);
 
 const feasibleCounts = calculateFeasibleTradeCounts(20, 50, 125, 25, 5, 30);
 assert.ok(feasibleCounts, 'trade counts should be feasible within the configured bounds');
@@ -266,7 +295,7 @@ const transactionCapPlanning = buildStrategyPlanningResult({
   document,
   config: {
     ...config,
-    maxOrderCount: 21,
+    maxOrderCount: 19,
   },
   accounts,
   taskSpecs,
@@ -274,7 +303,7 @@ const transactionCapPlanning = buildStrategyPlanningResult({
   baseTokenPriceUsd: 1,
   seedContext: 'planner-transaction-cap',
 });
-assert.equal(transactionCapPlanning.isExecutable, false, 'planner should reject a max transaction count below the computed feasible minimum');
+assert.equal(transactionCapPlanning.isExecutable, false, 'planner should reject a max transaction count below the configured minimum');
 
 const changedConfig = {
   ...config,
@@ -426,6 +455,112 @@ assert.equal(
   accumulation25Plan.isExecutable,
   true,
   'optional volatility review must not block an otherwise executable plan',
+);
+
+const wltUsdcAccounts = [
+  ...Array.from({ length: 3 }, (_, index) => buildAccount(index + 1, 100 / 3, 0)),
+  ...Array.from({ length: 31 }, (_, index) => buildAccount(index + 4, 0, 10)),
+  ...Array.from({ length: 62 }, (_, index) => buildAccount(index + 35, 0, 0)),
+];
+const wltUsdcPlanning = buildStrategyPlanningResult({
+  document: accumulation25Document,
+  config: accumulation25Config,
+  accounts: wltUsdcAccounts,
+  taskSpecs: accumulation25Specs,
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'wlt-usdc-34-tradable-accounts',
+});
+assert.equal(wltUsdcPlanning.isExecutable, true);
+assert.equal(wltUsdcPlanning.eligibleTradingAccountCount, 34);
+assert.equal(wltUsdcPlanning.eligibleBuyAccountCount, 3);
+assert.equal(wltUsdcPlanning.skippedForNoPairAssetCount, 62);
+assert.ok(
+  new Set(wltUsdcPlanning.tasks.flatMap((task) =>
+    task.allocations.map((allocation) => allocation.accountId),
+  )).size > 3,
+  'feasible tasks must be dispersed beyond a single account',
+);
+assert.ok(
+  new Set(wltUsdcPlanning.tasks
+    .filter((task) => task.side === 'sell')
+    .flatMap((task) => task.allocations.map((allocation) => allocation.accountId)),
+  ).size > 1,
+  'sell orders must use multiple funded base-asset accounts when order count permits',
+);
+assert.ok(
+  wltUsdcPlanning.tasks.every((task, index, tasks) =>
+    index < 2 ||
+    task.side !== tasks[index - 1]?.side ||
+    task.side !== tasks[index - 2]?.side ||
+    !tasks.slice(index + 1).some((laterTask) => laterTask.side !== task.side),
+  ),
+  'seeded scheduling should avoid three same-side orders while the opposite side remains',
+);
+
+const accumulation20Document = {
+  ...accumulation25Document,
+  parameters: {
+    ...accumulation25Document.parameters,
+    minTransactions: 20,
+  },
+};
+const accumulation20Config = {
+  ...accumulation25Config,
+  baseOrderCount: resolveBasePlannedTransactionCount(accumulation20Document),
+};
+const accumulation20Planning = buildStrategyPlanningResult({
+  document: accumulation20Document,
+  config: accumulation20Config,
+  accounts: wltUsdcAccounts,
+  taskSpecs: buildStrategyPlanTaskSpecs(accumulation20Config, 100),
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'wlt-usdc-minimum-20-trades',
+});
+assert.equal(
+  accumulation20Planning.isExecutable,
+  true,
+  JSON.stringify({
+    specs: buildStrategyPlanTaskSpecs(accumulation20Config, 100),
+    requestedTaskCount: accumulation20Planning.requestedTaskCount,
+    plannedTaskCount: accumulation20Planning.plannedTaskCount,
+    unallocatedVolumeUsd: accumulation20Planning.unallocatedVolumeUsd,
+  }),
+);
+assert.equal(accumulation20Planning.requestedTaskCount, 20);
+assert.ok(
+  accumulation20Planning.plannedTaskCount >= 20 && accumulation20Planning.plannedTaskCount <= 36,
+  'trade count must stay between the configured minimum and the volume/min-order ceiling',
+);
+assert.ok(
+  new Set(accumulation20Planning.tasks.flatMap((task) =>
+    task.allocations.map((allocation) => allocation.accountId),
+  )).size >= 10,
+  '20 trades should use at least 10 eligible accounts when pair balances permit',
+);
+const diverseAccumulation20Counts = new Set(
+  Array.from({ length: 32 }, (_, index) => buildStrategyPlanningResult({
+    document: accumulation20Document,
+    config: accumulation20Config,
+    accounts: wltUsdcAccounts,
+    taskSpecs: buildStrategyPlanTaskSpecs(accumulation20Config, 100),
+    startTime: 1_000,
+    baseTokenPriceUsd: 1,
+    seedContext: `wlt-usdc-diverse-count-${index}`,
+  }).plannedTaskCount),
+);
+assert.ok(diverseAccumulation20Counts.size > 1, 'different seeds should produce diverse feasible trade counts');
+assert.ok(
+  [...diverseAccumulation20Counts].every((count) => count >= 20 && count <= 36),
+  'all randomized counts must stay within configured and mathematical bounds',
+);
+
+const impossibleMinimumCounts = calculateFeasibleTradeCounts(20, 50, 80, 5, 5, 30);
+assert.equal(
+  impossibleMinimumCounts,
+  null,
+  'a mathematically impossible minimum must be rejected instead of silently reduced to 17',
 );
 
 console.log('Strategy planner check passed. Eligibility and executable transaction count are correct.');

@@ -12,6 +12,49 @@ export type FeasibleTradeCounts = {
   sellCount: number;
 };
 
+export type ObservedPlanOrder = {
+  side: 'buy' | 'sell';
+  volumeUsd: number;
+  source: 'managed' | 'external';
+  responseBuyVolumeUsd?: number;
+  responseSellVolumeUsd?: number;
+};
+
+export function calculateRemainingPlanVolumes(
+  baseBuyVolumeUsd: number,
+  baseSellVolumeUsd: number,
+  observedOrders: ObservedPlanOrder[],
+) {
+  let desiredBuyVolumeUsd = Math.max(0, baseBuyVolumeUsd);
+  let desiredSellVolumeUsd = Math.max(0, baseSellVolumeUsd);
+  let executedBuyVolumeUsd = 0;
+  let executedSellVolumeUsd = 0;
+  for (const order of observedOrders) {
+    desiredBuyVolumeUsd += Math.max(0, order.responseBuyVolumeUsd ?? 0);
+    desiredSellVolumeUsd += Math.max(0, order.responseSellVolumeUsd ?? 0);
+    if (order.source !== 'managed') {
+      continue;
+    }
+    if (order.side === 'buy') {
+      executedBuyVolumeUsd += Math.max(0, order.volumeUsd);
+    } else {
+      executedSellVolumeUsd += Math.max(0, order.volumeUsd);
+    }
+  }
+  return {
+    desiredBuyVolumeUsd: roundToSixDecimals(desiredBuyVolumeUsd),
+    desiredSellVolumeUsd: roundToSixDecimals(desiredSellVolumeUsd),
+    executedBuyVolumeUsd: roundToSixDecimals(executedBuyVolumeUsd),
+    executedSellVolumeUsd: roundToSixDecimals(executedSellVolumeUsd),
+    remainingBuyVolumeUsd: roundToSixDecimals(
+      Math.max(0, desiredBuyVolumeUsd - executedBuyVolumeUsd),
+    ),
+    remainingSellVolumeUsd: roundToSixDecimals(
+      Math.max(0, desiredSellVolumeUsd - executedSellVolumeUsd),
+    ),
+  };
+}
+
 export type BoundedAllocationCandidate = {
   accountId: number;
   maxVolumeUsd: number;
@@ -99,11 +142,11 @@ export function calculateFeasibleTradeCounts(
     return null;
   }
 
-  const totalOrders = clamp(
-    Math.max(1, Math.floor(preferredTotalOrders)),
-    minimumTotal,
-    maximumTotal,
-  );
+  const requestedMinimum = Math.max(1, Math.floor(preferredTotalOrders));
+  if (requestedMinimum > maximumTotal) {
+    return null;
+  }
+  const totalOrders = Math.max(requestedMinimum, minimumTotal);
   const totalVolumeUsd = buyVolumeUsd + sellVolumeUsd;
   const preferredBuyCount = totalVolumeUsd > MIN_VOLUME_EPSILON
     ? Math.round(totalOrders * buyVolumeUsd / totalVolumeUsd)

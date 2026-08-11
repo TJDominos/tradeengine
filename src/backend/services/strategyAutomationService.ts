@@ -15,6 +15,7 @@ import { StrategyStatus } from '../strategy/types';
 import type {
   ExecutionReport,
   StrategyRecord,
+  StrategyReviewedPlan,
   StrategyExecutionTaskPayload,
   StrategyVersionRecord,
 } from '../strategy/types';
@@ -301,6 +302,7 @@ export class StrategyAutomationService {
     env: Env,
     userId: number,
     version: StrategyVersionRecord,
+    reviewedPlan?: StrategyReviewedPlan,
   ): Promise<StrategyRecord> {
     const existing = await findStrategyRecordByStrategyVersionId(env, version.id);
     if (
@@ -313,7 +315,10 @@ export class StrategyAutomationService {
     return addStrategy(
       env,
       createStrategyExecutionRunId(version.id),
-      buildStrategyRecordConfigFromVersion(version, userId),
+      {
+        ...buildStrategyRecordConfigFromVersion(version, userId),
+        reviewedPlan,
+      },
     );
   }
 
@@ -579,6 +584,7 @@ export class StrategyAutomationService {
       runId: record.versionId,
       versionId: record.config.strategyVersionId,
       strategyDocument: record.config.document,
+      reviewedPlan: record.config.reviewedPlan,
     };
   }
 

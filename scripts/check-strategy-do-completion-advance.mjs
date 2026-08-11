@@ -232,6 +232,26 @@ function buildStrategyDocument(note, volumeUsd) {
   };
 }
 
+async function activateReviewedStrategy(document, headers) {
+  const preview = await requestJson('/api/strategy/plan-preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(document),
+  });
+  return requestJson('/api/strategy/active', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      document,
+      reviewedPlan: {
+        generatedAt: preview.payload.generatedAt,
+        documentSignature: preview.payload.documentSignature,
+        tasks: preview.payload.tasks,
+      },
+    }),
+  });
+}
+
 try {
   port = await getAvailablePort();
   inspectorPort = await getAvailablePort();
@@ -356,11 +376,10 @@ try {
        FROM tradable_tokens WHERE base_token_address = ${toSqlString(contractAddress)}`,
   ]);
 
-  const firstActivation = await requestJson('/api/strategy/active', {
-    method: 'POST',
-    headers: authHeaders,
-    body: JSON.stringify(buildStrategyDocument('ci-do-complete-1', 2)),
-  });
+  const firstActivation = await activateReviewedStrategy(
+    buildStrategyDocument('ci-do-complete-1', 2),
+    authHeaders,
+  );
   const firstQueueVersionId = firstActivation.payload.queuedStrategy?.versionId;
   assert.ok(firstQueueVersionId, 'first strategy should be queued');
 
@@ -369,11 +388,10 @@ try {
     clearPendingTasks: true,
   });
 
-  const secondActivation = await requestJson('/api/strategy/active', {
-    method: 'POST',
-    headers: authHeaders,
-    body: JSON.stringify(buildStrategyDocument('ci-do-complete-2', 9)),
-  });
+  const secondActivation = await activateReviewedStrategy(
+    buildStrategyDocument('ci-do-complete-2', 9),
+    authHeaders,
+  );
   const secondQueueVersionId = secondActivation.payload.queuedStrategy?.versionId;
   assert.ok(secondQueueVersionId, 'second strategy should be queued');
 

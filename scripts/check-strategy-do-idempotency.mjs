@@ -232,6 +232,26 @@ function buildStrategyDocument(note, volumeUsd) {
   };
 }
 
+async function activateReviewedStrategy(document, headers) {
+  const preview = await requestJson('/api/strategy/plan-preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(document),
+  });
+  return requestJson('/api/strategy/active', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      document,
+      reviewedPlan: {
+        generatedAt: preview.payload.generatedAt,
+        documentSignature: preview.payload.documentSignature,
+        tasks: preview.payload.tasks,
+      },
+    }),
+  });
+}
+
 try {
   port = await getAvailablePort();
   inspectorPort = await getAvailablePort();
@@ -356,11 +376,10 @@ try {
        FROM tradable_tokens WHERE base_token_address = ${toSqlString(contractAddress)}`,
   ]);
 
-  const activation = await requestJson('/api/strategy/active', {
-    method: 'POST',
-    headers: authHeaders,
-    body: JSON.stringify(buildStrategyDocument('ci-do-idempotency', 100)),
-  });
+  const activation = await activateReviewedStrategy(
+    buildStrategyDocument('ci-do-idempotency', 100),
+    authHeaders,
+  );
   const queueVersionId = activation.payload.queuedStrategy?.versionId;
   assert.ok(queueVersionId, 'strategy activation should enqueue a strategy');
 

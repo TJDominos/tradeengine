@@ -242,6 +242,7 @@ export type StrategyPriceCurveReview = {
 
 export type StrategyPlanPreview = {
   generatedAt: number;
+  documentSignature: string;
   pair: {
     baseTokenAddress: string;
     quoteTokenAddress: string;
@@ -252,6 +253,7 @@ export type StrategyPlanPreview = {
   requiredBuyAmount: number;
   availableBuyAmount: number;
   enabledAccountCount: number;
+  eligibleTradingAccountCount: number;
   eligibleAccountCount: number;
   skippedForCapabilityCount: number;
   skippedForNoPairAssetCount: number;

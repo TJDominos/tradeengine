@@ -74,6 +74,7 @@ export type StrategyPlannerResult = {
   unallocatedVolumeUsd: number;
   isExecutable: boolean;
   availableBuyAmount: number;
+  eligibleTradingAccountCount: number;
   eligibleBuyAccountCount: number;
   skippedForCapabilityCount: number;
   skippedForNoPairAssetCount: number;
@@ -178,7 +179,7 @@ function allocateAccountOrders(
   }
   const maximumAccountCount = Math.min(orderCount, Math.floor(targetUsd / minOrderUsd));
   const candidates = accounts
-    .map((account) => ({ account, capacity: roundToSixDecimals(capacityUsd(account)), tie: random() }))
+    .map((account) => ({ account, capacity: Math.max(0, capacityUsd(account)), tie: random() }))
     .filter(({ account, capacity }) => account.pairCompatible && capacity >= minOrderUsd)
     .sort((left, right) => right.capacity - left.capacity || left.tie - right.tie);
   const selectedAccounts: Array<{ account: MutablePlannerAccount; capacity: number }> = [];
@@ -188,10 +189,7 @@ function allocateAccountOrders(
       break;
     }
     selectedAccounts.push(candidate);
-    selectedCapacity = roundToSixDecimals(selectedCapacity + candidate.capacity);
-    if (selectedCapacity + MIN_VOLUME_EPSILON >= targetUsd) {
-      break;
-    }
+    selectedCapacity += candidate.capacity;
   }
   if (selectedCapacity + MIN_VOLUME_EPSILON < targetUsd) {
     return null;
@@ -229,6 +227,24 @@ function allocateAccountOrders(
 
   if (remaining > MIN_VOLUME_EPSILON) {
     return null;
+  }
+
+  const allocatedAccountTotal = roundToSixDecimals(
+    [...accountAmounts.values()].reduce((sum, amount) => sum + amount, 0),
+  );
+  const accountRoundingDifference = roundToSixDecimals(targetUsd - allocatedAccountTotal);
+  if (Math.abs(accountRoundingDifference) > MIN_VOLUME_EPSILON / 10) {
+    const adjustmentTarget = selectedAccounts.find(({ account, capacity }) => {
+      const amount = accountAmounts.get(account.accountId) ?? 0;
+      const adjustedAmount = roundToSixDecimals(amount + accountRoundingDifference);
+      return adjustedAmount + MIN_VOLUME_EPSILON >= minOrderUsd && adjustedAmount <= capacity + MIN_VOLUME_EPSILON;
+    });
+    if (!adjustmentTarget) {
+      return null;
+    }
+    const currentAmount = accountAmounts.get(adjustmentTarget.account.accountId) ?? 0;
+    accountAmounts.set(adjustmentTarget.account.accountId,
+      roundToSixDecimals(currentAmount + accountRoundingDifference));
   }
 
   const accountOrderCounts = new Map<number, number>();
@@ -331,20 +347,30 @@ function buildAccountAwareSelfCyclingTasks(input: {
   let netBuyOrders: PlannedAccountOrder[] | null = null;
   let sellOrderCount = input.taskSpecs[0].orderCount;
   let buyOrderCount = input.taskSpecs[1].orderCount;
-  for (
-    let candidateTotal = input.config.baseOrderCount;
-    candidateTotal <= input.config.maxOrderCount && !sellOrders;
-    candidateTotal += 1
-  ) {
+  const countRandom = createDeterministicRandom(`${input.seedBase}:self-cycling:trade-count`);
+  const candidateTotals = Array.from(
+    { length: Math.max(0, input.config.maxOrderCount - input.config.baseOrderCount + 1) },
+    (_, index) => input.config.baseOrderCount + index,
+  );
+  for (let index = candidateTotals.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(countRandom() * (index + 1));
+    [candidateTotals[index], candidateTotals[swapIndex]] = [candidateTotals[swapIndex]!, candidateTotals[index]!];
+  }
+  for (const candidateTotal of candidateTotals) {
+    if (sellOrders) {
+      break;
+    }
+    const requiredNetBuyOrderCount = netBuyAmountUsd > MIN_VOLUME_EPSILON ? 1 : 0;
     for (
-      let candidateSellCount = input.taskSpecs[0].orderCount;
-      candidateSellCount <= maximumSellOrderCount;
-      candidateSellCount += 1
+      let candidateSellCount = Math.min(
+        maximumSellOrderCount, Math.floor((candidateTotal - requiredNetBuyOrderCount) / 2),
+      );
+      candidateSellCount >= input.taskSpecs[0].orderCount;
+      candidateSellCount -= 1
     ) {
       const candidateBuyCount = candidateTotal - candidateSellCount;
       const candidateNetBuyCount = candidateBuyCount - candidateSellCount;
       if (
-        candidateBuyCount < input.taskSpecs[1].orderCount ||
         candidateBuyCount > maximumBuyOrderCount ||
         candidateNetBuyCount < 0 ||
         (netBuyAmountUsd > MIN_VOLUME_EPSILON && candidateNetBuyCount === 0)
@@ -414,13 +440,24 @@ function buildAccountAwareSelfCyclingTasks(input: {
   );
   const rankedOrders: typeof remainingOrders = [];
   while (remainingOrders.length > 0) {
-    const executableOrders = remainingOrders
+    let executableOrders = remainingOrders
       .filter((entry) =>
         entry.side === 'sell' ||
         (availableQuoteByAccountId.get(entry.order.account.accountId) ?? 0) +
           MIN_VOLUME_EPSILON >= entry.order.volumeUsd,
       )
       .sort((left, right) => left.rank - right.rank || left.index - right.index);
+    const previousSide = rankedOrders[rankedOrders.length - 1]?.side;
+    const hasSameSideStreak = previousSide != null &&
+      rankedOrders[rankedOrders.length - 2]?.side === previousSide;
+    if (hasSameSideStreak) {
+      const oppositeSideOrders = executableOrders.filter(
+        (entry) => entry.side !== previousSide,
+      );
+      if (oppositeSideOrders.length > 0) {
+        executableOrders = oppositeSideOrders;
+      }
+    }
     const selected = executableOrders[0];
     if (!selected) {
       return [];
@@ -430,9 +467,7 @@ function buildAccountAwareSelfCyclingTasks(input: {
     const currentQuote = availableQuoteByAccountId.get(selected.order.account.accountId) ?? 0;
     availableQuoteByAccountId.set(
       selected.order.account.accountId,
-      roundToSixDecimals(
-        currentQuote + (selected.side === 'sell' ? selected.order.volumeUsd : -selected.order.volumeUsd),
-      ),
+      currentQuote + (selected.side === 'sell' ? selected.order.volumeUsd : -selected.order.volumeUsd),
     );
   }
   const totalDurationMs = Math.max(
@@ -581,14 +616,14 @@ export function buildStrategyPlanTaskSpecs(
         config.minOrderUsd,
         config.maxOrderUsd,
       );
-      const buyCount = feasibleCounts?.buyCount ?? Math.max(
-        1,
-        Math.ceil(buyVolumeUsd / config.maxOrderUsd),
+      const fallbackSellCount = Math.max(1, Math.round(
+        plannerOrderCount * sellVolumeUsd / Math.max(MIN_VOLUME_EPSILON, totalVolumeUsd),
+      ));
+      const sellCount = feasibleCounts?.sellCount ?? Math.min(
+        plannerOrderCount - 1,
+        fallbackSellCount,
       );
-      const sellCount = feasibleCounts?.sellCount ?? Math.max(
-        1,
-        Math.ceil(sellVolumeUsd / config.maxOrderUsd),
-      );
+      const buyCount = feasibleCounts?.buyCount ?? plannerOrderCount - sellCount;
 
       return [
         {
@@ -655,9 +690,13 @@ function toMutablePlannerAccount(
   minOrderUsd: number,
 ): MutablePlannerAccount {
   const solBalance = Number.parseFloat(account.walletBalance.sol) || 0;
-  const sellCapacityUsd = buildSellCapacityUsd(account, baseTokenPriceUsd);
+  const storedSellCapacityUsd = buildSellCapacityUsd(account, baseTokenPriceUsd);
   const existingPlannedBuyVolumeUsd = existingVolumes.buy.get(account.id) ?? 0;
   const existingPlannedSellVolumeUsd = existingVolumes.sell.get(account.id) ?? 0;
+  const sellCapacityUsd = Math.max(
+    0,
+    storedSellCapacityUsd + existingPlannedBuyVolumeUsd - existingPlannedSellVolumeUsd,
+  );
   const buyRemainingQuoteUsd = Math.max(
     0,
     account.quoteAvailableAmount - existingPlannedBuyVolumeUsd + existingPlannedSellVolumeUsd,
@@ -955,6 +994,7 @@ export function buildStrategyPlanningResult(input: {
     availableBuyAmount: roundToSixDecimals(
       eligibleBuyAccounts.reduce((sum, account) => sum + account.quoteAvailableAmount, 0),
     ),
+    eligibleTradingAccountCount: eligibleAssetAccounts.length,
     eligibleBuyAccountCount: eligibleBuyAccounts.length,
     skippedForCapabilityCount: input.accounts.filter((account) => !account.pairCompatible).length,
     skippedForNoPairAssetCount: input.accounts.filter(

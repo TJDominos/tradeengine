@@ -23,6 +23,7 @@ import {
 } from '../services/strategyAutomationService';
 import type {
   StrategyRecordConfig,
+  StrategyReviewedPlan,
   StrategyVersionDocument,
 } from '../strategy/types';
 import {
@@ -37,6 +38,7 @@ import { loadStoredMarketSnapshotByContractAddress } from '../services/tokenMark
 import {
   getManagedBuyCapacitySummary,
   listManagedAccountsWithStoredBalances,
+  type ManagedAccountBalanceRecord,
 } from '../userStore';
 
 const strategyAutomationService = new StrategyAutomationService();
@@ -85,6 +87,7 @@ type StrategyPlanPreviewAccount = {
 
 type StrategyPlanPreviewResponse = {
   generatedAt: number;
+  documentSignature: string;
   pair: {
     baseTokenAddress: string;
     quoteTokenAddress: string;
@@ -95,6 +98,7 @@ type StrategyPlanPreviewResponse = {
   requiredBuyAmount: number;
   availableBuyAmount: number;
   enabledAccountCount: number;
+  eligibleTradingAccountCount: number;
   eligibleAccountCount: number;
   skippedForCapabilityCount: number;
   skippedForNoPairAssetCount: number;
@@ -109,11 +113,161 @@ type StrategyPlanPreviewResponse = {
   accounts: StrategyPlanPreviewAccount[];
 };
 
+function buildPlanningDocumentSignature(document: StrategyVersionDocument): string {
+  return JSON.stringify({
+    parameters: document.parameters,
+    targets: document.targets,
+    riskControls: document.riskControls,
+    execution: document.execution,
+  });
+}
+
 function deriveRequiredStrategyBuyAmount(document: StrategyVersionDocument): number {
   return deriveRequiredNetBuyAmount(
     document,
     DEFAULT_STRATEGY_DEPLOY_BUY_AMOUNT,
   );
+}
+
+function validateReviewedPlan(input: {
+  rawPlan: unknown;
+  document: StrategyVersionDocument;
+  config: StrategyRecordConfig;
+  accounts: ManagedAccountBalanceRecord[];
+  baseTokenPriceUsd: number | null;
+}): StrategyReviewedPlan {
+  if (!input.rawPlan || typeof input.rawPlan !== 'object' || Array.isArray(input.rawPlan)) {
+    throw new ApiError(400, 'An executable reviewed plan is required for deployment');
+  }
+  const rawPlan = input.rawPlan as Record<string, unknown>;
+  const generatedAt = Number(rawPlan.generatedAt);
+  const documentSignature = rawPlan.documentSignature;
+  const rawTasks = rawPlan.tasks;
+  if (
+    !Number.isFinite(generatedAt) ||
+    documentSignature !== buildPlanningDocumentSignature(input.document) ||
+    !Array.isArray(rawTasks)
+  ) {
+    throw new ApiError(400, 'Reviewed plan metadata is invalid');
+  }
+  if (
+    rawTasks.length < input.config.baseOrderCount ||
+    rawTasks.length > input.config.maxOrderCount
+  ) {
+    throw new ApiError(
+      409,
+      `Reviewed plan must contain ${input.config.baseOrderCount}-${input.config.maxOrderCount} tasks`,
+    );
+  }
+
+  const accountsById = new Map(input.accounts.map((account) => [account.id, account]));
+  const quoteByAccountId = new Map(
+    input.accounts.map((account) => [account.id, account.quoteAvailableAmount]),
+  );
+  const baseUsdByAccountId = new Map(
+    input.accounts.map((account) => [
+      account.id,
+      input.baseTokenPriceUsd != null && input.baseTokenPriceUsd > 0
+        ? account.baseTokenAmount * input.baseTokenPriceUsd
+        : 0,
+    ]),
+  );
+  const tasks: StrategyReviewedPlan['tasks'] = [];
+  let buyVolumeUsd = 0;
+  let sellVolumeUsd = 0;
+  let previousScheduledAt = generatedAt;
+
+  for (const [index, rawTask] of rawTasks.entries()) {
+    if (!rawTask || typeof rawTask !== 'object' || Array.isArray(rawTask)) {
+      throw new ApiError(400, `Reviewed task ${index + 1} is invalid`);
+    }
+    const task = rawTask as Record<string, unknown>;
+    const side = task.side;
+    const totalVolumeUsd = Number(task.totalVolumeUsd);
+    const scheduledAt = Number(task.scheduledAt);
+    const rawAllocations = task.allocations;
+    if (
+      (side !== 'buy' && side !== 'sell') ||
+      !Number.isFinite(totalVolumeUsd) ||
+      totalVolumeUsd < input.config.minOrderUsd ||
+      totalVolumeUsd > input.config.maxOrderUsd ||
+      !Number.isFinite(scheduledAt) ||
+      scheduledAt < previousScheduledAt ||
+      !Array.isArray(rawAllocations) ||
+      rawAllocations.length !== 1
+    ) {
+      throw new ApiError(409, `Reviewed task ${index + 1} violates order constraints`);
+    }
+    const rawAllocation = rawAllocations[0];
+    if (!rawAllocation || typeof rawAllocation !== 'object' || Array.isArray(rawAllocation)) {
+      throw new ApiError(400, `Reviewed task ${index + 1} allocation is invalid`);
+    }
+    const allocationInput = rawAllocation as Record<string, unknown>;
+    const accountId = Number(allocationInput.accountId);
+    const account = accountsById.get(accountId);
+    if (!Number.isInteger(accountId) || !account?.pairCompatible) {
+      throw new ApiError(409, `Reviewed task ${index + 1} account is no longer eligible`);
+    }
+
+    if (side === 'buy') {
+      const quoteAvailable = quoteByAccountId.get(accountId) ?? 0;
+      if (quoteAvailable < totalVolumeUsd) {
+        throw new ApiError(409, `Reviewed task ${index + 1} no longer has enough quote balance`);
+      }
+      quoteByAccountId.set(accountId, quoteAvailable - totalVolumeUsd);
+      baseUsdByAccountId.set(accountId, (baseUsdByAccountId.get(accountId) ?? 0) + totalVolumeUsd);
+      buyVolumeUsd += totalVolumeUsd;
+    } else {
+      const baseAvailableUsd = baseUsdByAccountId.get(accountId) ?? 0;
+      if (baseAvailableUsd < totalVolumeUsd) {
+        throw new ApiError(409, `Reviewed task ${index + 1} no longer has enough base balance`);
+      }
+      baseUsdByAccountId.set(accountId, baseAvailableUsd - totalVolumeUsd);
+      quoteByAccountId.set(accountId, (quoteByAccountId.get(accountId) ?? 0) + totalVolumeUsd);
+      sellVolumeUsd += totalVolumeUsd;
+    }
+    previousScheduledAt = scheduledAt;
+    tasks.push({
+      taskId: typeof task.taskId === 'string' ? task.taskId : `reviewed-${index + 1}`,
+      side,
+      pulse: typeof task.pulse === 'string' ? task.pulse : null,
+      orderIndex: Number.isInteger(Number(task.orderIndex)) ? Number(task.orderIndex) : index + 1,
+      totalOrders: Number.isInteger(Number(task.totalOrders)) ? Number(task.totalOrders) : rawTasks.length,
+      scheduledAt,
+      totalVolumeUsd,
+      allocations: [{
+        accountId: account.id,
+        label: account.label,
+        walletAddress: account.address,
+        plannedVolumeUsd: totalVolumeUsd,
+        quoteAvailableAmount: account.quoteAvailableAmount,
+        baseTokenAmount: account.baseTokenAmount,
+        solBalance: Number.parseFloat(account.walletBalance.sol) || 0,
+        accountBuyOverAllocated: false,
+        accountBuyOverAllocationUsd: 0,
+      }],
+    });
+  }
+
+  const expectedSpecs = buildStrategyPlanTaskSpecs(
+    input.config,
+    deriveRequiredStrategyBuyAmount(input.document),
+  );
+  const expectedBuyVolumeUsd = expectedSpecs.reduce(
+    (sum, spec) => sum + (spec.side === 'buy' ? spec.totalVolumeUsd : 0),
+    0,
+  );
+  const expectedSellVolumeUsd = expectedSpecs.reduce(
+    (sum, spec) => sum + (spec.side === 'sell' ? spec.totalVolumeUsd : 0),
+    0,
+  );
+  if (
+    Number(buyVolumeUsd.toFixed(6)) !== Number(expectedBuyVolumeUsd.toFixed(6)) ||
+    Number(sellVolumeUsd.toFixed(6)) !== Number(expectedSellVolumeUsd.toFixed(6))
+  ) {
+    throw new ApiError(409, 'Reviewed plan volume or net buy-in no longer matches the strategy');
+  }
+  return { generatedAt, documentSignature, tasks };
 }
 
 function formatQuoteLabel(quoteMint: string): string {
@@ -142,11 +296,12 @@ function buildStrategyPlanPreview(
     taskSpecs: buildStrategyPlanTaskSpecs(config, requiredBuyAmount),
     startTime: generatedAt + 1_000,
     baseTokenPriceUsd: marketSnapshot?.priceUsd ?? null,
-    seedContext: 'base-plan',
+    seedContext: `preview:${crypto.randomUUID()}`,
   });
 
   return {
     generatedAt,
+    documentSignature: buildPlanningDocumentSignature(document),
     pair: {
       baseTokenAddress: config.baseTokenAddress,
       quoteTokenAddress: config.quoteTokenAddress,
@@ -157,6 +312,7 @@ function buildStrategyPlanPreview(
     requiredBuyAmount,
     availableBuyAmount: planning.availableBuyAmount,
     enabledAccountCount: planning.accounts.length,
+    eligibleTradingAccountCount: planning.eligibleTradingAccountCount,
     eligibleAccountCount: planning.eligibleBuyAccountCount,
     skippedForCapabilityCount: planning.skippedForCapabilityCount,
     skippedForNoPairAssetCount: planning.skippedForNoPairAssetCount,
@@ -379,9 +535,12 @@ export async function handleStrategyRoutes(
       env.TRADINGBOT_DB,
       user.id,
     );
-    const document = normalizeStrategyDocument(
-      await parseJsonBody<unknown>(request),
-    );
+    const requestBody = await parseJsonBody<unknown>(request);
+    if (!requestBody || typeof requestBody !== 'object' || Array.isArray(requestBody)) {
+      throw new ApiError(400, 'Strategy deployment request is invalid');
+    }
+    const deploymentRequest = requestBody as Record<string, unknown>;
+    const document = normalizeStrategyDocument(deploymentRequest.document);
 
     const normalizedBaseTokenAddress = document.parameters.baseTokenAddress.trim()
       ? normalizePubkey(document.parameters.baseTokenAddress)
@@ -446,19 +605,13 @@ export async function handleStrategyRoutes(
         normalizedBaseTokenAddress,
       ),
     ]);
-    const deploymentPlan = buildStrategyPlanPreview(
-      normalizedDocument,
-      buildStrategyRecordConfigFromDocument(normalizedDocument, user.id),
-      planningAccounts,
-      requiredBuyAmount,
-      deploymentMarketSnapshot,
-    );
-    if (!deploymentPlan.isExecutable) {
-      throw new ApiError(
-        409,
-        `Planner could only allocate ${deploymentPlan.plannedTaskCount}/${deploymentPlan.requestedTaskCount} required tasks with ${deploymentPlan.unallocatedVolumeUsd.toFixed(2)} ${quoteLabel} unallocated`,
-      );
-    }
+    const reviewedPlan = validateReviewedPlan({
+      rawPlan: deploymentRequest.reviewedPlan,
+      document: normalizedDocument,
+      config: buildStrategyRecordConfigFromDocument(normalizedDocument, user.id),
+      accounts: planningAccounts,
+      baseTokenPriceUsd: deploymentMarketSnapshot?.priceUsd ?? null,
+    });
 
     const strategySave = await dbSaveActiveStrategyVersionDocument(
       env.TRADINGBOT_DB,
@@ -573,6 +726,7 @@ export async function handleStrategyRoutes(
       env,
       user.id,
       strategySave.version,
+      reviewedPlan,
     );
     await strategyAutomationService.startNextStrategy(env);
 

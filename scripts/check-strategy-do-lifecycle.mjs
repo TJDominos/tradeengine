@@ -231,6 +231,26 @@ function buildStrategyDocument(note, volumeUsd) {
   };
 }
 
+async function activateReviewedStrategy(document, headers) {
+  const preview = await requestJson('/api/strategy/plan-preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(document),
+  });
+  return requestJson('/api/strategy/active', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      document,
+      reviewedPlan: {
+        generatedAt: preview.payload.generatedAt,
+        documentSignature: preview.payload.documentSignature,
+        tasks: preview.payload.tasks,
+      },
+    }),
+  });
+}
+
 let workerProcess;
 
 try {
@@ -359,11 +379,10 @@ try {
        FROM tradable_tokens WHERE base_token_address = ${toSqlString(contractAddress)}`,
   ]);
 
-  const firstActivation = await requestJson('/api/strategy/active', {
-    method: 'POST',
-    headers: authHeaders,
-    body: JSON.stringify(buildStrategyDocument('ci-do-lifecycle-1', 12)),
-  });
+  const firstActivation = await activateReviewedStrategy(
+    buildStrategyDocument('ci-do-lifecycle-1', 12),
+    authHeaders,
+  );
   assert.ok(firstActivation.payload.queuedStrategy?.versionId, 'first activation should enqueue strategy');
   const firstQueueVersionId = firstActivation.payload.queuedStrategy.versionId;
 
@@ -374,11 +393,10 @@ try {
     clearPendingTasks: true,
   });
 
-  const secondActivation = await requestJson('/api/strategy/active', {
-    method: 'POST',
-    headers: authHeaders,
-    body: JSON.stringify(buildStrategyDocument('ci-do-lifecycle-2', 18)),
-  });
+  const secondActivation = await activateReviewedStrategy(
+    buildStrategyDocument('ci-do-lifecycle-2', 18),
+    authHeaders,
+  );
   assert.ok(secondActivation.payload.queuedStrategy?.versionId, 'second activation should enqueue strategy');
   const secondQueueVersionId = secondActivation.payload.queuedStrategy.versionId;
   assert.notEqual(firstQueueVersionId, secondQueueVersionId, 'queued strategies should be distinct');

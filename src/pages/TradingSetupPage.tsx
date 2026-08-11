@@ -1,7 +1,7 @@
 import React from 'react';
 import { Plus, Settings, Trash2 } from 'lucide-react';
 
-import type { EngineState, StrategyVersionDocument } from '../app/types';
+import type { EngineState, StrategyPlanPreview, StrategyVersionDocument } from '../app/types';
 import StrategySchemaForm from '../components/StrategySchemaForm';
 
 function mintPreview(mintAddress: string): string {
@@ -28,7 +28,7 @@ type TradingSetupPageProps = {
   handleAddRpcEndpoint: () => void;
   handleDeleteRpcEndpoint: (endpointId: number) => void;
   updateStrategyDraft: (updater: (current: StrategyVersionDocument) => StrategyVersionDocument) => void;
-  handleSaveConfig: () => void;
+  handleSaveConfig: (reviewedPlan: StrategyPlanPreview) => void;
   activeStrategyVersionNo: number | null;
   activeStrategyStatus: string | null;
 };

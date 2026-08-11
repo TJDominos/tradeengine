@@ -249,6 +249,36 @@ export interface StrategyRecordConfig {
   maxOrderUsd: number;
   distributionChunkCount: number;
   distributionChunkDelayJitterMs: number;
+  reviewedPlan?: StrategyReviewedPlan;
+}
+
+export interface StrategyReviewedPlanAllocation {
+  accountId: number;
+  label: string;
+  walletAddress: string;
+  plannedVolumeUsd: number;
+  quoteAvailableAmount: number;
+  baseTokenAmount: number;
+  solBalance: number;
+  accountBuyOverAllocated: boolean;
+  accountBuyOverAllocationUsd: number;
+}
+
+export interface StrategyReviewedPlanTask {
+  taskId: string;
+  side: StrategyExecutionSide;
+  pulse: string | null;
+  orderIndex: number;
+  totalOrders: number;
+  scheduledAt: number;
+  totalVolumeUsd: number;
+  allocations: StrategyReviewedPlanAllocation[];
+}
+
+export interface StrategyReviewedPlan {
+  generatedAt: number;
+  documentSignature: string;
+  tasks: StrategyReviewedPlanTask[];
 }
 
 export interface StrategyRecord {

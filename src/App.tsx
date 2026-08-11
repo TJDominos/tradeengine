@@ -21,6 +21,7 @@ import type {
   EngineState,
   OutsideTokenHolderPage,
   SettingsState,
+  StrategyPlanPreview,
   StrategyVersionDocument,
   TabId,
   TokenWebhookCheck,
@@ -959,7 +960,7 @@ export default function App() {
     marketRefreshRunning,
   ]);
 
-  const handleSaveConfig = () =>
+  const handleSaveConfig = (reviewedPlan: StrategyPlanPreview) =>
     submitWithFeedback('settings', async () => {
       if (!strategyDraft) {
         throw new Error('Strategy draft is not ready');
@@ -977,7 +978,14 @@ export default function App() {
         };
       }>('/api/strategy/active', {
         method: 'POST',
-        body: JSON.stringify(strategyDraft),
+        body: JSON.stringify({
+          document: strategyDraft,
+          reviewedPlan: {
+            generatedAt: reviewedPlan.generatedAt,
+            documentSignature: reviewedPlan.documentSignature,
+            tasks: reviewedPlan.tasks,
+          },
+        }),
       });
       settingsDirtyRef.current = false;
       strategyDraftDirtyRef.current = false;

@@ -9,7 +9,6 @@ import {
   buildPlanningVolumeMapsFromTasks,
   buildStrategyPlanTaskSpecs,
   buildStrategyPlanningResult,
-  createDeterministicRandom,
   deriveRequiredNetBuyAmount,
   type StrategyPlannerConfig,
   type StrategyPlannerTask,
@@ -17,9 +16,18 @@ import {
   type StrategyPlannerTaskSpec,
 } from './planner';
 import {
+  calculateFeasibleTradeCounts,
+  calculateRemainingPlanVolumes,
+} from './plannerMath';
+import {
   resolveBasePlannedTransactionCount,
 } from './plannedTransactions';
-import type { ExecutionReport, StrategyExecutionConfig, StrategyVersionDocument } from './types';
+import type {
+  ExecutionReport,
+  StrategyExecutionConfig,
+  StrategyReviewedPlan,
+  StrategyVersionDocument,
+} from './types';
 import type { ExternalTradeEvent } from './triggers';
 import { initializeAllSchemas } from '../services/dbSetup';
 import { executeSwap, type JupiterSwapExecutionResult } from '../services/jupiterSwapService';
@@ -62,6 +70,7 @@ export interface StrategyEngineDurableObjectConfig {
   triggerThresholdUsd: number;
   execution: StrategyExecutionConfig;
   strategyDocument: StrategyVersionDocument;
+  reviewedPlan?: StrategyReviewedPlan;
 }
 
 export interface StrategyEngineDurableObjectTask {
@@ -79,6 +88,7 @@ export interface StrategyEngineDurableObjectConfigureRequest {
   runId?: string | null;
   versionId: number;
   strategyDocument: StrategyVersionDocument;
+  reviewedPlan?: StrategyReviewedPlan;
 }
 
 export interface StrategyEngineDurableObjectEventRequest
@@ -100,9 +110,22 @@ export interface PersistedStrategyEngineState {
   metrics: StrategyEngineDurableObjectMetrics;
   currentEngineState: EngineState | null;
   pendingTasks: StrategyEngineDurableObjectTask[];
+  observedOrders: StrategyObservedOrder[];
+  pendingReplanTxHash: string | null;
   dedupedTxHashes: string[];
   allocationRotationOffsets: Record<'buy' | 'sell', number>;
   updatedAt: number;
+}
+
+interface StrategyObservedOrder {
+  id: string;
+  side: 'buy' | 'sell';
+  volumeUsd: number;
+  source: 'managed' | 'external';
+  accountId: number | null;
+  occurredAt: number;
+  responseBuyVolumeUsd?: number;
+  responseSellVolumeUsd?: number;
 }
 
 function createEmptyAllocationRotationOffsets(): Record<'buy' | 'sell', number> {
@@ -169,6 +192,8 @@ function createIdleState(): PersistedStrategyEngineState {
     metrics: createEmptyMetrics(0),
     currentEngineState: null,
     pendingTasks: [],
+    observedOrders: [],
+    pendingReplanTxHash: null,
     dedupedTxHashes: [],
     allocationRotationOffsets: createEmptyAllocationRotationOffsets(),
     updatedAt: Date.now(),
@@ -283,12 +308,22 @@ export class StrategyEngineDurableObject {
       return;
     }
 
-    if (state.metrics.actualTotalVolumeUsd >= config.targetTotalVolumeUsd) {
+    if (state.pendingReplanTxHash) {
+      const txHash = state.pendingReplanTxHash;
+      await this.replanAfterExternalEvent(txHash);
+      state.pendingReplanTxHash = null;
+    }
+
+    if (state.metrics.actualTotalVolumeUsd >= this.getManagedTargetTotalVolumeUsd()) {
       await this.markCompleted();
       return;
     }
 
     if (state.pendingTasks.length === 0) {
+      if (config.reviewedPlan) {
+        await this.markCompleted();
+        return;
+      }
       await this.ensureBasePlanIfNeeded(Date.now());
     }
 
@@ -302,7 +337,7 @@ export class StrategyEngineDurableObject {
     try {
       const execution = await this.executeDueTask(nextTask);
       if (execution.executedVolumeUsd > 0) {
-        this.applyExecutedTask(nextTask, execution.executedVolumeUsd);
+        this.applyExecutedTask(nextTask, execution.fills);
       }
       if (execution.retryVolumeUsd > 0) {
         this.scheduleTaskRetry(
@@ -330,12 +365,16 @@ export class StrategyEngineDurableObject {
       return;
     }
 
-    if (state.metrics.actualTotalVolumeUsd >= config.targetTotalVolumeUsd) {
+    if (state.metrics.actualTotalVolumeUsd >= this.getManagedTargetTotalVolumeUsd()) {
       await this.markCompleted();
       return;
     }
 
     if (state.pendingTasks.length === 0) {
+      if (config.reviewedPlan) {
+        await this.markCompleted();
+        return;
+      }
       await this.ensureBasePlanIfNeeded(Date.now());
     }
 
@@ -354,9 +393,15 @@ export class StrategyEngineDurableObject {
     state.metrics = createEmptyMetrics(startTime);
     state.currentEngineState = buildInitialStateForObjective(state.config.macroObjective);
     state.pendingTasks = [];
+    state.observedOrders = [];
+    state.pendingReplanTxHash = null;
     state.dedupedTxHashes = [];
     state.allocationRotationOffsets = createEmptyAllocationRotationOffsets();
-    await this.ensureBasePlanIfNeeded(planStartTime);
+    if (state.config.reviewedPlan) {
+      this.enqueueReviewedPlan(state.config.reviewedPlan, planStartTime);
+    } else {
+      await this.ensureBasePlanIfNeeded(planStartTime);
+    }
     await this.persistState();
     await this.ctx.storage.setAlarm(planStartTime);
   }
@@ -402,6 +447,7 @@ export class StrategyEngineDurableObject {
       triggerThresholdUsd: Math.max(0, normalizedDocument.triggers.triggerThresholdUsd),
       execution: normalizedDocument.execution,
       strategyDocument: normalizedDocument,
+      reviewedPlan: input.reviewedPlan,
     };
 
     const previousConfig = this.persistedState.config;
@@ -416,6 +462,8 @@ export class StrategyEngineDurableObject {
     if (configChanged && this.persistedState.status !== 'running') {
       this.persistedState.currentEngineState = buildInitialStateForObjective(nextConfig.macroObjective);
       this.persistedState.pendingTasks = [];
+      this.persistedState.observedOrders = [];
+      this.persistedState.pendingReplanTxHash = null;
       this.persistedState.dedupedTxHashes = [];
       this.persistedState.allocationRotationOffsets = createEmptyAllocationRotationOffsets();
     }
@@ -483,129 +531,46 @@ export class StrategyEngineDurableObject {
         ? 'BUY'
         : 'SELL';
 
-    let triggered = false;
-    const now = Date.now();
+    let responseBuyVolumeUsd = 0;
+    let responseSellVolumeUsd = 0;
     if (normalizedDirection === 'BUY') {
       if (config.macroObjective === 'shakeout') {
         this.persistedState.currentEngineState = 'WAITING_FOR_LOSS_CUT';
-        await this.enqueuePlannedTaskSpecs(
-          [
-            {
-              side: 'sell',
-              pulse: 'dump',
-              totalVolumeUsd: amountUsd * config.execution.tactics.dumpRatio,
-              orderCount: 1,
-              durationMs: 0,
-              scheduledOffsetMs: 0,
-            },
-          ],
-          now,
-          'tactic',
-          `tactic-dump:${event.txHash}`,
-          (task) => ({
-            tactic: 'dump',
-            txHash: event.txHash,
-            pulse: task.pulse,
-            orderIndex: task.orderIndex,
-            totalOrders: task.totalOrders,
-          }),
-        );
-        triggered = true;
+        responseSellVolumeUsd = amountUsd * config.execution.tactics.dumpRatio;
       } else if (config.macroObjective === 'distribution') {
         this.persistedState.currentEngineState = 'DISTRIBUTING';
-        const chunkCount = Math.max(1, config.distributionChunkCount);
-        const totalSellUsd = amountUsd * config.execution.tactics.followSellRatio;
-        const distributionRandom = createDeterministicRandom(
-          `follow-sell:${event.txHash}:${chunkCount}:${totalSellUsd}`,
-        );
-        const taskSpecs: StrategyPlannerTaskSpec[] = [];
-        for (let index = 0; index < chunkCount; index += 1) {
-          taskSpecs.push({
-            side: 'sell',
-            pulse: 'follow_sell',
-            totalVolumeUsd: totalSellUsd / chunkCount,
-            orderCount: 1,
-            durationMs: 0,
-            scheduledOffsetMs: Math.round(
-              distributionRandom() * config.distributionChunkDelayJitterMs,
-            ),
-          });
-        }
-        await this.enqueuePlannedTaskSpecs(
-          taskSpecs,
-          now,
-          'tactic',
-          `tactic-follow-sell:${event.txHash}`,
-          (task) => ({
-            tactic: 'follow_sell',
-            txHash: event.txHash,
-            pulse: task.pulse,
-            orderIndex: task.orderIndex,
-            totalOrders: task.totalOrders,
-            chunkCount,
-          }),
-        );
-        triggered = true;
+        responseSellVolumeUsd = amountUsd * config.execution.tactics.followSellRatio;
       }
     }
 
     if (normalizedDirection === 'SELL' && config.macroObjective === 'accumulation') {
       this.persistedState.currentEngineState = 'ACCUMULATING';
-      await this.enqueuePlannedTaskSpecs(
-        [
-          {
-            side: 'buy',
-            pulse: 'absorb',
-            totalVolumeUsd: amountUsd * config.execution.tactics.absorbRatio,
-            orderCount: 1,
-            durationMs: 0,
-            scheduledOffsetMs: 0,
-          },
-        ],
-        now,
-        'tactic',
-        `tactic-absorb:${event.txHash}`,
-        (task) => ({
-          tactic: 'absorb',
-          txHash: event.txHash,
-          pulse: task.pulse,
-          orderIndex: task.orderIndex,
-          totalOrders: task.totalOrders,
-        }),
-      );
-      triggered = true;
+      responseBuyVolumeUsd += amountUsd * config.execution.tactics.absorbRatio;
     }
 
     if (event.is_loss_cut && config.macroObjective === 'shakeout') {
       this.persistedState.currentEngineState = 'BUILDING_TREND';
-      await this.enqueuePlannedTaskSpecs(
-        [
-          {
-            side: 'buy',
-            pulse: 'scoop',
-            totalVolumeUsd: amountUsd,
-            orderCount: 1,
-            durationMs: 0,
-            scheduledOffsetMs: 0,
-          },
-        ],
-        now,
-        'tactic',
-        `tactic-scoop:${event.txHash}`,
-        (task) => ({
-          tactic: 'scoop',
-          txHash: event.txHash,
-          pulse: task.pulse,
-          orderIndex: task.orderIndex,
-          totalOrders: task.totalOrders,
-        }),
-      );
-      triggered = true;
+      responseBuyVolumeUsd += amountUsd;
     }
 
+    const triggered = responseBuyVolumeUsd > 0 || responseSellVolumeUsd > 0;
     if (triggered) {
+      this.persistedState.observedOrders.push({
+        id: event.txHash,
+        side: normalizedDirection.toLowerCase() as 'buy' | 'sell',
+        volumeUsd: amountUsd,
+        source: 'external',
+        accountId: null,
+        occurredAt: Date.now(),
+        responseBuyVolumeUsd,
+        responseSellVolumeUsd,
+      });
       this.persistedState.metrics.tacticsTriggeredCount += 1;
-      await this.ctx.storage.setAlarm(now);
+      this.persistedState.pendingTasks = [];
+      this.persistedState.pendingReplanTxHash = event.txHash;
+      await this.persistState({ scheduleAlarm: false });
+      await this.ctx.storage.setAlarm(Date.now());
+      return false;
     }
 
     await this.persistState();
@@ -668,19 +633,20 @@ export class StrategyEngineDurableObject {
 
   private applyExecutedTask(
     task: StrategyEngineDurableObjectTask,
-    executedVolumeUsd: number,
+    fills: Array<{ accountId: number; executedVolumeUsd: number }>,
   ): void {
     const config = this.persistedState.config;
     if (!config) {
       throw new ApiError(409, 'Strategy engine durable object is not configured');
     }
 
-    const executableUsd = Math.max(
+    const remainingTargetUsd = Math.max(
       0,
-      Math.min(
-        executedVolumeUsd,
-        config.targetTotalVolumeUsd - this.persistedState.metrics.actualTotalVolumeUsd,
-      ),
+      this.getManagedTargetTotalVolumeUsd() - this.persistedState.metrics.actualTotalVolumeUsd,
+    );
+    const executableUsd = Math.min(
+      remainingTargetUsd,
+      fills.reduce((sum, fill) => sum + fill.executedVolumeUsd, 0),
     );
     if (executableUsd <= 0) {
       return;
@@ -689,6 +655,25 @@ export class StrategyEngineDurableObject {
     this.persistedState.metrics.actualTotalVolumeUsd += executableUsd;
     this.persistedState.metrics.actualNetInflowUsd +=
       task.side === 'sell' ? executableUsd : -executableUsd;
+    let recordedVolumeUsd = 0;
+    for (const [index, fill] of fills.entries()) {
+      const volumeUsd = Math.min(
+        fill.executedVolumeUsd,
+        Math.max(0, executableUsd - recordedVolumeUsd),
+      );
+      if (volumeUsd <= 0) {
+        continue;
+      }
+      this.persistedState.observedOrders.push({
+        id: `${task.id}:${index}`,
+        side: task.side,
+        volumeUsd,
+        source: 'managed',
+        accountId: fill.accountId,
+        occurredAt: Date.now(),
+      });
+      recordedVolumeUsd += volumeUsd;
+    }
 
     if (task.source === 'base') {
       this.persistedState.currentEngineState = buildInitialStateForObjective(
@@ -699,6 +684,167 @@ export class StrategyEngineDurableObject {
 
   private buildExistingPlannedVolumes() {
     return buildPlanningVolumeMapsFromTasks(this.persistedState.pendingTasks);
+  }
+
+  private buildObservedManagedVolumes() {
+    const buy = new Map<number, number>();
+    const sell = new Map<number, number>();
+    for (const order of this.persistedState.observedOrders) {
+      if (order.source !== 'managed' || order.accountId == null) {
+        continue;
+      }
+      const volumes = order.side === 'buy' ? buy : sell;
+      volumes.set(order.accountId, (volumes.get(order.accountId) ?? 0) + order.volumeUsd);
+    }
+    return { buy, sell };
+  }
+
+  private buildObservedOrdersForReplanning(): StrategyObservedOrder[] {
+    const observedOrders = [...this.persistedState.observedOrders];
+    const recordedManagedBuyUsd = observedOrders.reduce(
+      (total, order) => total + (order.source === 'managed' && order.side === 'buy' ? order.volumeUsd : 0),
+      0,
+    );
+    const recordedManagedSellUsd = observedOrders.reduce(
+      (total, order) => total + (order.source === 'managed' && order.side === 'sell' ? order.volumeUsd : 0),
+      0,
+    );
+    const metricBuyUsd = Math.max(
+      0,
+      (this.persistedState.metrics.actualTotalVolumeUsd - this.persistedState.metrics.actualNetInflowUsd) / 2,
+    );
+    const metricSellUsd = Math.max(
+      0,
+      (this.persistedState.metrics.actualTotalVolumeUsd + this.persistedState.metrics.actualNetInflowUsd) / 2,
+    );
+    const unrecordedBuyUsd = Math.max(0, metricBuyUsd - recordedManagedBuyUsd);
+    const unrecordedSellUsd = Math.max(0, metricSellUsd - recordedManagedSellUsd);
+    if (unrecordedBuyUsd > 0.000001) {
+      observedOrders.push({
+        id: 'aggregate-metrics:buy',
+        side: 'buy',
+        volumeUsd: unrecordedBuyUsd,
+        source: 'managed',
+        accountId: null,
+        occurredAt: this.persistedState.updatedAt,
+      });
+    }
+    if (unrecordedSellUsd > 0.000001) {
+      observedOrders.push({
+        id: 'aggregate-metrics:sell',
+        side: 'sell',
+        volumeUsd: unrecordedSellUsd,
+        source: 'managed',
+        accountId: null,
+        occurredAt: this.persistedState.updatedAt,
+      });
+    }
+    return observedOrders;
+  }
+
+  private getManagedTargetTotalVolumeUsd(): number {
+    const config = this.persistedState.config;
+    if (!config) {
+      return 0;
+    }
+    return this.persistedState.observedOrders.reduce(
+      (total, order) => total + (order.responseBuyVolumeUsd ?? 0) + (order.responseSellVolumeUsd ?? 0),
+      config.targetTotalVolumeUsd,
+    );
+  }
+
+  private async replanAfterExternalEvent(txHash: string): Promise<void> {
+    const config = this.persistedState.config;
+    if (!config) {
+      throw new ApiError(409, 'Strategy engine durable object is not configured');
+    }
+    const baseSpecs = config.reviewedPlan
+      ? config.reviewedPlan.tasks.map((task) => ({ side: task.side, totalVolumeUsd: task.totalVolumeUsd }))
+      : buildStrategyPlanTaskSpecs(
+          this.buildPlannerConfig(),
+          deriveRequiredNetBuyAmount(config.strategyDocument, config.targetTotalVolumeUsd),
+        );
+    const baseBuyVolumeUsd = baseSpecs.reduce(
+      (total, task) => total + (task.side === 'buy' ? task.totalVolumeUsd : 0),
+      0,
+    );
+    const baseSellVolumeUsd = baseSpecs.reduce(
+      (total, task) => total + (task.side === 'sell' ? task.totalVolumeUsd : 0),
+      0,
+    );
+    const managedOrders = this.persistedState.observedOrders.filter(
+      (order) => order.source === 'managed',
+    );
+    const { remainingBuyVolumeUsd, remainingSellVolumeUsd } = calculateRemainingPlanVolumes(
+      baseBuyVolumeUsd,
+      baseSellVolumeUsd,
+      this.buildObservedOrdersForReplanning(),
+    );
+    const remainingTotalVolumeUsd = remainingBuyVolumeUsd + remainingSellVolumeUsd;
+    if (remainingTotalVolumeUsd <= 0.000001) {
+      await this.markCompleted();
+      return;
+    }
+
+    const remainingMaximumOrders = Math.max(
+      1,
+      config.strategyDocument.parameters.maxTransactions - managedOrders.length,
+    );
+    const remainingPreferredOrders = Math.max(
+      1,
+      config.baseOrderCount - managedOrders.length,
+    );
+    const counts = calculateFeasibleTradeCounts(
+      remainingPreferredOrders,
+      remainingMaximumOrders,
+      remainingBuyVolumeUsd,
+      remainingSellVolumeUsd,
+      config.strategyDocument.parameters.minOrderUsd,
+      config.strategyDocument.parameters.maxOrderUsd,
+    );
+    if (!counts) {
+      throw new ApiError(409, 'External event left no feasible remaining plan within the configured order limits');
+    }
+    const durationMs = Math.max(
+      0,
+      Math.round(config.baseDurationMs * remainingTotalVolumeUsd / Math.max(1, config.targetTotalVolumeUsd)),
+    );
+    const taskSpecs: StrategyPlannerTaskSpec[] = [];
+    if (remainingSellVolumeUsd > 0) {
+      taskSpecs.push({
+        side: 'sell',
+        pulse: 'event_replan_sell',
+        totalVolumeUsd: remainingSellVolumeUsd,
+        orderCount: counts.sellCount,
+        durationMs,
+        scheduledOffsetMs: 0,
+      });
+    }
+    if (remainingBuyVolumeUsd > 0) {
+      taskSpecs.push({
+        side: 'buy',
+        pulse: 'event_replan_buy',
+        totalVolumeUsd: remainingBuyVolumeUsd,
+        orderCount: counts.buyCount,
+        durationMs,
+        scheduledOffsetMs: 750,
+      });
+    }
+    await this.enqueuePlannedTaskSpecs(
+      taskSpecs,
+      Date.now(),
+      'tactic',
+      `event-replan:${txHash}:${this.persistedState.observedOrders.length}`,
+      (task) => ({
+        tactic: 'event_replan',
+        txHash,
+        pulse: task.pulse,
+        orderIndex: task.orderIndex,
+        totalOrders: task.totalOrders,
+      }),
+      this.buildObservedManagedVolumes(),
+      true,
+    );
   }
 
   private buildPlannerConfig(): StrategyPlannerConfig {
@@ -763,6 +909,8 @@ export class StrategyEngineDurableObject {
     source: StrategyEngineDurableObjectTask['source'],
     seedContext: string,
     metadataFactory?: (task: StrategyPlannerTask) => Record<string, unknown>,
+    existingPlannedVolumes = this.buildExistingPlannedVolumes(),
+    replacePendingTasks = false,
   ): Promise<void> {
     const config = this.persistedState.config;
     if (!config || this.persistedState.status !== 'running') {
@@ -777,7 +925,7 @@ export class StrategyEngineDurableObject {
       taskSpecs,
       startTime,
       baseTokenPriceUsd,
-      existingPlannedVolumes: this.buildExistingPlannedVolumes(),
+      existingPlannedVolumes,
       seedContext,
     });
 
@@ -786,6 +934,10 @@ export class StrategyEngineDurableObject {
         409,
         `Planner could only allocate ${planning.plannedTaskCount}/${planning.requestedTaskCount} tasks with ${planning.unallocatedVolumeUsd.toFixed(2)} USD unallocated`,
       );
+    }
+
+    if (replacePendingTasks) {
+      this.persistedState.pendingTasks = [];
     }
 
     for (const task of planning.tasks) {
@@ -844,7 +996,11 @@ export class StrategyEngineDurableObject {
 
   private async executeDueTask(
     task: StrategyEngineDurableObjectTask,
-  ): Promise<{ executedVolumeUsd: number; retryVolumeUsd: number }> {
+  ): Promise<{
+    executedVolumeUsd: number;
+    retryVolumeUsd: number;
+    fills: Array<{ accountId: number; executedVolumeUsd: number }>;
+  }> {
     const config = this.persistedState.config;
     if (!config) {
       throw new ApiError(409, 'Strategy engine durable object is not configured');
@@ -875,6 +1031,7 @@ export class StrategyEngineDurableObject {
       );
     }
     let executedVolumeUsd = 0;
+    const fills: Array<{ accountId: number; executedVolumeUsd: number }> = [];
     const executablePlannedVolumeUsd = executableAccounts.reduce(
       (sum, executableAccount) => sum + executableAccount.allocation.plannedVolumeUsd,
       0,
@@ -912,6 +1069,10 @@ export class StrategyEngineDurableObject {
           swap,
         );
         executedVolumeUsd += swap.executedVolumeUsd;
+        fills.push({
+          accountId: executableAccount.allocation.accountId,
+          executedVolumeUsd: swap.executedVolumeUsd,
+        });
       } catch (error: unknown) {
         retryVolumeUsd += sliceVolumeUsd;
         await this.persistFailedTradeLog(
@@ -929,6 +1090,7 @@ export class StrategyEngineDurableObject {
     return {
       executedVolumeUsd,
       retryVolumeUsd: Number(retryVolumeUsd.toFixed(6)),
+      fills,
     };
   }
 
@@ -1161,6 +1323,9 @@ export class StrategyEngineDurableObject {
     if (!config || this.persistedState.status !== 'running') {
       return;
     }
+    if (config.reviewedPlan) {
+      return;
+    }
 
     const hasBaseTasks = this.persistedState.pendingTasks.some(
       (task) => task.source === 'base',
@@ -1178,7 +1343,7 @@ export class StrategyEngineDurableObject {
       ),
       startTime,
       'base',
-      'base-plan',
+      `base-plan:${config.runId ?? config.versionId}:${this.persistedState.metrics.startTime}`,
     );
   }
 
@@ -1199,6 +1364,25 @@ export class StrategyEngineDurableObject {
     this.persistedState.pendingTasks.sort(
       (left, right) => left.scheduledAt - right.scheduledAt || left.id.localeCompare(right.id),
     );
+  }
+
+  private enqueueReviewedPlan(plan: StrategyReviewedPlan, startTime: number): void {
+    for (const task of plan.tasks) {
+      this.enqueueTask({
+        id: `base:reviewed:${task.taskId}`,
+        side: task.side,
+        amountUsd: task.totalVolumeUsd,
+        scheduledAt: startTime + Math.max(0, task.scheduledAt - plan.generatedAt),
+        source: 'base',
+        allocations: task.allocations,
+        metadata: {
+          pulse: task.pulse,
+          orderIndex: task.orderIndex,
+          totalOrders: task.totalOrders,
+          reviewedPlan: true,
+        },
+      });
+    }
   }
 
   private popNextDueTask(now: number): StrategyEngineDurableObjectTask | null {

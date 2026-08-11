@@ -12,7 +12,7 @@ import type {
 type StrategySchemaFormProps = {
   draft: StrategyVersionDocument;
   onChange: (updater: (current: StrategyVersionDocument) => StrategyVersionDocument) => void;
-  onSubmit: () => void;
+  onSubmit: (reviewedPlan: StrategyPlanPreview) => void;
   isSubmitting: boolean;
   activeStrategyVersionNo: number | null;
   activeStrategyStatus: string | null;
@@ -353,6 +353,8 @@ export default function StrategySchemaForm({
   }, [formData, reset, selectedRegistryToken]);
 
   React.useEffect(() => {
+    previewRequestIdRef.current += 1;
+    setPlanPreview(null);
     const baseTokenAddress = formData.parameters?.baseTokenAddress?.trim() ?? '';
     const quoteTokenAddress = formData.parameters?.quoteTokenAddress?.trim() ?? '';
     if (!baseTokenAddress || !quoteTokenAddress) {
@@ -408,7 +410,14 @@ export default function StrategySchemaForm({
   ];
 
   return (
-    <form onSubmit={handleSubmit(() => onSubmit())} className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+    <form
+      onSubmit={handleSubmit(() => {
+        if (planPreview?.isExecutable) {
+          onSubmit(planPreview);
+        }
+      })}
+      className="grid grid-cols-1 gap-6 lg:grid-cols-3"
+    >
       <div className="space-y-6 lg:col-span-2">
         <FormCard
           title="Macro Objective"
@@ -1089,7 +1098,7 @@ export default function StrategySchemaForm({
                     {formatCurrency(planPreview.availableBuyAmount)} / {formatCurrency(planPreview.requiredBuyAmount)} {planPreview.quoteLabel}
                   </p>
                   <p className="mt-1 text-xs opacity-80">
-                    {planPreview.eligibleAccountCount} account(s) can fund at least one minimum buy before planned sells, capability skipped {planPreview.skippedForCapabilityCount}, no pair assets {planPreview.skippedForNoPairAssetCount}, low-SOL warning {planPreview.skippedForSolReserveCount}
+                    {planPreview.eligibleTradingAccountCount} account(s) hold at least one pair asset; {planPreview.eligibleAccountCount} can fund an initial minimum buy. Capability skipped {planPreview.skippedForCapabilityCount}, no pair assets {planPreview.skippedForNoPairAssetCount}, low-SOL warning {planPreview.skippedForSolReserveCount}
                   </p>
                 </div>
 
@@ -1181,10 +1190,10 @@ export default function StrategySchemaForm({
 
           <button
             type="submit"
-            disabled={isSubmitting}
+            disabled={isSubmitting || planPreviewLoading || !planPreview?.isExecutable}
             className="mt-6 w-full rounded-xl bg-blue-600 py-3 text-sm font-bold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {isSubmitting ? 'Deploying...' : 'Deploy Strategy'}
+            {isSubmitting ? 'Deploying...' : 'Deploy Reviewed Plan'}
           </button>
         </div>
       </div>
