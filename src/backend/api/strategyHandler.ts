@@ -5,6 +5,7 @@ import {
   buildStrategyPlanningResult,
   deriveRequiredNetBuyAmount,
 } from '../strategy/planner';
+import { buildStrategyPriceCurveReview } from '../strategy/priceCurve';
 import {
   strategyEngineDurableObjectNameFor,
   type StrategyEngineDurableObjectConfigureRequest,
@@ -96,12 +97,14 @@ type StrategyPlanPreviewResponse = {
   enabledAccountCount: number;
   eligibleAccountCount: number;
   skippedForCapabilityCount: number;
+  skippedForNoPairAssetCount: number;
   skippedForSolReserveCount: number;
   sufficientBuyCapacity: boolean;
   requestedTaskCount: number;
   plannedTaskCount: number;
   unallocatedVolumeUsd: number;
   isExecutable: boolean;
+  volatilityReview: ReturnType<typeof buildStrategyPriceCurveReview>;
   tasks: StrategyPlanPreviewTask[];
   accounts: StrategyPlanPreviewAccount[];
 };
@@ -128,7 +131,7 @@ function buildStrategyPlanPreview(
   config: StrategyRecordConfig,
   accounts: Awaited<ReturnType<typeof listManagedAccountsWithStoredBalances>>,
   requiredBuyAmount: number,
-  baseTokenPriceUsd: number | null,
+  marketSnapshot: TokenMarketSnapshot | null,
 ): StrategyPlanPreviewResponse {
   const generatedAt = Date.now();
   const quoteLabel = formatQuoteLabel(config.quoteTokenAddress);
@@ -138,7 +141,7 @@ function buildStrategyPlanPreview(
     accounts,
     taskSpecs: buildStrategyPlanTaskSpecs(config, requiredBuyAmount),
     startTime: generatedAt + 1_000,
-    baseTokenPriceUsd,
+    baseTokenPriceUsd: marketSnapshot?.priceUsd ?? null,
     seedContext: 'base-plan',
   });
 
@@ -156,12 +159,19 @@ function buildStrategyPlanPreview(
     enabledAccountCount: planning.accounts.length,
     eligibleAccountCount: planning.eligibleBuyAccountCount,
     skippedForCapabilityCount: planning.skippedForCapabilityCount,
+    skippedForNoPairAssetCount: planning.skippedForNoPairAssetCount,
     skippedForSolReserveCount: planning.lowSolWarningCount,
     sufficientBuyCapacity: planning.availableBuyAmount >= requiredBuyAmount,
     requestedTaskCount: planning.requestedTaskCount,
     plannedTaskCount: planning.plannedTaskCount,
     unallocatedVolumeUsd: planning.unallocatedVolumeUsd,
     isExecutable: planning.isExecutable,
+    volatilityReview: buildStrategyPriceCurveReview({
+      tasks: planning.tasks,
+      targetVolatilityPct: document.targets.volatilityPctMin,
+      priceUsd: marketSnapshot?.priceUsd ?? null,
+      liquidityUsd: marketSnapshot?.liquidityUsd ?? null,
+    }),
     tasks: planning.tasks,
     accounts: planning.accounts,
   };
@@ -358,7 +368,7 @@ export async function handleStrategyRoutes(
         config,
         accounts,
         requiredBuyAmount,
-        marketSnapshot?.priceUsd ?? null,
+        marketSnapshot,
       ),
     );
   }
@@ -441,7 +451,7 @@ export async function handleStrategyRoutes(
       buildStrategyRecordConfigFromDocument(normalizedDocument, user.id),
       planningAccounts,
       requiredBuyAmount,
-      deploymentMarketSnapshot?.priceUsd ?? null,
+      deploymentMarketSnapshot,
     );
     if (!deploymentPlan.isExecutable) {
       throw new ApiError(

@@ -6,6 +6,7 @@ import {
   buildStrategyPlanTaskSpecs,
   deriveRequiredNetBuyAmount,
 } from '../src/backend/strategy/planner';
+import { buildStrategyPriceCurveReview } from '../src/backend/strategy/priceCurve';
 import {
   allocateBoundedOrderVolume,
   calculateFeasibleTradeCounts,
@@ -238,13 +239,24 @@ assert.equal(
   3,
   'self-cycling net buys should use every funded eligible account before concentrating orders',
 );
-assert.ok(planning.tasks.filter((task) => task.side === 'sell').length >= 14, 'at least 14 sells should unlock enough self-cycling accounts');
+assert.ok(
+  planning.tasks.filter((task) => task.side === 'sell').length >= 5,
+  'sell order count should expand enough to cover per-account sell capacity',
+);
+const plannedQuoteBalances = new Map(accounts.map((account) => [account.id, account.quoteAvailableAmount]));
+for (const task of planning.tasks) {
+  const allocation = task.allocations[0]!;
+  const currentBalance = plannedQuoteBalances.get(allocation.accountId) ?? 0;
+  const nextBalance = currentBalance + (task.side === 'sell' ? task.totalVolumeUsd : -task.totalVolumeUsd);
+  assert.ok(nextBalance >= -0.000001, 'randomized ordering must schedule every buyback after its funding sell');
+  plannedQuoteBalances.set(allocation.accountId, nextBalance);
+}
 assert.ok(planning.tasks.reduce((sum, task) => sum + task.totalVolumeUsd, 0) >= 150, 'planned gross volume should meet the 150 USD minimum');
 assert.equal(
-  planning.tasks.reduce(
+  Number(planning.tasks.reduce(
     (sum, task) => sum + (task.side === 'buy' ? task.totalVolumeUsd : -task.totalVolumeUsd),
     0,
-  ),
+  ).toFixed(6)),
   100,
   'planned net buy should equal 100 USD',
 );
@@ -254,7 +266,7 @@ const transactionCapPlanning = buildStrategyPlanningResult({
   document,
   config: {
     ...config,
-    maxOrderCount: 33,
+    maxOrderCount: 21,
   },
   accounts,
   taskSpecs,
@@ -282,9 +294,11 @@ const changedPlanning = buildStrategyPlanningResult({
   baseTokenPriceUsd: 1,
   seedContext: 'planner-changing-conditions',
 });
-assert.equal(changedPlanning.isExecutable, true, 'planner should adapt to changed balances and 10-25 USD order bounds');
-assert.ok(changedPlanning.tasks.length >= 20 && changedPlanning.tasks.length <= 50, 'adapted plan should remain within its transaction range');
-assert.ok(changedPlanning.tasks.every((task) => task.totalVolumeUsd >= 10 && task.totalVolumeUsd <= 25), 'adapted transactions should respect changed order bounds');
+assert.equal(
+  changedPlanning.isExecutable,
+  false,
+  'planner should reject 20 minimum trades when 150 USD at a 10 USD minimum permits at most 14 buy/sell trades',
+);
 
 const impossiblePlanning = buildStrategyPlanningResult({
   document,
@@ -303,5 +317,115 @@ const impossiblePlanning = buildStrategyPlanningResult({
   seedContext: 'planner-no-sellers',
 });
 assert.equal(impossiblePlanning.isExecutable, false, 'planner should report no solution when account capacity cannot meet the minimum transaction count');
+
+const accumulation25Document = buildStrategyDocumentFromSettings({
+  baseTokenAddress,
+  quoteTokenAddress,
+  minTransactions: 25,
+  volatilityTarget: 0,
+  pullbackTarget: 0,
+  volumeTarget: 180,
+  netBuyinTarget: 100,
+  timeRangeTarget: '24h',
+  maxTransactions: 50,
+  maxSlippage: 1,
+  strategyNotes: 'reported 25-trade accumulation regression',
+  macroObjective: 'accumulation',
+});
+accumulation25Document.parameters.minOrderUsd = 5;
+accumulation25Document.parameters.maxOrderUsd = 30;
+const accumulation25Config = {
+  ...config,
+  baseOrderCount: resolveBasePlannedTransactionCount(accumulation25Document),
+  baseTotalVolumeUsd: 180,
+  minOrderUsd: 5,
+  maxOrderUsd: 30,
+  execution: accumulation25Document.execution,
+};
+const accumulation25Specs = buildStrategyPlanTaskSpecs(accumulation25Config, 100);
+const accumulation25Accounts = [
+  buildAccount(1, 34, 0),
+  buildAccount(2, 33, 0),
+  buildAccount(3, 33, 0),
+  ...Array.from({ length: 12 }, (_, index) => buildAccount(index + 4, 0, 10)),
+  buildAccount(100, 0, 0),
+];
+const buildAccumulation25Plan = (seedContext: string) => buildStrategyPlanningResult({
+  document: accumulation25Document,
+  config: accumulation25Config,
+  accounts: accumulation25Accounts,
+  taskSpecs: accumulation25Specs,
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext,
+});
+const accumulation25Plan = buildAccumulation25Plan('accumulation-25-a');
+assert.equal(
+  accumulation25Plan.isExecutable,
+  true,
+  JSON.stringify({
+    requestedTaskCount: accumulation25Plan.requestedTaskCount,
+    plannedTaskCount: accumulation25Plan.plannedTaskCount,
+    unallocatedVolumeUsd: accumulation25Plan.unallocatedVolumeUsd,
+    taskVolumes: accumulation25Plan.tasks.map((task) => [task.side, task.totalVolumeUsd]),
+  }),
+);
+assert.ok(accumulation25Plan.tasks.length >= 25, 'feasible accumulation plan must honor minTransactions=25');
+assert.ok(
+  accumulation25Plan.tasks.every((task) =>
+    task.allocations.every((allocation) => allocation.accountId !== 100),
+  ),
+  'an account holding neither asset in the configured pair must never receive a task',
+);
+assert.equal(
+  accumulation25Plan.skippedForNoPairAssetCount,
+  1,
+  'planner review should report asset-empty accounts separately',
+);
+assert.equal(
+  Number(accumulation25Plan.tasks.reduce((sum, task) => sum + task.totalVolumeUsd, 0).toFixed(6)),
+  180,
+  'accumulation plan must preserve target gross volume',
+);
+assert.equal(
+  Number(accumulation25Plan.tasks.reduce(
+    (sum, task) => sum + (task.side === 'buy' ? task.totalVolumeUsd : -task.totalVolumeUsd),
+    0,
+  ).toFixed(6)),
+  100,
+  'accumulation plan must preserve net buy-in',
+);
+const repeatedAccumulation25Plan = buildAccumulation25Plan('accumulation-25-a');
+assert.deepEqual(
+  repeatedAccumulation25Plan.tasks.map((task) => [task.side, task.totalVolumeUsd, task.scheduledAt]),
+  accumulation25Plan.tasks.map((task) => [task.side, task.totalVolumeUsd, task.scheduledAt]),
+  'the same planning seed must reproduce amounts, sides, and timing',
+);
+const alternateAccumulation25Plan = buildAccumulation25Plan('accumulation-25-b');
+assert.notDeepEqual(
+  alternateAccumulation25Plan.tasks.map((task) => [task.side, task.totalVolumeUsd, task.scheduledAt]),
+  accumulation25Plan.tasks.map((task) => [task.side, task.totalVolumeUsd, task.scheduledAt]),
+  'different planning seeds should vary amounts and timing',
+);
+assert.ok(
+  Array.from({ length: 32 }, (_, index) =>
+    buildAccumulation25Plan(`accumulation-funded-first-${index}`),
+  ).some((candidate) => candidate.tasks[0]?.side === 'buy'),
+  'an initially funded account must be able to buy before any sell',
+);
+const priceCurveReview = buildStrategyPriceCurveReview({
+  tasks: accumulation25Plan.tasks,
+  targetVolatilityPct: 10,
+  priceUsd: 2,
+  liquidityUsd: 10_000,
+});
+assert.equal(priceCurveReview.available, true);
+assert.equal(priceCurveReview.targetVolatilityPct, 10);
+assert.ok((priceCurveReview.projectedVolatilityPct ?? 0) > 0);
+assert.equal(
+  accumulation25Plan.isExecutable,
+  true,
+  'optional volatility review must not block an otherwise executable plan',
+);
 
 console.log('Strategy planner check passed. Eligibility and executable transaction count are correct.');

@@ -230,6 +230,16 @@ export type StrategyPlanPreviewAccount = {
   eligibleForSell: boolean;
 };
 
+export type StrategyPriceCurveReview = {
+  targetVolatilityPct: number | null;
+  projectedVolatilityPct: number | null;
+  startPriceUsd: number | null;
+  projectedLowPriceUsd: number | null;
+  projectedHighPriceUsd: number | null;
+  liquidityUsd: number | null;
+  available: boolean;
+};
+
 export type StrategyPlanPreview = {
   generatedAt: number;
   pair: {
@@ -244,12 +254,14 @@ export type StrategyPlanPreview = {
   enabledAccountCount: number;
   eligibleAccountCount: number;
   skippedForCapabilityCount: number;
+  skippedForNoPairAssetCount: number;
   skippedForSolReserveCount: number;
   sufficientBuyCapacity: boolean;
   requestedTaskCount: number;
   plannedTaskCount: number;
   unallocatedVolumeUsd: number;
   isExecutable: boolean;
+  volatilityReview: StrategyPriceCurveReview;
   tasks: StrategyPlanPreviewTask[];
   accounts: StrategyPlanPreviewAccount[];
 };

@@ -1089,8 +1089,29 @@ export default function StrategySchemaForm({
                     {formatCurrency(planPreview.availableBuyAmount)} / {formatCurrency(planPreview.requiredBuyAmount)} {planPreview.quoteLabel}
                   </p>
                   <p className="mt-1 text-xs opacity-80">
-                    {planPreview.eligibleAccountCount} account(s) can fund at least one minimum buy before planned sells, capability skipped {planPreview.skippedForCapabilityCount}, low-SOL warning {planPreview.skippedForSolReserveCount}
+                    {planPreview.eligibleAccountCount} account(s) can fund at least one minimum buy before planned sells, capability skipped {planPreview.skippedForCapabilityCount}, no pair assets {planPreview.skippedForNoPairAssetCount}, low-SOL warning {planPreview.skippedForSolReserveCount}
                   </p>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-sm text-slate-200">
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Projected Price Curve</p>
+                  {planPreview.volatilityReview.available ? (
+                    <>
+                      <p className="mt-2 text-lg font-semibold">
+                        {planPreview.volatilityReview.projectedVolatilityPct?.toFixed(2)}% projected
+                        {planPreview.volatilityReview.targetVolatilityPct != null
+                          ? ` / ${planPreview.volatilityReview.targetVolatilityPct.toFixed(2)}% optional target`
+                          : ''}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-400">
+                        Estimated range {formatCurrency(planPreview.volatilityReview.projectedLowPriceUsd ?? 0)}–{formatCurrency(planPreview.volatilityReview.projectedHighPriceUsd ?? 0)} from {formatCurrency(planPreview.volatilityReview.startPriceUsd ?? 0)}, using {formatCurrency(planPreview.volatilityReview.liquidityUsd ?? 0)} snapshot liquidity. This estimate does not block execution.
+                      </p>
+                    </>
+                  ) : (
+                    <p className="mt-2 text-xs text-slate-400">
+                      Projection unavailable until both market price and liquidity are present. The optional volatility target does not block execution.
+                    </p>
+                  )}
                 </div>
 
                 <div className="mt-4 rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-sm text-slate-200">

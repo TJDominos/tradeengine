@@ -27,6 +27,7 @@
     "@emotion/styled": "^11.14.1",
     "@mui/material": "^9.2.0",
     "@mui/x-date-pickers": "^9.10.0",
+    "@noble/ciphers": "^2.3.0",
     "@scure/bip39": "^2.2.0",
     "@solana/web3.js": "^1.98.4",
     "bs58": "^6.0.0",
