@@ -13,6 +13,7 @@ const migrationsDir = path.join(repoRoot, 'migrations');
 const persistDir = mkdtempSync(path.join(tmpdir(), 'tradeengine-do-lifecycle-'));
 const contractAddress = 'So11111111111111111111111111111111111111112';
 const walletAddress = contractAddress;
+const skipWebhookCheck = process.env.SKIP_WEBHOOK_CHECK === '1';
 
 let port = 0;
 let inspectorPort = 0;
@@ -296,6 +297,8 @@ try {
     [
       'wrangler',
       'dev',
+      '--config',
+      path.join(repoRoot, 'dist', 'tradeengine', 'wrangler.json'),
       '--local',
       '--ip',
       '127.0.0.1',
@@ -424,19 +427,21 @@ try {
     'debug-simulated metrics should reflect non-zero active volume',
   );
 
-  const webhookResponse = await requestJson('/api/webhook', {
-    method: 'POST',
-    body: JSON.stringify({
-      type: 'whale_buy',
-      amount: 25,
-      contractAddress,
-      txHash: `ci-tx-${Date.now()}`,
-      wallet_address: walletAddress,
-      is_loss_cut: false,
-    }),
-  });
-  assert.equal(webhookResponse.payload.forwarded, true, 'webhook should forward the event to the active DO');
-  assert.equal(webhookResponse.payload.duplicate, false, 'fresh webhook event should not be treated as a duplicate');
+  if (!skipWebhookCheck) {
+    const webhookResponse = await requestJson('/api/webhook', {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'whale_buy',
+        amount: 25,
+        contractAddress,
+        txHash: `ci-tx-${Date.now()}`,
+        wallet_address: walletAddress,
+        is_loss_cut: false,
+      }),
+    });
+    assert.equal(webhookResponse.payload.forwarded, true, 'webhook should forward the event to the active DO');
+    assert.equal(webhookResponse.payload.duplicate, false, 'fresh webhook event should not be treated as a duplicate');
+  }
 
   const abortResponse = await requestJson('/api/strategy/abort', {
     method: 'POST',
@@ -475,6 +480,34 @@ try {
   });
   assert.equal(resumeResponse.payload.started, true, 'resume should start the next queued strategy');
 
+  const pauseResponse = await requestJson('/api/strategy/pause', {
+    method: 'POST',
+    headers: authHeaders,
+  });
+  assert.equal(pauseResponse.payload.paused, true, 'pause should pause the active strategy queue');
+
+  const taskPausedSnapshot = await requestJson('/api/strategy/current', {
+    method: 'GET',
+    headers: authHeaders,
+  });
+  assert.equal(taskPausedSnapshot.payload.active?.versionId, secondQueueVersionId);
+  assert.equal(taskPausedSnapshot.payload.queueStatus, 'paused');
+  assert.ok(
+    taskPausedSnapshot.payload.tasks.length > 0,
+    'paused queue snapshot should expose planned execution tasks',
+  );
+  assert.ok(
+    taskPausedSnapshot.payload.tasks.every((task) =>
+      ['done', 'pending', 'failed'].includes(task.status)),
+    'every exposed task should use a supported queue status',
+  );
+
+  const resumePausedResponse = await requestJson('/api/strategy/resume', {
+    method: 'POST',
+    headers: authHeaders,
+  });
+  assert.equal(resumePausedResponse.payload.resumed, true, 'resume should reactivate a paused run');
+
   await simulateActiveStrategy(authHeaders, {
     action: 'hold',
     clearPendingTasks: true,
@@ -499,7 +532,9 @@ try {
   );
 
   assert.equal(resumedSnapshot.active.versionId, secondQueueVersionId);
-  console.log('Strategy DO lifecycle check passed. Start, metrics, webhook, abort, and resume all succeeded.');
+  console.log(
+    `Strategy DO lifecycle check passed. Start, metrics, ${skipWebhookCheck ? 'task visibility, pause,' : 'webhook,'} abort, and resume all succeeded.`,
+  );
 } finally {
   if (workerProcess) {
     await stopWorkerProcess(workerProcess);

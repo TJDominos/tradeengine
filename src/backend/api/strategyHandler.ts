@@ -748,8 +748,45 @@ export async function handleStrategyRoutes(
     });
   }
 
+  if (method === 'POST' && pathname === '/api/strategy/pause') {
+    const user = await requireAdmin(request, env);
+    const pausedStrategy = await strategyAutomationService.pauseCurrentStrategy(env);
+
+    await dbAddAuditLog(
+      env.TRADINGBOT_DB,
+      user.id,
+      'strategy.pause_requested',
+      pausedStrategy?.versionId ?? 'strategy-queue',
+      pausedStrategy
+        ? `Paused strategy queue for ${pausedStrategy.versionId}.`
+        : 'Pause requested but no active strategy was running.',
+    );
+
+    return jsonResponse({
+      paused: pausedStrategy != null,
+      strategy: pausedStrategy,
+    });
+  }
+
   if (method === 'POST' && pathname === '/api/strategy/resume') {
     const user = await requireAdmin(request, env);
+    const resumedStrategy = await strategyAutomationService.resumeCurrentStrategy(env);
+    if (resumedStrategy) {
+      await dbAddAuditLog(
+        env.TRADINGBOT_DB,
+        user.id,
+        'strategy.resume_requested',
+        resumedStrategy.versionId,
+        `Resumed paused strategy queue for ${resumedStrategy.versionId}.`,
+      );
+      return jsonResponse({
+        started: false,
+        resumed: true,
+        queueEmpty: false,
+        alreadyRunning: false,
+        strategy: resumedStrategy,
+      });
+    }
     const wasBusy = (await strategyAutomationService.getActiveStrategyStub(env)) != null;
     const startedStrategy = await strategyAutomationService.startNextStrategy(env, {
       force: true,

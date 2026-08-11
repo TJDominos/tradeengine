@@ -41,12 +41,48 @@ const DEFAULT_STRATEGY_TASK_BASE_VOLUME_USD = 300;
 const DEFAULT_DISTRIBUTION_CHUNK_COUNT = 3;
 const DEFAULT_DISTRIBUTION_DELAY_JITTER_MS = 2_000;
 const INITIAL_EXECUTION_DELAY_MS = 1_000;
+const FIRST_TASK_RETRY_DELAY_MS = 30_000;
 
 export type StrategyEngineDurableObjectStatus =
   | 'idle'
   | 'running'
+  | 'paused'
   | 'completed'
   | 'aborted';
+
+export type StrategyEngineTaskStatus = 'done' | 'pending' | 'failed';
+
+export interface StrategyEngineTaskSnapshot {
+  id: string;
+  side: 'buy' | 'sell';
+  amountUsd: number;
+  scheduledAt: number;
+  nextExecutionTime: number | null;
+  source: 'base' | 'tactic';
+  status: StrategyEngineTaskStatus;
+  attemptCount: number;
+  executedVolumeUsd: number;
+  completedAt: number | null;
+  lastFailedAt: number | null;
+  lastError: string | null;
+}
+
+export function resolveStrategyTaskFailureTransition(
+  failureCount: number,
+  now: number,
+  nextTaskScheduledAt: number | null,
+): { pause: boolean; retryAt: number | null } {
+  if (failureCount >= 3) {
+    return { pause: true, retryAt: null };
+  }
+  if (failureCount === 1) {
+    return { pause: false, retryAt: now + FIRST_TASK_RETRY_DELAY_MS };
+  }
+  return {
+    pause: false,
+    retryAt: nextTaskScheduledAt ?? now + FIRST_TASK_RETRY_DELAY_MS,
+  };
+}
 
 export interface StrategyEngineDurableObjectMetrics {
   actualTotalVolumeUsd: number;
@@ -110,6 +146,8 @@ export interface PersistedStrategyEngineState {
   metrics: StrategyEngineDurableObjectMetrics;
   currentEngineState: EngineState | null;
   pendingTasks: StrategyEngineDurableObjectTask[];
+  taskSnapshots: StrategyEngineTaskSnapshot[];
+  pausedTask: StrategyEngineDurableObjectTask | null;
   observedOrders: StrategyObservedOrder[];
   pendingReplanTxHash: string | null;
   dedupedTxHashes: string[];
@@ -192,6 +230,8 @@ function createIdleState(): PersistedStrategyEngineState {
     metrics: createEmptyMetrics(0),
     currentEngineState: null,
     pendingTasks: [],
+    taskSnapshots: [],
+    pausedTask: null,
     observedOrders: [],
     pendingReplanTxHash: null,
     dedupedTxHashes: [],
@@ -272,6 +312,16 @@ export class StrategyEngineDurableObject {
       return Response.json({ ok: true, status: this.persistedState.status, report });
     }
 
+    if (request.method === 'POST' && url.pathname === '/pause') {
+      await this.pause();
+      return Response.json({ ok: true, status: this.persistedState.status });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/resume') {
+      await this.resume();
+      return Response.json({ ok: true, status: this.persistedState.status });
+    }
+
     if (request.method === 'POST' && (url.pathname === '/webhook' || url.pathname === '/event')) {
       const body = await request.json<StrategyEngineDurableObjectEventRequest>();
       await this.configure(body);
@@ -338,15 +388,22 @@ export class StrategyEngineDurableObject {
       const execution = await this.executeDueTask(nextTask);
       if (execution.executedVolumeUsd > 0) {
         this.applyExecutedTask(nextTask, execution.fills);
+        this.addTaskExecutedVolume(nextTask.id, execution.executedVolumeUsd);
       }
       if (execution.retryVolumeUsd > 0) {
-        this.scheduleTaskRetry(
+        await this.handleTaskFailure(
           {
             ...nextTask,
             amountUsd: execution.retryVolumeUsd,
           },
           now,
+          execution.lastError ?? 'Task volume could not be fully executed',
         );
+        if (this.persistedState.status === 'paused') {
+          return;
+        }
+      } else {
+        this.markTaskDone(nextTask.id, now);
       }
     } catch (error: unknown) {
       if (
@@ -360,7 +417,11 @@ export class StrategyEngineDurableObject {
         `[StrategyEngineDO] Swap execution failed for ${nextTask.side} ${nextTask.amountUsd} on ${config.baseTokenAddress}:`,
         error,
       );
-      this.scheduleTaskRetry(nextTask, now);
+      await this.handleTaskFailure(
+        nextTask,
+        now,
+        error instanceof Error ? error.message : String(error),
+      );
       await this.persistState();
       return;
     }
@@ -393,6 +454,8 @@ export class StrategyEngineDurableObject {
     state.metrics = createEmptyMetrics(startTime);
     state.currentEngineState = buildInitialStateForObjective(state.config.macroObjective);
     state.pendingTasks = [];
+    state.taskSnapshots = [];
+    state.pausedTask = null;
     state.observedOrders = [];
     state.pendingReplanTxHash = null;
     state.dedupedTxHashes = [];
@@ -414,6 +477,39 @@ export class StrategyEngineDurableObject {
     await this.ctx.storage.deleteAlarm();
     await this.persistState({ scheduleAlarm: false });
     return buildExecutionReportFromMetrics(this.persistedState.metrics, reason);
+  }
+
+  private async pause(): Promise<void> {
+    if (!this.persistedState.config || this.persistedState.status !== 'running') {
+      throw new ApiError(409, 'Only a running strategy queue can be paused');
+    }
+    this.persistedState.status = 'paused';
+    await this.ctx.storage.deleteAlarm();
+    await this.persistState({ scheduleAlarm: false });
+  }
+
+  private async resume(): Promise<void> {
+    if (!this.persistedState.config || this.persistedState.status !== 'paused') {
+      throw new ApiError(409, 'Only a paused strategy queue can be resumed');
+    }
+    this.persistedState.status = 'running';
+    const pausedTask = this.persistedState.pausedTask;
+    this.persistedState.pausedTask = null;
+    if (pausedTask) {
+      this.enqueueTask({
+        ...pausedTask,
+        scheduledAt: Date.now(),
+        metadata: {
+          ...pausedTask.metadata,
+          retryPriority: true,
+        },
+      });
+      this.updateTaskSnapshot(pausedTask.id, {
+        status: 'pending',
+        nextExecutionTime: Date.now(),
+      });
+    }
+    await this.persistState();
   }
 
   private async clear(): Promise<void> {
@@ -566,6 +662,7 @@ export class StrategyEngineDurableObject {
         responseSellVolumeUsd,
       });
       this.persistedState.metrics.tacticsTriggeredCount += 1;
+      this.discardPendingTaskSnapshots();
       this.persistedState.pendingTasks = [];
       this.persistedState.pendingReplanTxHash = event.txHash;
       await this.persistState({ scheduleAlarm: false });
@@ -622,6 +719,7 @@ export class StrategyEngineDurableObject {
     }
 
     if (input.clearPendingTasks ?? true) {
+      this.discardPendingTaskSnapshots();
       this.persistedState.pendingTasks = [];
       await this.ctx.storage.deleteAlarm();
       await this.persistState({ scheduleAlarm: false });
@@ -937,6 +1035,7 @@ export class StrategyEngineDurableObject {
     }
 
     if (replacePendingTasks) {
+      this.discardPendingTaskSnapshots();
       this.persistedState.pendingTasks = [];
     }
 
@@ -1000,6 +1099,7 @@ export class StrategyEngineDurableObject {
     executedVolumeUsd: number;
     retryVolumeUsd: number;
     fills: Array<{ accountId: number; executedVolumeUsd: number }>;
+    lastError: string | null;
   }> {
     const config = this.persistedState.config;
     if (!config) {
@@ -1039,6 +1139,9 @@ export class StrategyEngineDurableObject {
     let retryVolumeUsd = Number(
       Math.max(0, task.amountUsd - executablePlannedVolumeUsd).toFixed(6),
     );
+    let lastError: string | null = retryVolumeUsd > 0
+      ? 'Task volume could not be allocated to an active account'
+      : null;
     const rpcUrls = await dbResolveSolanaRpcUrls(
       this.env.TRADINGBOT_DB,
       config.userId,
@@ -1081,6 +1184,7 @@ export class StrategyEngineDurableObject {
         });
       } catch (error: unknown) {
         retryVolumeUsd += sliceVolumeUsd;
+        lastError = error instanceof Error ? error.message : String(error);
         await this.persistFailedTradeLog(
           task,
           executableAccount.allocation,
@@ -1097,6 +1201,7 @@ export class StrategyEngineDurableObject {
       executedVolumeUsd,
       retryVolumeUsd: Number(retryVolumeUsd.toFixed(6)),
       fills,
+      lastError,
     };
   }
 
@@ -1298,34 +1403,54 @@ export class StrategyEngineDurableObject {
     };
   }
 
-  private scheduleTaskRetry(
+  private async handleTaskFailure(
     task: StrategyEngineDurableObjectTask,
     now: number,
-  ): void {
+    error: string,
+  ): Promise<void> {
+    const snapshot = this.persistedState.taskSnapshots.find(
+      (candidate) => candidate.id === task.id,
+    );
+    const attemptCount = (snapshot?.attemptCount ?? 0) + 1;
+    const nextScheduledTask = this.persistedState.pendingTasks[0] ?? null;
+    const transition = resolveStrategyTaskFailureTransition(
+      attemptCount,
+      now,
+      nextScheduledTask?.scheduledAt ?? null,
+    );
+    if (transition.pause) {
+      this.updateTaskSnapshot(task.id, {
+        status: 'failed',
+        attemptCount,
+        nextExecutionTime: null,
+        lastFailedAt: now,
+        lastError: error,
+      });
+      this.persistedState.pausedTask = task;
+      this.persistedState.status = 'paused';
+      await this.ctx.storage.deleteAlarm();
+      await this.persistState({ scheduleAlarm: false });
+      return;
+    }
+
+    const retryAt = transition.retryAt ?? now + FIRST_TASK_RETRY_DELAY_MS;
     this.enqueueTask({
       ...task,
-      id: undefined,
       allocations: undefined,
-      scheduledAt: now + this.buildRetryDelayMs(),
+      scheduledAt: retryAt,
       metadata: {
         ...task.metadata,
+        retryPriority: attemptCount === 2,
         lastRetryAt: now,
       },
     });
-  }
-
-  private buildRetryDelayMs(): number {
-    const config = this.persistedState.config;
-    if (!config) {
-      return 5_000;
-    }
-    const baseIntervalMs = Math.max(
-      1_000,
-      Math.round(config.baseDurationMs / Math.max(1, config.baseOrderCount)),
-    );
-    const jitterRatio = Math.max(0, Math.min(0.5, config.execution.timeJitterRatio));
-    const jitterMultiplier = 1 + ((Math.random() * 2) - 1) * jitterRatio;
-    return Math.max(1_000, Math.round(baseIntervalMs * jitterMultiplier));
+    this.updateTaskSnapshot(task.id, {
+      status: 'failed',
+      attemptCount,
+      nextExecutionTime: retryAt,
+      lastFailedAt: now,
+      lastError: error,
+    });
   }
 
   private async ensureBasePlanIfNeeded(startTime: number): Promise<void> {
@@ -1362,8 +1487,9 @@ export class StrategyEngineDurableObject {
     if (amountUsd <= 0) {
       return;
     }
+    const taskId = task.id ?? createTaskId();
     this.persistedState.pendingTasks.push({
-      id: task.id ?? createTaskId(),
+      id: taskId,
       side: task.side,
       amountUsd,
       scheduledAt: Math.max(Date.now(), Math.round(task.scheduledAt)),
@@ -1371,8 +1497,73 @@ export class StrategyEngineDurableObject {
       allocations: task.allocations,
       metadata: task.metadata,
     });
+    const existingSnapshot = this.persistedState.taskSnapshots.find(
+      (snapshot) => snapshot.id === taskId,
+    );
+    if (!existingSnapshot) {
+      this.persistedState.taskSnapshots.push({
+        id: taskId,
+        side: task.side,
+        amountUsd,
+        scheduledAt: task.scheduledAt,
+        nextExecutionTime: task.scheduledAt,
+        source: task.source,
+        status: 'pending',
+        attemptCount: 0,
+        executedVolumeUsd: 0,
+        completedAt: null,
+        lastFailedAt: null,
+        lastError: null,
+      });
+    }
     this.persistedState.pendingTasks.sort(
-      (left, right) => left.scheduledAt - right.scheduledAt || left.id.localeCompare(right.id),
+      (left, right) =>
+        left.scheduledAt - right.scheduledAt ||
+        Number(right.metadata?.retryPriority === true) - Number(left.metadata?.retryPriority === true) ||
+        left.id.localeCompare(right.id),
+    );
+  }
+
+  private updateTaskSnapshot(
+    taskId: string,
+    update: Partial<StrategyEngineTaskSnapshot>,
+  ): void {
+    const snapshot = this.persistedState.taskSnapshots.find(
+      (candidate) => candidate.id === taskId,
+    );
+    if (snapshot) {
+      Object.assign(snapshot, update);
+    }
+  }
+
+  private addTaskExecutedVolume(taskId: string, executedVolumeUsd: number): void {
+    const snapshot = this.persistedState.taskSnapshots.find(
+      (candidate) => candidate.id === taskId,
+    );
+    if (!snapshot) {
+      return;
+    }
+    snapshot.executedVolumeUsd += executedVolumeUsd;
+  }
+
+  private markTaskDone(taskId: string, now: number): void {
+    const snapshot = this.persistedState.taskSnapshots.find(
+      (candidate) => candidate.id === taskId,
+    );
+    if (!snapshot) {
+      return;
+    }
+    snapshot.status = 'done';
+    snapshot.attemptCount += 1;
+    snapshot.completedAt = now;
+    snapshot.nextExecutionTime = null;
+    snapshot.lastError = null;
+  }
+
+  private discardPendingTaskSnapshots(): void {
+    const pendingTaskIds = new Set(this.persistedState.pendingTasks.map((task) => task.id));
+    this.persistedState.taskSnapshots = this.persistedState.taskSnapshots.filter(
+      (snapshot) => !pendingTaskIds.has(snapshot.id),
     );
   }
 
@@ -1422,6 +1613,7 @@ export class StrategyEngineDurableObject {
       currentEngineState: this.persistedState.currentEngineState,
       config: this.persistedState.config,
       nextExecutionTime: this.persistedState.pendingTasks[0]?.scheduledAt ?? null,
+      tasks: this.persistedState.taskSnapshots,
     };
   }
 

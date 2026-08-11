@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   FileText,
   LoaderCircle,
+  Pause,
   Play,
   Trash2,
 } from 'lucide-react';
@@ -56,11 +57,28 @@ type QueueEngineMetrics = {
   startTime?: number | null;
 };
 
+type QueueTask = {
+  id: string;
+  side: 'buy' | 'sell';
+  amountUsd: number;
+  scheduledAt: number;
+  nextExecutionTime: number | null;
+  source: 'base' | 'tactic';
+  status: 'done' | 'pending' | 'failed';
+  attemptCount: number;
+  executedVolumeUsd: number;
+  completedAt: number | null;
+  lastFailedAt: number | null;
+  lastError: string | null;
+};
+
 type QueueSnapshotResponse = {
   active: QueueStrategyRecord | null;
   pending: QueueStrategyRecord[];
   history: QueueStrategyRecord[];
   paused: boolean;
+  queueStatus: 'active' | 'paused' | 'aborted';
+  tasks: QueueTask[];
   currentEngineState: string | null;
   currentMetrics: QueueEngineMetrics | null;
 };
@@ -143,6 +161,8 @@ export default function HistoricalSetupsPage() {
   const pending = queueState?.pending ?? [];
   const history = queueState?.history ?? [];
   const metrics = queueState?.currentMetrics ?? null;
+  const tasks = queueState?.tasks ?? [];
+  const queueStatus = queueState?.queueStatus ?? 'active';
   const targetVolume = active?.config.baseTotalVolumeUsd ?? 0;
   const executedVolume = metrics?.actualTotalVolume ?? 0;
   const progressRatio =
@@ -186,8 +206,8 @@ export default function HistoricalSetupsPage() {
                   <>
                     <div className="mt-3 flex flex-wrap items-center gap-3">
                       <h3 className="text-2xl font-semibold text-white">{strategyVersionLabel(active)}</h3>
-                      <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-300 shadow-[0_0_20px_rgba(34,197,94,0.15)]">
-                        Live
+                      <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${queueStatus === 'paused' ? 'border-amber-500/30 bg-amber-500/15 text-amber-300' : 'border-emerald-500/30 bg-emerald-500/15 text-emerald-300'}`}>
+                        {queueStatus}
                       </span>
                     </div>
                     <p className="mt-3 text-sm text-slate-300">
@@ -210,21 +230,44 @@ export default function HistoricalSetupsPage() {
               </div>
 
               {active ? (
-                <button
-                  onClick={() =>
-                    void runAction('abort-current', async () => {
+                <div className="flex flex-wrap justify-end gap-2">
+                  {queueStatus === 'paused' ? (
+                    <button
+                      onClick={() => void runAction('resume-current', async () => {
+                        await api('/api/strategy/resume', { method: 'POST' });
+                      })}
+                      disabled={actionKey != null}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <Play size={16} />
+                      {actionKey === 'resume-current' ? 'Resuming...' : 'Resume'}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => void runAction('pause-current', async () => {
+                        await api('/api/strategy/pause', { method: 'POST' });
+                      })}
+                      disabled={actionKey != null}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-amber-500/30 bg-amber-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <Pause size={16} />
+                      {actionKey === 'pause-current' ? 'Pausing...' : 'Pause'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => void runAction('abort-current', async () => {
                       await api('/api/strategy/abort', {
                         method: 'POST',
                         body: JSON.stringify({ reason: 'Manual user abort' }),
                       });
-                    })
-                  }
-                  disabled={actionKey === 'abort-current'}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-rose-500/40 bg-rose-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <AlertTriangle size={16} />
-                  {actionKey === 'abort-current' ? 'Aborting...' : 'Abort Current Strategy'}
-                </button>
+                    })}
+                    disabled={actionKey != null}
+                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-rose-500/40 bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <AlertTriangle size={16} />
+                    {actionKey === 'abort-current' ? 'Aborting...' : 'Abort'}
+                  </button>
+                </div>
               ) : null}
             </div>
 
@@ -261,6 +304,60 @@ export default function HistoricalSetupsPage() {
           </div>
 
           <div className="rounded-2xl border border-slate-700 bg-slate-800/80 p-6">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Execution Tasks</p>
+                <h3 className="mt-2 text-xl font-semibold text-white">{tasks.length} planned task{tasks.length === 1 ? '' : 's'}</h3>
+              </div>
+              <span className={`text-sm font-medium ${queueStatus === 'aborted' ? 'text-rose-300' : queueStatus === 'paused' ? 'text-amber-300' : 'text-emerald-300'}`}>
+                {titleCase(queueStatus)}
+              </span>
+            </div>
+
+            {tasks.length === 0 ? (
+              <div className="mt-5 rounded-xl border border-dashed border-slate-700 bg-slate-900/70 px-5 py-6 text-sm text-slate-500">
+                No execution tasks are available for this strategy.
+              </div>
+            ) : (
+              <div className="mt-5 overflow-x-auto rounded-xl border border-slate-700">
+                <table className="min-w-[900px] w-full text-left text-sm">
+                  <thead className="bg-slate-900 text-slate-400">
+                    <tr>
+                      <th className="px-4 py-3 font-medium">Task</th>
+                      <th className="px-4 py-3 font-medium">Side</th>
+                      <th className="px-4 py-3 font-medium">Volume</th>
+                      <th className="px-4 py-3 font-medium">Planned</th>
+                      <th className="px-4 py-3 font-medium">Next Execution</th>
+                      <th className="px-4 py-3 font-medium">Attempts</th>
+                      <th className="px-4 py-3 font-medium">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800 bg-slate-900/70">
+                    {tasks.map((task) => (
+                      <tr key={task.id}>
+                        <td className="max-w-52 px-4 py-3">
+                          <p className="truncate font-medium text-slate-200" title={task.id}>{task.id}</p>
+                          {task.lastError ? <p className="mt-1 line-clamp-2 text-xs text-rose-300" title={task.lastError}>{task.lastError}</p> : null}
+                        </td>
+                        <td className={`px-4 py-3 font-semibold uppercase ${task.side === 'buy' ? 'text-emerald-300' : 'text-rose-300'}`}>{task.side}</td>
+                        <td className="px-4 py-3 text-slate-300">{formatUSD(task.amountUsd)}</td>
+                        <td className="px-4 py-3 text-slate-400">{formatDate(task.scheduledAt)}</td>
+                        <td className="px-4 py-3 text-slate-400">{task.nextExecutionTime ? formatDate(task.nextExecutionTime) : '—'}</td>
+                        <td className="px-4 py-3 text-slate-300">{task.attemptCount}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold uppercase ${task.status === 'done' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : task.status === 'failed' ? 'border-rose-500/30 bg-rose-500/10 text-rose-300' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>
+                            {task.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-2xl border border-slate-700 bg-slate-800/80 p-6">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Pending Queue</p>
@@ -268,7 +365,7 @@ export default function HistoricalSetupsPage() {
                 <p className="mt-1 text-sm text-slate-400">Strict serial execution means only one macro strategy can run at a time.</p>
               </div>
 
-              {queueState?.paused ? (
+              {queueState?.paused && !active ? (
                 <button
                   onClick={() =>
                     void runAction('resume-queue', async () => {

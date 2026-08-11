@@ -10,6 +10,7 @@ import {
   type StrategyEngineDurableObjectDebugSimulateRequest,
   type StrategyEngineDurableObjectMetrics,
   type StrategyEngineDurableObjectStatus,
+  type StrategyEngineTaskSnapshot,
 } from '../strategy/strategyEngineDO';
 import { StrategyStatus } from '../strategy/types';
 import type {
@@ -70,6 +71,7 @@ interface StrategyEngineDurableObjectMetricsResponse {
   metrics: StrategyEngineDurableObjectMetrics;
   currentEngineState: string | null;
   nextExecutionTime: number | null;
+  tasks: StrategyEngineTaskSnapshot[];
 }
 
 interface StrategyEngineDurableObjectDebugSimulateResponse {
@@ -149,6 +151,8 @@ export interface StrategyQueueSnapshot {
   pending: StrategyRecord[];
   history: StrategyRecord[];
   paused: boolean;
+  queueStatus: 'active' | 'paused' | 'aborted';
+  tasks: StrategyEngineTaskSnapshot[];
   currentEngineState: string | null;
   currentMetrics: StrategyEngineMetrics | null;
 }
@@ -341,11 +345,30 @@ export class StrategyAutomationService {
     await this.reconcileActiveStrategy(env);
     const grouped = await getAllStrategies(env);
     const currentMetrics = await this.getCurrentMetrics(env);
+    const latestHistory = grouped.history[grouped.history.length - 1] ?? null;
+    const latestAbortedState = !grouped.active[0] && latestHistory?.status === StrategyStatus.Aborted
+      ? await this.fetchCurrentMetricsResponse(env, latestHistory)
+      : null;
+    const queueStatus = currentMetrics?.status === 'paused'
+      ? 'paused'
+      : grouped.active[0]
+        ? 'active'
+        : latestHistory?.status === StrategyStatus.Aborted
+          ? 'aborted'
+          : grouped.paused
+            ? 'paused'
+            : 'active';
     return {
       active: grouped.active[0] ?? null,
       pending: grouped.pending,
       history: grouped.history,
-      paused: grouped.paused,
+      paused: queueStatus === 'paused' || grouped.paused,
+      queueStatus,
+      tasks: currentMetrics?.tasks ?? (
+        latestAbortedState?.runId === latestHistory?.versionId
+          ? latestAbortedState.tasks
+          : []
+      ),
       currentEngineState: currentMetrics?.currentEngineState ?? null,
       currentMetrics: currentMetrics?.metrics ?? null,
     };
@@ -462,6 +485,30 @@ export class StrategyAutomationService {
     return failedRecord;
   }
 
+  public async pauseCurrentStrategy(env: Env): Promise<StrategyRecord | null> {
+    const activeRecord = await getActiveStrategy(env);
+    if (!activeRecord) {
+      return null;
+    }
+    const engineStub = this.resolveStrategyEngineStub(env, activeRecord);
+    await this.fetchStrategyEngineJson(engineStub, '/pause', { method: 'POST' });
+    return activeRecord;
+  }
+
+  public async resumeCurrentStrategy(env: Env): Promise<StrategyRecord | null> {
+    const activeRecord = await getActiveStrategy(env);
+    if (!activeRecord) {
+      return null;
+    }
+    const currentState = await this.fetchCurrentMetricsResponse(env, activeRecord);
+    if (currentState?.runId !== activeRecord.versionId || currentState.status !== 'paused') {
+      return null;
+    }
+    const engineStub = this.resolveStrategyEngineStub(env, activeRecord);
+    await this.fetchStrategyEngineJson(engineStub, '/resume', { method: 'POST' });
+    return activeRecord;
+  }
+
   public async getCurrentMetrics(
     env: Env,
   ): Promise<{
@@ -469,6 +516,7 @@ export class StrategyAutomationService {
     metrics: StrategyEngineMetrics;
     currentEngineState: string | null;
     nextExecutionTime: number | null;
+    tasks: StrategyEngineTaskSnapshot[];
   } | null> {
     const activeRecord = await getActiveStrategy(env);
     if (!activeRecord) {
@@ -507,6 +555,7 @@ export class StrategyAutomationService {
       status: response.status,
       currentEngineState: response.currentEngineState,
       nextExecutionTime: response.nextExecutionTime,
+      tasks: response.tasks,
       metrics: await this.mapMetricsResponse(env, activeRecord, response.metrics),
     };
   }
@@ -678,7 +727,7 @@ export class StrategyAutomationService {
       const message = await response.text();
       throw new ApiError(
         response.status,
-        message || `Strategy engine durable object request failed for ${path}`,
+        `Strategy engine durable object request failed for ${path}: ${message || 'Unknown error'}`,
       );
     }
     return response.json<T>();
