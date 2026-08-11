@@ -8,7 +8,7 @@ import { handleSettingsRoutes } from './api/settingsHandler';
 import { handleStateRoutes } from './api/stateHandler';
 import { handleStrategyRoutes } from './api/strategyHandler';
 import { handleWebhookRoutes } from './api/webhookHandler';
-import { initializeAllSchemas, initializeCoreSchemas } from './services/dbSetup';
+import { initializeAllSchemas } from './services/dbSetup';
 import { errorResponse, jsonResponse } from './workerCore';
 import type { Env } from './workerShared';
 
@@ -19,6 +19,10 @@ const HEALTH_API_TIMEOUT_MS = 2_000;
 
 function shouldInitializeCoreAuthSchema(pathname: string): boolean {
   return pathname === '/api/auth/bootstrap' || pathname === '/api/auth/login';
+}
+
+function isReadOnlyStatePath(pathname: string): boolean {
+  return pathname === '/api/state' || pathname === '/api/profit';
 }
 
 function resolveApiTimeoutMs(pathname: string): number {
@@ -78,9 +82,9 @@ async function handleApi(
         const pathname = new URL(request.url).pathname;
         if (pathname.startsWith('/api/auth/')) {
           if (shouldInitializeCoreAuthSchema(pathname)) {
-            await initializeCoreSchemas(env);
+            await initializeAllSchemas(env);
           }
-        } else if (pathname !== '/api/health') {
+        } else if (pathname !== '/api/health' && !isReadOnlyStatePath(pathname)) {
           await initializeAllSchemas(env);
         }
 

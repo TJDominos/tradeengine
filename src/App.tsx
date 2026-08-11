@@ -165,6 +165,7 @@ export default function App() {
   const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
   const dashboardStatePollInFlightRef = React.useRef(false);
   const marketRefreshPollInFlightRef = React.useRef(false);
+  const profitPollInFlightRef = React.useRef(false);
   const outsideHolderPageRef = React.useRef(outsideHolderPage);
   const outsideHolderQueryMetaRef = React.useRef<{
     signature: string;
@@ -246,10 +247,49 @@ export default function App() {
 
   const loadState = React.useCallback(async () => {
     const state = await api<EngineState>('/api/state');
-    setEngineState(state);
+    setEngineState((current) => {
+      const currentBaseTokenAddress =
+        current?.settings.activeBaseTokenAddress?.trim() ||
+        current?.settings.baseTokenAddress.trim() ||
+        '';
+      const nextBaseTokenAddress =
+        state.settings.activeBaseTokenAddress?.trim() ||
+        state.settings.baseTokenAddress.trim();
+      return {
+        ...state,
+        profitUsdc:
+          currentBaseTokenAddress === nextBaseTokenAddress
+            ? current?.profitUsdc ?? state.profitUsdc
+            : state.profitUsdc,
+      };
+    });
     syncSettingsFromServer(state.settings);
     syncStrategyDraftFromServer(state, { preserveDraft: true });
     setLastUpdated(new Date().toLocaleString());
+
+    if (!profitPollInFlightRef.current) {
+      profitPollInFlightRef.current = true;
+      void api<{ baseTokenAddress: string; profitUsdc: number }>('/api/profit')
+        .then((profit) => {
+          setEngineState((current) => {
+            if (!current) {
+              return current;
+            }
+            const currentBaseTokenAddress =
+              current.settings.activeBaseTokenAddress?.trim() ||
+              current.settings.baseTokenAddress.trim();
+            return currentBaseTokenAddress === profit.baseTokenAddress
+              ? { ...current, profitUsdc: profit.profitUsdc }
+              : current;
+          });
+        })
+        .catch((err: unknown) => {
+          console.warn('Failed to load managed P/L:', err);
+        })
+        .finally(() => {
+          profitPollInFlightRef.current = false;
+        });
+    }
     return state;
   }, [syncSettingsFromServer, syncStrategyDraftFromServer]);
 

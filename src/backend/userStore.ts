@@ -1551,7 +1551,7 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
          tt.symbol
        FROM trade_logs tl
        LEFT JOIN tradable_tokens tt ON tt.id = tl.token_id
-       ORDER BY tl.chain_time_ms DESC, tl.created_at DESC, tl.id DESC
+      ORDER BY tl.id DESC
        LIMIT 50`,
     )
     .all<{
@@ -1619,7 +1619,7 @@ export async function dbListWebhookTransactionLogs(
        FROM webhook_transaction_logs wtl
        LEFT JOIN tradable_tokens tt ON tt.id = wtl.token_id
        WHERE wtl.user_id = ?1
-       ORDER BY wtl.chain_time_ms DESC, wtl.id DESC
+      ORDER BY wtl.created_at DESC, wtl.id DESC
        LIMIT 50`,
     )
     .bind(userId)

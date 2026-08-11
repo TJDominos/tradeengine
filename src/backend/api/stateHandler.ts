@@ -7,7 +7,6 @@ import {
 } from '../tokenHolders';
 import {
   dbGetManagedAccountSummary,
-  dbListInternalAccountDirectory,
   dbListAccountsDirectory,
   dbListManagedAccountsPage,
   dbListAuditLogs,
@@ -302,19 +301,41 @@ export async function handleStateRoutes(
     });
   }
 
+  if (method === 'GET' && pathname === '/api/profit') {
+    const user = await requireUser(request, env);
+    const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+    const baseTokenAddress =
+      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+    const quoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || undefined;
+    if (!baseTokenAddress) {
+      return jsonResponse({ baseTokenAddress: '', profitUsdc: 0 });
+    }
+
+    const tokenId = await dbResolveTradableTokenId(
+      env.TRADINGBOT_DB,
+      baseTokenAddress,
+      quoteTokenAddress,
+    );
+    const marketSnapshot = tokenId
+      ? await dbGetLatestTokenMarketSnapshot(env.TRADINGBOT_DB, tokenId)
+      : null;
+    const profitUsdc = await dbComputeManagedProfitUsdc(
+      env.TRADINGBOT_DB,
+      user.id,
+      baseTokenAddress,
+      marketSnapshot?.priceUsd ?? null,
+    );
+    return jsonResponse({ baseTokenAddress, profitUsdc });
+  }
+
   if (method === 'GET' && pathname === '/api/state') {
     const user = await requireUser(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
     const activeBaseTokenAddress =
       settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
     const activeQuoteTokenAddress = settings.activeQuoteTokenAddress?.trim() || null;
-    let activeStrategyVersion = await dbGetActiveStrategyVersion(
-      env.TRADINGBOT_DB,
-      user.id,
-    ).catch(() => null);
     const [
       internalAccs,
-      internalAccountDirectory,
       internalAccountSummary,
       activityLogs,
       tradeLogs,
@@ -322,10 +343,10 @@ export async function handleStateRoutes(
       tradableTokens,
       historicalSetups,
       rpcEndpoints,
+      activeStrategyVersion,
     ] =
       await Promise.all([
         dbListAccountsDirectory(env.TRADINGBOT_DB, user.id, 'managed'),
-        dbListInternalAccountDirectory(env.TRADINGBOT_DB, user.id),
         dbGetManagedAccountSummary(
           env.TRADINGBOT_DB,
           user.id,
@@ -337,7 +358,9 @@ export async function handleStateRoutes(
         dbListTradableTokens(env.TRADINGBOT_DB),
         dbListHistoricalSetups(env.TRADINGBOT_DB, user.id),
         dbListRpcEndpoints(env.TRADINGBOT_DB, user.id),
+        dbGetActiveStrategyVersion(env.TRADINGBOT_DB, user.id).catch(() => null),
       ]);
+    const internalAccountDirectory = internalAccs;
 
     let marketSnapshot: TokenMarketSnapshot | null = null;
     let tokenHolderAggregate: TokenHolderAggregateRecord | null = null;
@@ -347,64 +370,33 @@ export async function handleStateRoutes(
     let tokenId: number | null = null;
     if (activeBaseTokenAddress) {
       try {
-        marketRefreshStatus = await dbGetMarketRefreshState(
-          env.TRADINGBOT_DB,
-          user.id,
-          activeBaseTokenAddress,
-        );
-        tokenId = await dbResolveTradableTokenId(
-          env.TRADINGBOT_DB,
-          activeBaseTokenAddress,
-          activeQuoteTokenAddress ?? undefined,
-        );
-        if (tokenId) {
-          marketSnapshot = await dbGetLatestTokenMarketSnapshot(
+        [marketRefreshStatus, tokenId] = await Promise.all([
+          dbGetMarketRefreshState(
             env.TRADINGBOT_DB,
-            tokenId,
-          );
+            user.id,
+            activeBaseTokenAddress,
+          ),
+          dbResolveTradableTokenId(
+            env.TRADINGBOT_DB,
+            activeBaseTokenAddress,
+            activeQuoteTokenAddress ?? undefined,
+          ),
+        ]);
+        if (tokenId) {
+          [marketSnapshot, tokenHolderSyncState, tokenHolderAggregate] =
+            await Promise.all([
+              dbGetLatestTokenMarketSnapshot(env.TRADINGBOT_DB, tokenId),
+              dbGetTokenHolderSyncState(env.TRADINGBOT_DB, tokenId),
+              dbGetTokenHolderAggregate(env.TRADINGBOT_DB, tokenId),
+            ]);
         }
       } catch (err: unknown) {
         console.warn(
-          `Failed to load token market snapshot for ${activeBaseTokenAddress}:`,
-          err,
-        );
-      }
-
-      try {
-        if (tokenId) {
-          tokenHolderSyncState = await dbGetTokenHolderSyncState(
-            env.TRADINGBOT_DB,
-            tokenId,
-          );
-          tokenHolderAggregate = await dbGetTokenHolderAggregate(
-            env.TRADINGBOT_DB,
-            tokenId,
-          );
-        }
-      } catch (err: unknown) {
-        console.warn(
-          `Failed to load token holder aggregate for ${activeBaseTokenAddress}:`,
+          `Failed to load active token state for ${activeBaseTokenAddress}:`,
           err,
         );
       }
     }
-
-    const profitUsdc = activeBaseTokenAddress
-      ? await Promise.race([
-          dbComputeManagedProfitUsdc(
-            env.TRADINGBOT_DB,
-            user.id,
-            activeBaseTokenAddress,
-            marketSnapshot?.priceUsd ?? null,
-          ).catch((err: unknown) => {
-            console.warn('Failed to calculate managed transaction-log P/L:', err);
-            return 0;
-          }),
-          new Promise<number>((resolve) => {
-            setTimeout(() => resolve(0), 1_000);
-          }),
-        ])
-      : 0;
 
     if (
       marketSnapshot &&
@@ -440,7 +432,7 @@ export async function handleStateRoutes(
       rpcEndpoints,
       marketSnapshot,
       marketSnapshotHistory: [],
-      profitUsdc,
+      profitUsdc: 0,
       stats: {
         managedAccounts: internalAccountSummary.activeAccounts,
         tradeExecutionEnabled: false,
