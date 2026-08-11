@@ -953,20 +953,18 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
          dex_id,
          pair_address,
          fetched_at
-       FROM token_market_snapshots
-       WHERE token_id = ?1
-         AND CASE
-           WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
-           ELSE fetched_at
-         END >= ?2
-         AND CASE
-           WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
-           ELSE fetched_at
-         END <= ?3
-       ORDER BY CASE
-         WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
-         ELSE fetched_at
-       END DESC, id DESC
+       FROM (
+         SELECT *, fetched_at AS normalized_fetched_at
+         FROM token_market_snapshots
+         WHERE token_id = ?1
+           AND fetched_at BETWEEN ?2 AND ?3
+         UNION ALL
+         SELECT *, fetched_at * 1000 AS normalized_fetched_at
+         FROM token_market_snapshots
+         WHERE token_id = ?1
+           AND fetched_at BETWEEN CAST(?2 / 1000 AS INTEGER) AND CAST(?3 / 1000 AS INTEGER)
+       )
+       ORDER BY normalized_fetched_at DESC, id DESC
        LIMIT ?4`,
     )
     .bind(tokenId, startTime, endTime, limit)
