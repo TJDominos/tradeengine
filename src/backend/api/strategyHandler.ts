@@ -8,7 +8,6 @@ import {
 import { buildStrategyPriceCurveReview } from '../strategy/priceCurve';
 import {
   strategyEngineDurableObjectNameFor,
-  type StrategyEngineDurableObjectConfigureRequest,
 } from '../strategy/strategyEngineDO';
 import { parseJsonBody } from '../workerSchema';
 import { dbCreateTradableToken, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
@@ -35,11 +34,7 @@ import {
   mapStrategyDocumentToSettingsUpdate,
 } from '../services/strategyStore';
 import { loadStoredMarketSnapshotByContractAddress } from '../services/tokenMarketService';
-import {
-  getManagedBuyCapacitySummary,
-  listManagedAccountsWithStoredBalances,
-  type ManagedAccountBalanceRecord,
-} from '../userStore';
+import { listManagedAccountsWithStoredBalances, type ManagedAccountBalanceRecord } from '../userStore';
 
 const strategyAutomationService = new StrategyAutomationService();
 const DEFAULT_STRATEGY_DEPLOY_BUY_AMOUNT = 300;
@@ -415,7 +410,7 @@ async function parseOptionalJsonObject(request: Request): Promise<unknown | null
 export async function handleStrategyRoutes(
   request: Request,
   env: Env,
-  _ctx: ExecutionContext,
+  ctx: ExecutionContext,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const { method } = request;
@@ -567,14 +562,38 @@ export async function handleStrategyRoutes(
     });
 
     const requiredBuyAmount = deriveRequiredStrategyBuyAmount(normalizedDocument);
-    const deploymentValidation = await getManagedBuyCapacitySummary(
-      env.TRADINGBOT_DB,
-      user.id,
-      {
+    const [planningAccounts, deploymentMarketSnapshot] = await Promise.all([
+      listManagedAccountsWithStoredBalances(env.TRADINGBOT_DB, user.id, {
         pair: {
           baseMint: normalizedBaseTokenAddress,
           quoteMint: normalizedQuoteTokenAddress,
         },
+      }),
+      loadStoredMarketSnapshotByContractAddress(
+        env.TRADINGBOT_DB,
+        normalizedBaseTokenAddress,
+        normalizedQuoteTokenAddress,
+      ),
+    ]);
+    const deploymentValidation = planningAccounts.reduce(
+      (summary, account) => {
+        if (!account.pairCompatible) {
+          summary.skippedForCapabilityCount += 1;
+        } else if (account.quoteAvailableAmount > 0) {
+          summary.eligibleAccountCount += 1;
+          summary.availableQuoteAmount += account.quoteAvailableAmount;
+          if (!account.hasSolReserve) {
+            summary.skippedForSolReserveCount += 1;
+          }
+        }
+        return summary;
+      },
+      {
+        enabledAccountCount: planningAccounts.length,
+        eligibleAccountCount: 0,
+        skippedForCapabilityCount: 0,
+        skippedForSolReserveCount: 0,
+        availableQuoteAmount: 0,
       },
     );
     const quoteLabel = formatQuoteLabel(normalizedQuoteTokenAddress);
@@ -589,22 +608,6 @@ export async function handleStrategyRoutes(
       );
     }
 
-    const [planningAccounts, deploymentMarketSnapshot] = await Promise.all([
-      listManagedAccountsWithStoredBalances(
-        env.TRADINGBOT_DB,
-        user.id,
-        {
-          pair: {
-            baseMint: normalizedBaseTokenAddress,
-            quoteMint: normalizedQuoteTokenAddress,
-          },
-        },
-      ),
-      loadStoredMarketSnapshotByContractAddress(
-        env.TRADINGBOT_DB,
-        normalizedBaseTokenAddress,
-      ),
-    ]);
     const reviewedPlan = validateReviewedPlan({
       rawPlan: deploymentRequest.reviewedPlan,
       document: normalizedDocument,
@@ -638,102 +641,72 @@ export async function handleStrategyRoutes(
       ? normalizePubkey(previousActiveStrategyVersion.document.parameters.baseTokenAddress)
       : null;
 
-    if (normalizedBaseTokenAddress) {
-      const stubId = env.STRATEGY_ENGINE_DO.idFromName(
-        strategyEngineDurableObjectNameFor(user.id, normalizedBaseTokenAddress),
-      );
-      const stub = env.STRATEGY_ENGINE_DO.get(stubId);
-      const doRequest: StrategyEngineDurableObjectConfigureRequest = {
-        userId: user.id,
-        versionId: strategySave.version.id,
-        strategyDocument: normalizedDocument,
-      };
-      await stub.fetch('https://strategy-engine/configure', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(doRequest),
-      });
-    }
-
-    if (
-      previousContractAddress &&
-      previousContractAddress !== normalizedBaseTokenAddress
-    ) {
-      const previousStubId = env.STRATEGY_ENGINE_DO.idFromName(
-        strategyEngineDurableObjectNameFor(user.id, previousContractAddress),
-      );
-      const previousStub = env.STRATEGY_ENGINE_DO.get(previousStubId);
-      await previousStub.fetch('https://strategy-engine/clear', {
-        method: 'POST',
-      });
-    }
-
-    let marketSnapshot: TokenMarketSnapshot | null = null;
-    if (normalizedBaseTokenAddress) {
-      const rpcUrls = await dbResolveSolanaRpcUrls(
-        env.TRADINGBOT_DB,
-        user.id,
-        env.SOLANA_RPC_URL,
-      );
-
-      const existingTokenId = await dbResolveTradableTokenId(
-        env.TRADINGBOT_DB,
-        normalizedBaseTokenAddress,
-        normalizedQuoteTokenAddress,
-      );
-      if (!existingTokenId) {
-        try {
-          const decimals = await fetchSolanaMintDecimals(
-            rpcUrls,
-            normalizedBaseTokenAddress,
-          ).catch(() => null);
-          await dbCreateTradableToken(
-            env.TRADINGBOT_DB,
-            {
-              network: 'solana',
-              baseTokenAddress: normalizedBaseTokenAddress,
-              quoteTokenAddress: normalizedQuoteTokenAddress,
-            },
-            decimals,
-          );
-        } catch (err: unknown) {
-          console.warn(
-            `Failed to ensure tracked token metadata for strategy base token ${normalizedBaseTokenAddress}:`,
-            err,
-          );
-        }
-      }
-      marketSnapshot = await loadStoredMarketSnapshotByContractAddress(
-        env.TRADINGBOT_DB,
-        normalizedBaseTokenAddress,
-        normalizedQuoteTokenAddress,
-      );
-    }
-
-    await dbAddAuditLog(
-      env.TRADINGBOT_DB,
-      user.id,
-      'strategy.version_activated',
-      normalizedBaseTokenAddress || 'none',
-      strategySave.created
-        ? `Activated strategy version v${strategySave.version.versionNo}.`
-        : `Strategy version v${strategySave.version.versionNo} remains active.`,
-    );
-
     const queuedStrategy = await strategyAutomationService.enqueueStrategyVersion(
       env,
       user.id,
       strategySave.version,
       reviewedPlan,
     );
-    await strategyAutomationService.startNextStrategy(env);
+    ctx.waitUntil((async () => {
+      try {
+        await strategyAutomationService.startNextStrategy(env);
+
+        if (previousContractAddress && previousContractAddress !== normalizedBaseTokenAddress) {
+          const previousStubId = env.STRATEGY_ENGINE_DO.idFromName(
+            strategyEngineDurableObjectNameFor(user.id, previousContractAddress),
+          );
+          await env.STRATEGY_ENGINE_DO.get(previousStubId).fetch(
+            'https://strategy-engine/clear',
+            { method: 'POST' },
+          );
+        }
+
+        if (normalizedBaseTokenAddress) {
+          const existingTokenId = await dbResolveTradableTokenId(
+            env.TRADINGBOT_DB,
+            normalizedBaseTokenAddress,
+            normalizedQuoteTokenAddress,
+          );
+          if (!existingTokenId) {
+            const rpcUrls = await dbResolveSolanaRpcUrls(
+              env.TRADINGBOT_DB,
+              user.id,
+              env.SOLANA_RPC_URL,
+            );
+            const decimals = await fetchSolanaMintDecimals(
+              rpcUrls,
+              normalizedBaseTokenAddress,
+            ).catch(() => null);
+            await dbCreateTradableToken(
+              env.TRADINGBOT_DB,
+              {
+                network: 'solana',
+                baseTokenAddress: normalizedBaseTokenAddress,
+                quoteTokenAddress: normalizedQuoteTokenAddress,
+              },
+              decimals,
+            );
+          }
+        }
+
+        await dbAddAuditLog(
+          env.TRADINGBOT_DB,
+          user.id,
+          'strategy.version_activated',
+          normalizedBaseTokenAddress || 'none',
+          strategySave.created
+            ? `Activated strategy version v${strategySave.version.versionNo}.`
+            : `Strategy version v${strategySave.version.versionNo} remains active.`,
+        );
+      } catch (err: unknown) {
+        console.error('Strategy post-deployment startup failed:', err);
+      }
+    })());
 
     return jsonResponse({
       activeStrategyVersion: strategySave.version,
       settings: updatedSettings,
-      marketSnapshot,
+      marketSnapshot: deploymentMarketSnapshot as TokenMarketSnapshot | null,
       queuedStrategy,
       deploymentValidation: {
         requiredBuyAmount,
