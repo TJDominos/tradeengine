@@ -8,6 +8,7 @@ import {
 
 import { ApiError } from '../errors';
 import {
+  buildJupiterSwapTransactionWithTrace,
   fetchJupiterSwapQuote,
   type JupiterQuoteResponse,
 } from '../jupiter';
@@ -114,45 +115,6 @@ function normalizeAtomicAmount(amount: string | number | bigint): string {
   return trimmed;
 }
 
-async function fetchSwapTransactionBase64(
-  quoteResponse: JupiterQuoteResponse,
-  userPublicKey: string,
-): Promise<string> {
-  const response = await fetch('https://quote-api.jup.ag/v6/swap', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify({
-      quoteResponse,
-      userPublicKey,
-      wrapAndUnwrapSol: true,
-      dynamicComputeUnitLimit: true,
-    }),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text().catch(() => '');
-    throw new ApiError(
-      502,
-      `Jupiter swap transaction request failed (${response.status}): ${errText.slice(0, 200)}`,
-    );
-  }
-
-  const body = await response.json<{
-    swapTransaction?: string;
-    error?: string;
-  }>();
-  if (body.error) {
-    throw new ApiError(502, `Jupiter swap error: ${body.error}`);
-  }
-  if (!body.swapTransaction) {
-    throw new ApiError(502, 'Jupiter swap response missing transaction');
-  }
-  return body.swapTransaction;
-}
-
 export async function executeSwap(
   env: Env,
   keypair: JupiterSwapSigner,
@@ -180,12 +142,12 @@ export async function executeSwap(
     slippageBps,
   );
 
-  const swapTransactionBase64 = await fetchSwapTransactionBase64(
+  const swapBuild = await buildJupiterSwapTransactionWithTrace(
     quoteResponse,
     keypair.publicKey,
   );
   const transaction = VersionedTransaction.deserialize(
-    Uint8Array.from(Buffer.from(swapTransactionBase64, 'base64')),
+    swapBuild.swapTransactionBytes,
   );
   signVersionedTransaction(transaction, keypair);
 

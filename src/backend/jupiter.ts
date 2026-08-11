@@ -1,6 +1,7 @@
 import { ApiError } from './errors';
 
 const SOLANA_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const JUPITER_SWAP_API_BASE_URL = 'https://lite-api.jup.ag/swap/v1';
 
 export interface JupiterTokenMetadata {
   address: string;
@@ -237,7 +238,7 @@ export async function fetchJupiterPriceViaQuote(
   tokenDecimals: number,
 ): Promise<number | null> {
   try {
-    const url = new URL('https://quote-api.jup.ag/v6/quote');
+    const url = new URL(`${JUPITER_SWAP_API_BASE_URL}/quote`);
     url.searchParams.set('inputMint', SOLANA_USDC_MINT);
     url.searchParams.set('outputMint', mint);
     url.searchParams.set('amount', '1000000');
@@ -268,7 +269,7 @@ export async function fetchJupiterSwapQuote(
   amountAtomicUnits: string,
   slippageBps: number,
 ): Promise<JupiterQuoteResponse> {
-  const url = new URL('https://quote-api.jup.ag/v6/quote');
+  const url = new URL(`${JUPITER_SWAP_API_BASE_URL}/quote`);
   url.searchParams.set('inputMint', inputMint);
   url.searchParams.set('outputMint', outputMint);
   url.searchParams.set('amount', amountAtomicUnits);
@@ -298,7 +299,7 @@ export async function buildJupiterSwapTransactionWithTrace(
     wrapAndUnwrapSol: true,
     dynamicComputeUnitLimit: true,
   };
-  const response = await fetch('https://quote-api.jup.ag/v6/swap', {
+  const response = await fetch(`${JUPITER_SWAP_API_BASE_URL}/swap`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
