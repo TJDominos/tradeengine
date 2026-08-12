@@ -25,7 +25,8 @@ function isReadOnlyStatePath(pathname: string): boolean {
   return pathname === '/api/state' ||
     pathname === '/api/profit' ||
     pathname === '/api/market-snapshots' ||
-    pathname === '/api/strategy/current';
+    pathname === '/api/strategy/current' ||
+    pathname === '/api/token-holders';
 }
 
 function resolveApiTimeoutMs(pathname: string): number {

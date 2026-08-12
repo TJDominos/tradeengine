@@ -7,6 +7,7 @@ import {
   extractStoredSignalContractAddresses,
   generateToken,
   hashPassword,
+  invalidateWalletBalanceCacheForAddress,
   loadWalletBalance,
   normalizePrivateKey,
   normalizePubkey,
@@ -360,6 +361,45 @@ export async function dbUpdateManagedAccountWalletBalanceSnapshot(
       snapshot.updatedAt,
     )
     .run();
+}
+
+export async function refreshManagedAccountWalletBalanceSnapshot(
+  db: D1Database,
+  userId: number,
+  walletAddress: string,
+  envRpcUrl?: string,
+): Promise<void> {
+  const [settings, tradableTokens, rpcUrls] = await Promise.all([
+    dbLoadSettings(db, userId),
+    dbListTradableTokens(db),
+    dbResolveSolanaRpcUrls(db, userId, envRpcUrl),
+  ]);
+  invalidateWalletBalanceCacheForAddress(walletAddress);
+  const balance = await loadWalletBalance(
+    walletAddress,
+    settings,
+    tradableTokens,
+    rpcUrls,
+  );
+  const activeTokenMint =
+    settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+  const activeTokenBalance = activeTokenMint
+    ? Number.parseFloat(
+        balance.tokens.find((token) => token.mint === activeTokenMint)?.amount ?? '0',
+      ) || 0
+    : null;
+  await dbUpdateManagedAccountWalletBalanceSnapshot(
+    db,
+    userId,
+    walletAddress,
+    {
+      usdcBalance: Number.parseFloat(balance.usdc) || 0,
+      solBalance: Number.parseFloat(balance.sol) || 0,
+      activeTokenMint: activeTokenMint || null,
+      activeTokenBalance,
+      updatedAt: balance.updatedAt,
+    },
+  );
 }
 
 async function listActiveManagedAccountCandidates(

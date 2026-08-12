@@ -25,6 +25,7 @@ import {
 import type {
   ExecutionReport,
   StrategyExecutionConfig,
+  StrategyExecutionTaskSnapshot,
   StrategyReviewedPlan,
   StrategyVersionDocument,
 } from './types';
@@ -33,7 +34,10 @@ import { initializeAllSchemas } from '../services/dbSetup';
 import { executeSwap, type JupiterSwapExecutionResult } from '../services/jupiterSwapService';
 import { getActiveAccounts } from '../services/accountPoolService';
 import { analyzeTradeDirection } from '../services/webhookParser';
-import { listManagedAccountsWithStoredBalances } from '../userStore';
+import {
+  listManagedAccountsWithStoredBalances,
+  refreshManagedAccountWalletBalanceSnapshot,
+} from '../userStore';
 
 const STORAGE_KEY = 'strategy-engine-state';
 const MAX_DEDUPED_TX_HASHES = 256;
@@ -50,22 +54,9 @@ export type StrategyEngineDurableObjectStatus =
   | 'completed'
   | 'aborted';
 
-export type StrategyEngineTaskStatus = 'done' | 'pending' | 'failed';
+export type StrategyEngineTaskStatus = 'done' | 'pending' | 'failed' | 'superseded';
 
-export interface StrategyEngineTaskSnapshot {
-  id: string;
-  side: 'buy' | 'sell';
-  amountUsd: number;
-  scheduledAt: number;
-  nextExecutionTime: number | null;
-  source: 'base' | 'tactic';
-  status: StrategyEngineTaskStatus;
-  attemptCount: number;
-  executedVolumeUsd: number;
-  completedAt: number | null;
-  lastFailedAt: number | null;
-  lastError: string | null;
-}
+export type StrategyEngineTaskSnapshot = StrategyExecutionTaskSnapshot;
 
 export function resolveStrategyTaskFailureTransition(
   failureCount: number,
@@ -308,7 +299,10 @@ export class StrategyEngineDurableObject {
         typeof body?.reason === 'string' && body.reason.trim().length > 0
           ? body.reason.trim()
           : 'Manual user abort';
-      const report = await this.abort(reason);
+      const report = {
+        ...await this.abort(reason),
+        tasks: this.persistedState.taskSnapshots,
+      };
       return Response.json({ ok: true, status: this.persistedState.status, report });
     }
 
@@ -662,7 +656,7 @@ export class StrategyEngineDurableObject {
         responseSellVolumeUsd,
       });
       this.persistedState.metrics.tacticsTriggeredCount += 1;
-      this.discardPendingTaskSnapshots();
+      this.supersedePendingTaskSnapshots(event.txHash);
       this.persistedState.pendingTasks = [];
       this.persistedState.pendingReplanTxHash = event.txHash;
       await this.persistState({ scheduleAlarm: false });
@@ -936,6 +930,7 @@ export class StrategyEngineDurableObject {
       (task) => ({
         tactic: 'event_replan',
         txHash,
+        planRevision: this.persistedState.observedOrders.length,
         pulse: task.pulse,
         orderIndex: task.orderIndex,
         totalOrders: task.totalOrders,
@@ -1165,6 +1160,19 @@ export class StrategyEngineDurableObject {
           task,
           executableAccount.allocation,
           swap,
+        );
+        this.ctx.waitUntil(
+          refreshManagedAccountWalletBalanceSnapshot(
+            this.env.TRADINGBOT_DB,
+            config.userId,
+            executableAccount.signingAccount.publicKey,
+            this.env.SOLANA_RPC_URL,
+          ).catch((error: unknown) => {
+            console.warn(
+              `[StrategyEngineDO] Failed to refresh balance snapshot for ${executableAccount.signingAccount.publicKey}:`,
+              error,
+            );
+          }),
         );
         executedVolumeUsd += swap.executedVolumeUsd;
         fills.push({
@@ -1503,6 +1511,15 @@ export class StrategyEngineDurableObject {
         completedAt: null,
         lastFailedAt: null,
         lastError: null,
+        supersededAt: null,
+        planRevision:
+          typeof task.metadata?.planRevision === 'number'
+            ? task.metadata.planRevision
+            : 0,
+        triggerTxHash:
+          typeof task.metadata?.txHash === 'string'
+            ? task.metadata.txHash
+            : null,
       });
     }
     this.persistedState.pendingTasks.sort(
@@ -1554,6 +1571,19 @@ export class StrategyEngineDurableObject {
     this.persistedState.taskSnapshots = this.persistedState.taskSnapshots.filter(
       (snapshot) => !pendingTaskIds.has(snapshot.id),
     );
+  }
+
+  private supersedePendingTaskSnapshots(triggerTxHash: string): void {
+    const pendingTaskIds = new Set(this.persistedState.pendingTasks.map((task) => task.id));
+    const supersededAt = Date.now();
+    for (const snapshot of this.persistedState.taskSnapshots) {
+      if (pendingTaskIds.has(snapshot.id)) {
+        snapshot.status = 'superseded';
+        snapshot.nextExecutionTime = null;
+        snapshot.supersededAt = supersededAt;
+        snapshot.triggerTxHash = triggerTxHash;
+      }
+    }
   }
 
   private enqueueReviewedPlan(plan: StrategyReviewedPlan, startTime: number): void {

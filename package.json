@@ -9,6 +9,7 @@
     "preview": "npm run build && wrangler dev --config dist/tradeengine/wrangler.json",
     "clean": "rm -rf dist rust-backend/target",
     "lint": "tsc --noEmit",
+    "check:webhook-ack": "npx --yes tsx scripts/check-webhook-ack.mts",
     "check:webhook-parser": "npx --yes tsx scripts/check-webhook-parser.mjs",
     "check:strategy-queue-recovery": "node scripts/check-strategy-queue-recovery.mjs",
     "check:strategy-do-lifecycle": "npm run build && node scripts/check-strategy-do-lifecycle.mjs",

@@ -218,6 +218,24 @@ export enum StrategyStatus {
   Paused = 'paused',
 }
 
+export interface StrategyExecutionTaskSnapshot {
+  id: string;
+  side: 'buy' | 'sell';
+  amountUsd: number;
+  scheduledAt: number;
+  nextExecutionTime: number | null;
+  source: 'base' | 'tactic';
+  status: 'done' | 'pending' | 'failed' | 'superseded';
+  attemptCount: number;
+  executedVolumeUsd: number;
+  completedAt: number | null;
+  lastFailedAt: number | null;
+  lastError: string | null;
+  supersededAt?: number | null;
+  planRevision?: number;
+  triggerTxHash?: string | null;
+}
+
 export interface ExecutionReport {
   actualTotalVolume: number;
   actualNetInflow: number;
@@ -227,6 +245,7 @@ export interface ExecutionReport {
   unrealizedPnl?: number;
   startTime: number;
   endTime: number;
+  tasks?: StrategyExecutionTaskSnapshot[];
   abortReason?: string;
 }
 

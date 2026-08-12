@@ -342,9 +342,8 @@ export class StrategyAutomationService {
   }
 
   public async getQueueSnapshot(env: Env): Promise<StrategyQueueSnapshot> {
-    await this.reconcileActiveStrategy(env);
-    const grouped = await getAllStrategies(env);
     const currentMetrics = await this.getCurrentMetrics(env);
+    const grouped = await getAllStrategies(env);
     const latestHistory = grouped.history[grouped.history.length - 1] ?? null;
     const latestAbortedState = !grouped.active[0] && latestHistory?.status === StrategyStatus.Aborted
       ? await this.fetchCurrentMetricsResponse(env, latestHistory)
@@ -445,6 +444,7 @@ export class StrategyAutomationService {
       metricsResponse ?? (await this.fetchCurrentMetricsResponse(env, activeRecord));
     const report = this.buildExecutionReport(activeRecord, currentMetricsResponse?.metrics ?? null, {
       endTime: currentMetricsResponse?.metrics.endTime ?? Date.now(),
+      tasks: currentMetricsResponse?.tasks,
     });
     await this.attachRunProfit(env, activeRecord, report);
     const completedRecord = await updateStrategyStatus(
@@ -541,6 +541,7 @@ export class StrategyAutomationService {
       const report = this.buildExecutionReport(activeRecord, response.metrics, {
         endTime: response.metrics.endTime ?? Date.now(),
         abortReason: 'Strategy aborted by durable object',
+        tasks: response.tasks,
       });
       await updateStrategyStatus(
         env,
@@ -603,6 +604,7 @@ export class StrategyAutomationService {
     options: {
       endTime: number;
       abortReason?: string;
+      tasks?: StrategyEngineTaskSnapshot[];
     },
   ): ExecutionReport {
     return {
@@ -616,6 +618,7 @@ export class StrategyAutomationService {
         activeRecord?.updatedAt ??
         options.endTime,
       endTime: options.endTime,
+      ...(options.tasks ? { tasks: options.tasks } : {}),
       ...(options.abortReason
         ? {
             abortReason: options.abortReason,

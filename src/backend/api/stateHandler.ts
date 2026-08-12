@@ -16,19 +16,17 @@ import {
   dbLoadSettings,
   dbAddAuditLog,
 } from '../userStore';
-import { base58Encode, decodeBase64Bytes, jsonResponse, solanaRpc } from '../workerCore';
+import { jsonResponse } from '../workerCore';
 import { parseJsonBody } from '../workerSchema';
 import type {
   Env,
   MarketRefreshStatusRecord,
-  OutsideTokenHolderPageRecord,
   OutsideTokenHolderSort,
   TokenHolderAggregateRecord,
   TokenHolderSyncStateRecord,
   TokenMarketSnapshot,
   WebhookTransactionLogRecord,
 } from '../workerShared';
-import { SOLANA_SPL_TOKEN_PROGRAM_ID, SOLANA_TOKEN_2022_PROGRAM_ID } from '../workerShared';
 import { requireAdmin, requireUser } from '../services/accessControl';
 import { dbComputeManagedProfitUsdc, dbListHistoricalSetups } from '../services/historyMetricsService';
 import { dbGetMarketRefreshState } from '../services/marketRefreshStateService';
@@ -62,91 +60,6 @@ function buildTransactionLogs(
       if (rightTime == null) return -1;
       return rightTime - leftTime || right.id - left.id;
     });
-}
-
-async function resolveSolanaTokenAccountOwners(
-  rpcUrls: string[],
-  addresses: string[],
-): Promise<Map<string, string>> {
-  const ownerByAddress = new Map<string, string>();
-  if (rpcUrls.length === 0 || addresses.length === 0) {
-    return ownerByAddress;
-  }
-
-  const uniqueAddresses = [...new Set(addresses.filter(Boolean))];
-  const tokenProgramIds = new Set([
-    SOLANA_SPL_TOKEN_PROGRAM_ID,
-    SOLANA_TOKEN_2022_PROGRAM_ID,
-  ]);
-  const chunkSize = 100;
-
-  for (let index = 0; index < uniqueAddresses.length; index += chunkSize) {
-    const chunk = uniqueAddresses.slice(index, index + chunkSize);
-    const result = await solanaRpc<{
-      value: Array<
-        | {
-            owner?: string;
-            data: [string, string] | string;
-          }
-        | null
-      >;
-    }>(rpcUrls, 'getMultipleAccounts', [
-      chunk,
-      {
-        encoding: 'base64',
-        dataSlice: { offset: 32, length: 32 },
-      },
-    ]);
-
-    for (let offset = 0; offset < chunk.length; offset += 1) {
-      const accountInfo = result.value?.[offset] ?? null;
-      if (!accountInfo || !tokenProgramIds.has(accountInfo.owner ?? '')) {
-        continue;
-      }
-
-      const data = Array.isArray(accountInfo.data)
-        ? accountInfo.data[0]
-        : accountInfo.data;
-      if (typeof data !== 'string' || data.length === 0) {
-        continue;
-      }
-
-      const bytes = decodeBase64Bytes(data);
-      if (bytes.length < 32) {
-        continue;
-      }
-
-      const tokenAccountAddress = chunk[offset];
-      const ownerAddress = base58Encode(bytes.slice(0, 32));
-      if (ownerAddress && ownerAddress !== tokenAccountAddress) {
-        ownerByAddress.set(tokenAccountAddress, ownerAddress);
-      }
-    }
-  }
-
-  return ownerByAddress;
-}
-
-function normalizeOutsideTokenHolderPageAddresses(
-  page: OutsideTokenHolderPageRecord,
-  ownerByAddress: Map<string, string>,
-): OutsideTokenHolderPageRecord {
-  if (ownerByAddress.size === 0) {
-    return page;
-  }
-
-  return {
-    ...page,
-    items: page.items.map((item) => ({
-      ...item,
-      address: ownerByAddress.get(item.address) ?? item.address,
-    })),
-    latestChangedAddresses: [...new Set(
-      page.latestChangedAddresses.map(
-        (address) => ownerByAddress.get(address) ?? address,
-      ),
-    )],
-  };
 }
 
 type StrategyDebugSimulateRequest = {
@@ -609,31 +522,7 @@ export async function handleStateRoutes(
       },
     );
 
-    let normalizedResult = result;
-    if (result.items.length > 0 || result.latestChangedAddresses.length > 0) {
-      try {
-        const rpcUrls = await dbResolveSolanaRpcUrls(
-          env.TRADINGBOT_DB,
-          user.id,
-          env.SOLANA_RPC_URL,
-        );
-        const ownerByAddress = await resolveSolanaTokenAccountOwners(
-          rpcUrls,
-          [
-            ...result.items.map((item) => item.address),
-            ...result.latestChangedAddresses,
-          ],
-        );
-        normalizedResult = normalizeOutsideTokenHolderPageAddresses(
-          result,
-          ownerByAddress,
-        );
-      } catch (err: unknown) {
-        console.warn('Failed to normalize token holder addresses to owner wallets:', err);
-      }
-    }
-
-    return jsonResponse(normalizedResult);
+    return jsonResponse(result);
   }
 
   return null;

@@ -473,6 +473,13 @@ try {
     pausedSnapshot.pending.some((entry) => entry.versionId === secondQueueVersionId),
     'second strategy should remain pending after abort pauses the queue',
   );
+  const abortedRun = pausedSnapshot.history.find(
+    (entry) => entry.versionId === firstQueueVersionId,
+  );
+  assert.ok(
+    Array.isArray(abortedRun?.report?.tasks) && abortedRun.report.tasks.length > 0,
+    'aborted run history should retain every execution task snapshot',
+  );
 
   const resumeResponse = await requestJson('/api/strategy/resume', {
     method: 'POST',
@@ -498,7 +505,7 @@ try {
   );
   assert.ok(
     taskPausedSnapshot.payload.tasks.every((task) =>
-      ['done', 'pending', 'failed'].includes(task.status)),
+      ['done', 'pending', 'failed', 'superseded'].includes(task.status)),
     'every exposed task should use a supported queue status',
   );
 
