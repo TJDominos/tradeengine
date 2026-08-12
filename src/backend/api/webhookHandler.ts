@@ -1149,10 +1149,7 @@ async function handleAlchemyNotifyWebhook(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const rawBody = await request.text().catch((err) => {
-    console.error('Failed to read Alchemy webhook body:', err);
-    return '';
-  });
+  const backgroundRequest = request.clone();
   const contractFromQuery = tryNormalizeSolanaPubkey(
     url.searchParams.get('contractAddress'),
   );
@@ -1160,6 +1157,7 @@ async function handleAlchemyNotifyWebhook(
   ctx.waitUntil(
     (async () => {
       try {
+        const rawBody = await backgroundRequest.text();
         await assertAlchemyWebhookSignature(request, env, rawBody);
         const payload = parseJsonText<AlchemyWebhookPayload>(rawBody);
         const derivedSignals = deriveAlchemySignalsFromPayload(

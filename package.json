@@ -20,6 +20,7 @@
     "check:auto-signing": "npx --yes tsx scripts/check-auto-signing.mts",
     "check:jupiter-gasless": "npx --yes tsx scripts/check-jupiter-gasless.mts",
     "check:trade-pnl": "npx --yes tsx scripts/check-trade-pnl.mts",
+    "check:market-snapshot-schema": "npx --yes tsx scripts/check-market-snapshot-schema.mts",
     "check:max-lines": "node scripts/check-max-lines.mjs",
     "db:migrate:local": "node scripts/prepare-d1-migrations.mjs --local && CI=1 wrangler d1 migrations apply tradingbot --local",
     "db:migrate:remote": "node scripts/prepare-d1-migrations.mjs --remote && CI=1 wrangler d1 migrations apply tradingbot --remote",

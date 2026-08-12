@@ -44,3 +44,50 @@ assert.equal(backgroundTasks.length, 1, 'event processing should be scheduled in
 await Promise.all(backgroundTasks);
 
 console.log('Webhook acknowledgement regression check passed.');
+
+let closeBody: (() => void) | undefined;
+const streamingBody = new ReadableStream<Uint8Array>({
+  start(controller) {
+    controller.enqueue(new TextEncoder().encode(rawBody));
+    closeBody = () => controller.close();
+  },
+});
+const streamingBackgroundTasks: Promise<unknown>[] = [];
+const streamingContext = {
+  waitUntil(task: Promise<unknown>) {
+    streamingBackgroundTasks.push(task);
+  },
+  passThroughOnException() {},
+  props: {},
+} as unknown as ExecutionContext;
+const streamingResponsePromise = handleWebhookRoutes(
+  new Request('https://example.com/api/webhooks/alchemy/notify', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-alchemy-signature': signature,
+    },
+    body: streamingBody,
+    duplex: 'half',
+  } as RequestInit & { duplex: 'half' }),
+  { ALCHEMY_WEBHOOK_SIGNING_KEY: signingKey } as Env,
+  streamingContext,
+);
+const acknowledgementResult = await Promise.race([
+  streamingResponsePromise.then(() => 'acknowledged' as const),
+  new Promise<'timed-out'>((resolve) => {
+    setTimeout(() => resolve('timed-out'), 50);
+  }),
+]);
+closeBody?.();
+const streamingResponse = await streamingResponsePromise;
+
+assert.equal(
+  acknowledgementResult,
+  'acknowledged',
+  'Alchemy webhook acknowledgement must not wait for the complete request body',
+);
+assert.equal(streamingResponse?.status, 200);
+await Promise.all(streamingBackgroundTasks);
+
+console.log('Streaming webhook acknowledgement regression check passed.');

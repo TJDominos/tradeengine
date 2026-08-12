@@ -16,6 +16,7 @@ import type {
   TradableTokenCreateRequest,
 } from './workerShared';
 import { SOLANA_USDC_MINT } from './workerShared';
+import { dbTableHasColumn } from './workerSchema';
 
 function sortRpcEndpointsByPreference(endpoints: RpcEndpoint[]): RpcEndpoint[] {
   return [...endpoints].sort((left, right) => {
@@ -752,12 +753,21 @@ export async function dbInsertTokenMarketSnapshot(
   tokenId: number,
   snapshot: TokenMarketSnapshot,
 ): Promise<void> {
+  const hasLegacyContractAddress = await dbTableHasColumn(
+    db,
+    'token_market_snapshots',
+    'contract_address',
+  );
+  const addressColumns = hasLegacyContractAddress
+    ? 'contract_address, base_token_address'
+    : 'base_token_address';
+  const addressPlaceholders = hasLegacyContractAddress ? '?3, ?3' : '?3';
   await db
     .prepare(
       `INSERT INTO token_market_snapshots (
         token_id,
         network,
-        base_token_address,
+        ${addressColumns},
         token_name,
         token_symbol,
         price_usd,
@@ -770,7 +780,7 @@ export async function dbInsertTokenMarketSnapshot(
         dex_id,
         pair_address,
         fetched_at
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
+      ) VALUES (?1, ?2, ${addressPlaceholders}, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)`,
     )
     .bind(
       tokenId,
