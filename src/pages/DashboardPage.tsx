@@ -45,6 +45,8 @@ type DashboardPageProps = {
   internalAccountsCount: number;
   profitUsdc: number;
   dashboardSnapshot: TokenMarketSnapshot | null;
+  fdvChangePercent: number | null;
+  fdvChangeLoading: boolean;
   tokenHolderAggregate: TokenHolderAggregate | null;
   tokenHolderAggregateLoading: boolean;
   transactionCount: number;
@@ -73,6 +75,8 @@ export default function DashboardPage({
   internalAccountsCount,
   profitUsdc,
   dashboardSnapshot,
+  fdvChangePercent,
+  fdvChangeLoading,
   tokenHolderAggregate,
   tokenHolderAggregateLoading,
   transactionCount,
@@ -149,6 +153,11 @@ export default function DashboardPage({
     : CONTRACT_ADDRESS
       ? `${CONTRACT_ADDRESS} / quote not set`
       : 'Select a tracked pair to begin.';
+  const fdvChangeLabel = fdvChangeLoading
+    ? 'Loading...'
+    : fdvChangePercent == null
+      ? 'Unavailable'
+      : `${fdvChangePercent >= 0 ? '+' : ''}${fdvChangePercent.toFixed(2)}%`;
 
   return (
     <div className="space-y-6">
@@ -214,7 +223,11 @@ export default function DashboardPage({
           subtitle={`${managedAccountsCount} enabled trading wallet(s) / ${internalAccountsCount} total internal`}
         />
         <StatCard title="Profit (USDC)" value={formatUSD(profitUsdc)} />
-        <StatCard title="FDV" value={formatOptionalUsd(dashboardSnapshot?.fdv)} subtitle={marketSnapshotSubtitle} />
+        <StatCard
+          title="FDV"
+          value={formatOptionalUsd(dashboardSnapshot?.fdv)}
+          subtitle={`Selected range change: ${fdvChangeLabel} | ${marketSnapshotSubtitle}`}
+        />
         <StatCard
           title={`Price: ${activeTokenName}`}
           value={formatLivePrice(dashboardSnapshot?.priceUsd)}

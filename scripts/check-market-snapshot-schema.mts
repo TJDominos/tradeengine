@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 
-import { dbInsertTokenMarketSnapshot } from '../src/backend/tokenStore';
+import {
+  dbGetTokenMarketFdvRange,
+  dbInsertTokenMarketSnapshot,
+} from '../src/backend/tokenStore';
 import type { TokenMarketSnapshot } from '../src/backend/workerShared';
 
 const baseTokenAddress = 'So11111111111111111111111111111111111111112';
@@ -66,5 +69,40 @@ await dbInsertTokenMarketSnapshot(canonical.db, 7, snapshot);
 assert.doesNotMatch(canonical.getInsert().sql, /contract_address/);
 assert.match(canonical.getInsert().sql, /VALUES \(\?1, \?2, \?3, \?4,/);
 assert.equal(canonical.getInsert().bindings[2], baseTokenAddress);
+
+let rangeQueryBindings: unknown[] = [];
+const rangeDb = {
+  prepare(sql: string) {
+    assert.match(sql, /ORDER BY fetched_at ASC, id ASC/);
+    assert.match(sql, /ORDER BY fetched_at DESC, id DESC/);
+    assert.doesNotMatch(sql, /COUNT\(\*\)/);
+    assert.doesNotMatch(sql, /fetched_at \* 1000|\/ 1000/);
+    return {
+      bind(...bindings: unknown[]) {
+        rangeQueryBindings = bindings;
+        return {
+          first: async () => ({
+            earliest_fdv: 1_000_000,
+            latest_fdv: 1_250_000,
+            earliest_id: 10,
+            latest_id: 609,
+          }),
+        };
+      },
+    };
+  },
+} as unknown as D1Database;
+const fdvRange = await dbGetTokenMarketFdvRange(
+  rangeDb,
+  7,
+  1_700_000_000_000,
+  1_700_086_400_000,
+);
+assert.deepEqual(rangeQueryBindings, [7, 1_700_000_000_000, 1_700_086_400_000]);
+assert.deepEqual(fdvRange, {
+  earliestFdv: 1_000_000,
+  latestFdv: 1_250_000,
+  hasMultipleSnapshots: true,
+});
 
 console.log('Market snapshot schema compatibility checks passed.');

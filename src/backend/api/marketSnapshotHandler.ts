@@ -3,7 +3,12 @@ import {
 } from '../marketRefresh';
 import { nowMs, normalizeTimestampMs } from '../time';
 import { dbGetTokenHolderAggregate } from '../tokenHolders';
-import { dbGetTokenMarketSnapshotsByTimeRange, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
+import {
+  dbGetTokenMarketFdvRange,
+  dbGetTokenMarketSnapshotsByTimeRange,
+  dbResolveSolanaRpcUrls,
+  dbResolveTradableTokenId,
+} from '../tokenStore';
 import { dbAddAuditLog, dbLoadSettings } from '../userStore';
 import { jsonResponse } from '../workerCore';
 import { type Env, type SessionUser, type TokenMarketSnapshot } from '../workerShared';
@@ -181,15 +186,23 @@ export async function handleMarketSnapshotRoutes(
       return jsonResponse({ error: 'Token not found' }, 404);
     }
 
-    const snapshots = await dbGetTokenMarketSnapshotsByTimeRange(
-      env.TRADINGBOT_DB,
-      tokenId,
-      startTime,
-      endTime,
-      limit,
-    );
+    const [snapshots, fdvRange] = await Promise.all([
+      dbGetTokenMarketSnapshotsByTimeRange(
+        env.TRADINGBOT_DB,
+        tokenId,
+        startTime,
+        endTime,
+        limit,
+      ),
+      dbGetTokenMarketFdvRange(
+        env.TRADINGBOT_DB,
+        tokenId,
+        startTime,
+        endTime,
+      ),
+    ]);
 
-    return jsonResponse({ snapshots });
+    return jsonResponse({ snapshots, fdvRange });
   }
 
   if (method === 'POST' && pathname === '/api/market-snapshot/refresh') {

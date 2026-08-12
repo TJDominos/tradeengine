@@ -25,6 +25,7 @@ import type {
   StrategyVersionDocument,
   TabId,
   TokenWebhookCheck,
+  TokenMarketFdvRange,
   TokenMarketSnapshot,
   TradableToken,
   WalletBalance,
@@ -147,6 +148,7 @@ export default function App() {
   const [loadingDerivedAccountPreview, setLoadingDerivedAccountPreview] = React.useState(false);
 
   const [loadingMarketSnapshots, setLoadingMarketSnapshots] = React.useState(false);
+  const [marketSnapshotFdvRange, setMarketSnapshotFdvRange] = React.useState<TokenMarketFdvRange | null>(null);
 
   const activeBaseTokenAddress =
     settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
@@ -166,6 +168,7 @@ export default function App() {
   const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
   const dashboardStatePollInFlightRef = React.useRef(false);
   const marketRefreshPollInFlightRef = React.useRef(false);
+  const marketSnapshotHistoryRequestRef = React.useRef(0);
   const profitPollInFlightRef = React.useRef(false);
   const outsideHolderPageRef = React.useRef(outsideHolderPage);
   const outsideHolderQueryMetaRef = React.useRef<{
@@ -702,10 +705,14 @@ export default function App() {
     });
 
   const loadMarketSnapshotHistory = React.useCallback(async () => {
+    const requestId = marketSnapshotHistoryRequestRef.current + 1;
+    marketSnapshotHistoryRequestRef.current = requestId;
     if (!auth?.authenticated || !activeBaseTokenAddress) {
+      setMarketSnapshotFdvRange(null);
       return;
     }
     if (!dateRange.from || !dateRange.to) {
+      setMarketSnapshotFdvRange(null);
       setEngineState((current) =>
         current
           ? {
@@ -726,9 +733,16 @@ export default function App() {
 
     setLoadingMarketSnapshots(true);
     try {
-      const result = await api<{ snapshots: TokenMarketSnapshot[] }>(
+      const result = await api<{
+        snapshots: TokenMarketSnapshot[];
+        fdvRange: TokenMarketFdvRange;
+      }>(
         `/api/market-snapshots?startTime=${startTime}&endTime=${endTime}&limit=500`,
       );
+
+      if (requestId !== marketSnapshotHistoryRequestRef.current) {
+        return;
+      }
 
       setEngineState((current) =>
         current
@@ -738,10 +752,17 @@ export default function App() {
             }
           : current,
       );
+      setMarketSnapshotFdvRange(result.fdvRange ?? null);
     } catch (err: unknown) {
+      if (requestId !== marketSnapshotHistoryRequestRef.current) {
+        return;
+      }
+      setMarketSnapshotFdvRange(null);
       setError(err instanceof Error ? err.message : 'Failed to load market snapshot history');
     } finally {
-      setLoadingMarketSnapshots(false);
+      if (requestId === marketSnapshotHistoryRequestRef.current) {
+        setLoadingMarketSnapshots(false);
+      }
     }
   }, [activeBaseTokenAddress, auth?.authenticated, dateRange.from, dateRange.to]);
 
@@ -1696,6 +1717,16 @@ export default function App() {
     : loadingMarketSnapshots
       ? 'Loading selected range...'
       : 'No market snapshot in the selected range';
+  const fdvChangePercent =
+    hasDateRange &&
+    marketSnapshotFdvRange &&
+    marketSnapshotFdvRange.hasMultipleSnapshots &&
+    marketSnapshotFdvRange.earliestFdv != null &&
+    marketSnapshotFdvRange.latestFdv != null &&
+    marketSnapshotFdvRange.earliestFdv !== 0
+      ? ((marketSnapshotFdvRange.latestFdv - marketSnapshotFdvRange.earliestFdv) /
+          marketSnapshotFdvRange.earliestFdv) * 100
+      : null;
   const totalInternalTokenAmount =
     activeTokenContractAddress
       ? engineState.internalAccountSummary.totalTrackedTokenAmount ?? 0
@@ -1798,6 +1829,8 @@ export default function App() {
       internalAccountsCount={engineState.internalAccountSummary.total}
       profitUsdc={engineState.profitUsdc}
       dashboardSnapshot={dashboardSnapshot}
+      fdvChangePercent={fdvChangePercent}
+      fdvChangeLoading={loadingMarketSnapshots}
       tokenHolderAggregate={engineState.tokenHolderAggregate}
       tokenHolderAggregateLoading={tokenHolderAggregateLoading}
       transactionCount={rangeTransactionLogs.length}

@@ -122,6 +122,12 @@ export type TokenMarketSnapshot = {
   fetchedAt: number;
 };
 
+export type TokenMarketFdvRange = {
+  earliestFdv: number | null;
+  latestFdv: number | null;
+  hasMultipleSnapshots: boolean;
+};
+
 export type TokenHolderAggregate = {
   tokenId: number;
   activeHolderCount: number;

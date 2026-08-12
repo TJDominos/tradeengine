@@ -1,6 +1,6 @@
 import { ApiError } from './errors';
 import { fetchJupiterTokenMetadata } from './jupiter';
-import { nowTs, normalizeTimestampMs } from './time';
+import { nowTs } from './time';
 import {
   dedupeStrings,
   isHeliusRpcUrl,
@@ -704,10 +704,7 @@ export async function dbGetLatestTokenMarketSnapshot(
          fetched_at
        FROM token_market_snapshots
        WHERE token_id = ?1
-       ORDER BY CASE
-         WHEN fetched_at < 1000000000000 THEN fetched_at * 1000
-         ELSE fetched_at
-       END DESC, id DESC
+       ORDER BY fetched_at DESC, id DESC
        LIMIT 1`,
     )
     .bind(tokenId)
@@ -744,7 +741,7 @@ export async function dbGetLatestTokenMarketSnapshot(
     outsidersOverOneUsd: row.outsiders_over_one_usd,
     dexId: row.dex_id,
     pairAddress: row.pair_address,
-    fetchedAt: normalizeTimestampMs(row.fetched_at),
+    fetchedAt: row.fetched_at,
   };
 }
 
@@ -827,18 +824,10 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
          dex_id,
          pair_address,
          fetched_at
-       FROM (
-         SELECT *, fetched_at AS normalized_fetched_at
-         FROM token_market_snapshots
-         WHERE token_id = ?1
-           AND fetched_at BETWEEN ?2 AND ?3
-         UNION ALL
-         SELECT *, fetched_at * 1000 AS normalized_fetched_at
-         FROM token_market_snapshots
-         WHERE token_id = ?1
-           AND fetched_at BETWEEN CAST(?2 / 1000 AS INTEGER) AND CAST(?3 / 1000 AS INTEGER)
-       )
-       ORDER BY normalized_fetched_at DESC, id DESC
+       FROM token_market_snapshots
+       WHERE token_id = ?1
+         AND fetched_at BETWEEN ?2 AND ?3
+       ORDER BY fetched_at DESC, id DESC
        LIMIT ?4`,
     )
     .bind(tokenId, startTime, endTime, limit)
@@ -873,7 +862,59 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
     outsidersOverOneUsd: row.outsiders_over_one_usd,
     dexId: row.dex_id,
     pairAddress: row.pair_address,
-    fetchedAt: normalizeTimestampMs(row.fetched_at),
+    fetchedAt: row.fetched_at,
   }));
+}
+
+export type TokenMarketFdvRange = {
+  earliestFdv: number | null;
+  latestFdv: number | null;
+  hasMultipleSnapshots: boolean;
+};
+
+export async function dbGetTokenMarketFdvRange(
+  db: D1Database,
+  tokenId: number,
+  startTime: number,
+  endTime: number,
+): Promise<TokenMarketFdvRange> {
+  const row = await db
+    .prepare(
+      `WITH earliest AS (
+         SELECT id, fdv
+         FROM token_market_snapshots
+         WHERE token_id = ?1 AND fetched_at BETWEEN ?2 AND ?3
+         ORDER BY fetched_at ASC, id ASC
+         LIMIT 1
+       ),
+       latest AS (
+         SELECT id, fdv
+         FROM token_market_snapshots
+         WHERE token_id = ?1 AND fetched_at BETWEEN ?2 AND ?3
+         ORDER BY fetched_at DESC, id DESC
+         LIMIT 1
+       )
+       SELECT
+         (SELECT fdv FROM earliest) AS earliest_fdv,
+         (SELECT fdv FROM latest) AS latest_fdv,
+         (SELECT id FROM earliest) AS earliest_id,
+         (SELECT id FROM latest) AS latest_id`,
+    )
+    .bind(tokenId, startTime, endTime)
+    .first<{
+      earliest_fdv: number | null;
+      latest_fdv: number | null;
+      earliest_id: number | null;
+      latest_id: number | null;
+    }>();
+
+  return {
+    earliestFdv: row?.earliest_fdv ?? null,
+    latestFdv: row?.latest_fdv ?? null,
+    hasMultipleSnapshots:
+      row?.earliest_id != null &&
+      row.latest_id != null &&
+      row.earliest_id !== row.latest_id,
+  };
 }
 
