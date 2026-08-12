@@ -565,6 +565,7 @@ export function buildStrategyPlanTaskSpecs(
 ): StrategyPlannerTaskSpec[] {
   const plannerOrderCount = normalizePlannerTaskOrderCount(config.baseOrderCount);
   const totalVolumeUsd = positiveNumber(config.baseTotalVolumeUsd);
+  const staggeredPulseOffsetMs = Math.min(750, config.baseDurationMs);
 
   switch (config.macroObjective) {
     case 'distribution': {
@@ -586,8 +587,8 @@ export function buildStrategyPlanTaskSpecs(
           pulse: 'wash_sell',
           totalVolumeUsd: totalVolumeUsd / 2,
           orderCount: sellCount,
-          durationMs: config.baseDurationMs,
-          scheduledOffsetMs: 750,
+          durationMs: Math.max(0, config.baseDurationMs - staggeredPulseOffsetMs),
+          scheduledOffsetMs: staggeredPulseOffsetMs,
         },
       ];
     }
@@ -629,11 +630,8 @@ export function buildStrategyPlanTaskSpecs(
           pulse: config.macroObjective === 'accumulation' ? 'buyback' : 'shakeout_buyback',
           totalVolumeUsd: buyVolumeUsd,
           orderCount: buyCount,
-          durationMs:
-            config.macroObjective === 'accumulation'
-              ? Math.round(config.baseDurationMs * 1.5)
-              : config.baseDurationMs,
-          scheduledOffsetMs: config.baseDurationMs + 750,
+          durationMs: config.baseDurationMs,
+          scheduledOffsetMs: 0,
         },
       ];
     }

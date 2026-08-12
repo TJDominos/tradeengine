@@ -160,7 +160,7 @@ const config = {
   baseOrderCount: resolveBasePlannedTransactionCount(document),
   maxOrderCount: document.parameters.maxTransactions,
   baseTotalVolumeUsd: 150,
-  baseDurationMs: 60_000,
+  baseDurationMs: 24 * 60 * 60 * 1000,
   minOrderUsd: document.parameters.minOrderUsd,
   maxOrderUsd: document.parameters.maxOrderUsd,
   execution: document.execution,
@@ -258,6 +258,10 @@ assert.equal(
 );
 assert.ok(planning.tasks.every((task) => task.allocations.length > 0), 'every task should have an account allocation');
 assert.ok(planning.tasks.every((task) => task.allocations.length === 1), 'each planned task must map to exactly one on-chain transaction');
+assert.ok(
+  planning.tasks.every((task) => task.scheduledAt <= 1_000 + config.baseDurationMs),
+  'a 24-hour strategy must not schedule tasks beyond its configured timeframe',
+);
 assert.deepEqual(
   planning.tasks.map((task) => task.orderIndex),
   planning.tasks.map((_, index) => index + 1),
