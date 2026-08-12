@@ -1,7 +1,6 @@
 import { ApiError } from './errors';
 import { fetchJupiterTokenMetadata } from './jupiter';
 import { nowTs, normalizeTimestampMs } from './time';
-import { dbTableHasColumn, dbTradableTokensUseLegacyContractUniqueness } from './workerSchema';
 import {
   dedupeStrings,
   isHeliusRpcUrl,
@@ -251,20 +250,6 @@ export async function dbCreateTradableToken(
     // non-fatal
   }
 
-  const hasContractAddressColumn = await dbTableHasColumn(
-    db,
-    'tradable_tokens',
-    'contract_address',
-  );
-  const usesLegacyContractAddressUniqueness = hasContractAddressColumn
-    ? await dbTradableTokensUseLegacyContractUniqueness(db)
-    : false;
-  const storedContractAddress = hasContractAddressColumn
-    ? usesLegacyContractAddressUniqueness
-      ? `${contractAddress}::${quoteTokenAddress}`
-      : contractAddress
-    : contractAddress;
-
   const findExistingTokenId = async (): Promise<number | null> => {
     const pairRow = await db
       .prepare(
@@ -282,40 +267,6 @@ export async function dbCreateTradableToken(
   };
 
   const persistExistingToken = async (tokenId: number): Promise<void> => {
-    if (hasContractAddressColumn) {
-      await db
-        .prepare(
-          `UPDATE tradable_tokens
-           SET contract_address = ?2,
-               base_token_address = ?3,
-               quote_token_address = ?4,
-               amm_pool_address = COALESCE(?5, amm_pool_address),
-               symbol = COALESCE(?6, symbol),
-               name = COALESCE(?7, name),
-               decimals = COALESCE(?8, decimals),
-               quote_token_symbol = COALESCE(?9, quote_token_symbol),
-               quote_token_name = COALESCE(?10, quote_token_name),
-               quote_token_decimals = COALESCE(?11, quote_token_decimals),
-               is_active = 1
-           WHERE id = ?1`,
-        )
-        .bind(
-          tokenId,
-          storedContractAddress,
-          contractAddress,
-          quoteTokenAddress,
-          ammPoolAddress,
-          jupiterSymbol,
-          jupiterName,
-          resolvedDecimals,
-          quoteTokenSymbol,
-          quoteTokenName,
-          quoteTokenDecimals,
-        )
-        .run();
-      return;
-    }
-
     await db
       .prepare(
         `UPDATE tradable_tokens
@@ -347,43 +298,6 @@ export async function dbCreateTradableToken(
   };
 
   const insertNewToken = async (): Promise<void> => {
-    if (hasContractAddressColumn) {
-      await db
-        .prepare(
-          `INSERT INTO tradable_tokens (
-             network,
-             contract_address,
-             base_token_address,
-             quote_token_address,
-             amm_pool_address,
-             symbol,
-             name,
-             decimals,
-             quote_token_symbol,
-             quote_token_name,
-             quote_token_decimals,
-             is_active,
-             created_at
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12)`,
-        )
-        .bind(
-          network,
-          storedContractAddress,
-          contractAddress,
-          quoteTokenAddress,
-          ammPoolAddress,
-          jupiterSymbol,
-          jupiterName,
-          resolvedDecimals,
-          quoteTokenSymbol,
-          quoteTokenName,
-          quoteTokenDecimals,
-          createdAt,
-        )
-        .run();
-      return;
-    }
-
     await db
       .prepare(
         `INSERT INTO tradable_tokens (
@@ -838,56 +752,6 @@ export async function dbInsertTokenMarketSnapshot(
   tokenId: number,
   snapshot: TokenMarketSnapshot,
 ): Promise<void> {
-  const hasLegacyContractAddressColumn = await dbTableHasColumn(
-    db,
-    'token_market_snapshots',
-    'contract_address',
-  );
-
-  if (hasLegacyContractAddressColumn) {
-    await db
-      .prepare(
-        `INSERT INTO token_market_snapshots (
-          token_id,
-          network,
-          contract_address,
-          base_token_address,
-          token_name,
-          token_symbol,
-          price_usd,
-          liquidity_usd,
-          fdv,
-          volume_24h,
-          total_holders,
-          total_transactions_24h,
-          outsiders_over_one_usd,
-          dex_id,
-          pair_address,
-          fetched_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
-      )
-      .bind(
-        tokenId,
-        snapshot.network,
-        snapshot.baseTokenAddress,
-        snapshot.baseTokenAddress,
-        snapshot.tokenName,
-        snapshot.tokenSymbol,
-        snapshot.priceUsd,
-        snapshot.liquidityUsd,
-        snapshot.fdv,
-        snapshot.volume24h,
-        snapshot.totalHolders,
-        snapshot.totalTransactions24h,
-        snapshot.outsidersOverOneUsd,
-        snapshot.dexId,
-        snapshot.pairAddress,
-        snapshot.fetchedAt,
-      )
-      .run();
-    return;
-  }
-
   await db
     .prepare(
       `INSERT INTO token_market_snapshots (

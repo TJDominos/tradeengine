@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS strategy_evaluations (
   event_type TEXT NOT NULL,
   external_id TEXT,
   contract_address TEXT NOT NULL,
+  base_token_address TEXT,
   wallet_address TEXT,
   tx_signature TEXT,
   status TEXT NOT NULL,

@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "npm run db:migrate:local && vite",
     "build": "vite build",
     "preview": "npm run build && wrangler dev --config dist/tradeengine/wrangler.json",
     "clean": "rm -rf dist rust-backend/target",
@@ -21,10 +21,12 @@
     "check:jupiter-gasless": "npx --yes tsx scripts/check-jupiter-gasless.mts",
     "check:trade-pnl": "npx --yes tsx scripts/check-trade-pnl.mts",
     "check:max-lines": "node scripts/check-max-lines.mjs",
+    "db:migrate:local": "node scripts/prepare-d1-migrations.mjs --local && CI=1 wrangler d1 migrations apply tradingbot --local",
+    "db:migrate:remote": "node scripts/prepare-d1-migrations.mjs --remote && CI=1 wrangler d1 migrations apply tradingbot --remote",
     "cleanup:token-account-holders": "node scripts/cleanup-token-account-holders.mjs",
     "check:base-token-backfill:local": "wrangler d1 execute tradingbot --local --file ./scripts/check-base-token-backfill.sql",
     "check:base-token-backfill:remote": "wrangler d1 execute tradingbot --remote --file ./scripts/check-base-token-backfill.sql",
-    "deploy": "npm run build && wrangler deploy --config dist/tradeengine/wrangler.json"
+    "deploy": "npm run build && npm run db:migrate:remote && wrangler deploy --config dist/tradeengine/wrangler.json"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",

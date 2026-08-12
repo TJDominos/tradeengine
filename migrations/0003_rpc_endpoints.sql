@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS rpc_endpoints (
   user_id    INTEGER NOT NULL,
   network    TEXT    NOT NULL DEFAULT 'solana',
   url        TEXT    NOT NULL,
+  is_active  INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL,
   UNIQUE(user_id, network, url),
   FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE

@@ -11,9 +11,15 @@ CREATE TABLE IF NOT EXISTS tradable_tokens (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   network          TEXT    NOT NULL DEFAULT 'solana',   -- 'solana' (only value for MVP)
   contract_address TEXT    NOT NULL,                    -- token mint address on Solana
+  base_token_address TEXT,
+  quote_token_address TEXT NOT NULL DEFAULT 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+  amm_pool_address TEXT,
   symbol           TEXT,                                -- fetched from on-chain metadata
   name             TEXT,                                -- fetched from on-chain metadata
   decimals         INTEGER,                             -- fetched from on-chain metadata
+  quote_token_symbol TEXT,
+  quote_token_name TEXT,
+  quote_token_decimals INTEGER,
   is_active        INTEGER NOT NULL DEFAULT 1,          -- 1 = enabled, 0 = disabled
   created_at       INTEGER NOT NULL,
   UNIQUE(network, contract_address)
@@ -46,6 +52,7 @@ CREATE TABLE IF NOT EXISTS signals (
   wallet_address TEXT,
   tx_signature   TEXT,
   payload        TEXT    NOT NULL,           -- full JSON from the webhook
+  details_json   TEXT,
   processed      INTEGER NOT NULL DEFAULT 0, -- 0 = pending, 1 = done
   processed_at   INTEGER,
   error_message  TEXT,
@@ -71,6 +78,7 @@ CREATE TABLE IF NOT EXISTS webhook_transaction_logs (
     CHECK(source IN ('webhook', 'rpc_reconcile')),
   event_type TEXT NOT NULL,
   tx_signature TEXT,
+  chain_time_ms INTEGER,
   status TEXT NOT NULL DEFAULT 'PENDING'
     CHECK(status IN ('PENDING', 'CONFIRMED', 'FAILED')),
   error_message TEXT,
@@ -100,6 +108,9 @@ CREATE TABLE IF NOT EXISTS trade_logs (
   executed_amount  REAL,                       -- NULL until confirmed
   executed_price   REAL,                       -- NULL until confirmed
   tx_signature     TEXT,
+  chain_time_ms    INTEGER,
+  execution_trace_json TEXT,
+  strategy_run_id  TEXT,
   status           TEXT    NOT NULL DEFAULT 'PENDING'
                            CHECK(status IN ('PENDING', 'SUCCESS', 'FAILED')),
   error_message    TEXT,
@@ -126,6 +137,7 @@ CREATE TABLE IF NOT EXISTS historic_setups (
   volatility_target REAL    NOT NULL DEFAULT 0,
   pullback_target   REAL    NOT NULL DEFAULT 0,
   contract_address  TEXT,
+  base_token_address TEXT,
   metadata          TEXT,                     -- JSON blob for optional / future fields
   created_at        INTEGER NOT NULL,
   FOREIGN KEY(user_id)   REFERENCES users(id) ON DELETE CASCADE,

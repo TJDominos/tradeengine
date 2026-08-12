@@ -60,6 +60,22 @@ export interface ManagedBuyCapacitySummary {
 
 export type ManagedAccountSort = 'newest' | 'usdc' | 'sol' | 'token';
 
+type ManagedAccountPageRow = {
+  id: number;
+  label: string;
+  wallet_address: string;
+  type: string;
+  capability_base_mint: string | null;
+  capability_quote_mint: string | null;
+  created_at: number;
+  wallet_usdc_balance: number | null;
+  wallet_sol_balance: number | null;
+  wallet_active_token_mint: string | null;
+  wallet_active_token_balance: number | null;
+  wallet_balance_updated_at: number | null;
+  is_active: number;
+};
+
 export interface ManagedAccountPageRecord {
   items: AccountRecord[];
   page: number;
@@ -1006,7 +1022,6 @@ export async function dbListManagedAccountsPage(
     pageSize?: number;
     searchTerm?: string | null;
     sort?: ManagedAccountSort;
-    envRpcUrl?: string;
   },
 ): Promise<ManagedAccountPageRecord> {
   const page = Math.max(1, options?.page ?? 1);
@@ -1024,7 +1039,22 @@ export async function dbListManagedAccountsPage(
     settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
   const offset = (page - 1) * pageSize;
   const searchPattern = `%${searchTerm}%`;
-  const countRow = await db
+  const orderBySql = sort === 'usdc'
+    ? 'COALESCE(wallet_usdc_balance, 0) DESC, COALESCE(is_active, 1) DESC, created_at DESC, id DESC'
+    : sort === 'sol'
+      ? 'COALESCE(wallet_sol_balance, 0) DESC, COALESCE(is_active, 1) DESC, created_at DESC, id DESC'
+      : sort === 'token'
+        ? `CASE
+             WHEN ?4 <> '' AND wallet_active_token_mint = ?4
+             THEN COALESCE(wallet_active_token_balance, 0)
+             ELSE 0
+           END DESC,
+           COALESCE(is_active, 1) DESC, created_at DESC, id DESC`
+        : 'COALESCE(is_active, 1) DESC, created_at DESC, id DESC';
+  const paginationSql = sort === 'token'
+    ? 'LIMIT ?5 OFFSET ?6'
+    : 'LIMIT ?4 OFFSET ?5';
+  const countStatement = db
     .prepare(
       `SELECT COUNT(*) AS total
        FROM accounts
@@ -1032,9 +1062,8 @@ export async function dbListManagedAccountsPage(
          AND type = 'managed'
          AND (?2 = '' OR LOWER(wallet_address) LIKE ?3 OR LOWER(label) LIKE ?3)`,
     )
-    .bind(userId, searchTerm, searchPattern)
-    .first<{ total: number }>();
-  const rows = await db
+    .bind(userId, searchTerm, searchPattern);
+  const pageStatement = db
     .prepare(
       `SELECT id, label, wallet_address, type, capability_base_mint, capability_quote_mint, created_at,
               wallet_usdc_balance, wallet_sol_balance, wallet_active_token_mint, wallet_active_token_balance, wallet_balance_updated_at,
@@ -1043,46 +1072,20 @@ export async function dbListManagedAccountsPage(
        WHERE user_id = ?1
          AND type = 'managed'
          AND (?2 = '' OR LOWER(wallet_address) LIKE ?3 OR LOWER(label) LIKE ?3)
-       ORDER BY
-         CASE WHEN ?4 = 'usdc' THEN COALESCE(wallet_usdc_balance, 0) END DESC,
-         CASE WHEN ?4 = 'sol' THEN COALESCE(wallet_sol_balance, 0) END DESC,
-         CASE
-           WHEN ?4 = 'token' THEN CASE
-             WHEN ?5 <> '' AND wallet_active_token_mint = ?5
-             THEN COALESCE(wallet_active_token_balance, 0)
-             ELSE 0
-           END
-         END DESC,
-         COALESCE(is_active, 1) DESC,
-         created_at DESC,
-         id DESC
-       LIMIT ?6 OFFSET ?7`,
+       ORDER BY ${orderBySql}
+       ${paginationSql}`,
     )
-    .bind(
-      userId,
-      searchTerm,
-      searchPattern,
-      sort,
-      activeBaseTokenAddress,
-      pageSize,
-      offset,
-    )
-    .all<{
-      id: number;
-      label: string;
-      wallet_address: string;
-      type: string;
-      capability_base_mint: string | null;
-      capability_quote_mint: string | null;
-      created_at: number;
-      wallet_usdc_balance: number | null;
-      wallet_sol_balance: number | null;
-      wallet_active_token_mint: string | null;
-      wallet_active_token_balance: number | null;
-      wallet_balance_updated_at: number | null;
-      is_active: number;
-    }>();
-  const items = rows.results.map((row) => mapAccountRow(row));
+    .bind(...(
+      sort === 'token'
+        ? [userId, searchTerm, searchPattern, activeBaseTokenAddress, pageSize, offset]
+        : [userId, searchTerm, searchPattern, pageSize, offset]
+    ));
+  const [countResult, pageResult] = await db.batch<ManagedAccountPageRow | { total: number }>([
+    countStatement,
+    pageStatement,
+  ]);
+  const items = (pageResult.results as ManagedAccountPageRow[]).map((row) => mapAccountRow(row));
+  const countRow = countResult.results[0] as { total: number } | undefined;
   const totalItems = Number(countRow?.total ?? 0);
 
   const balances = buildWalletBalancesFromSnapshots(items, activeBaseTokenAddress);

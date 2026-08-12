@@ -30,7 +30,6 @@ import type {
   StrategyVersionDocument,
 } from './types';
 import type { ExternalTradeEvent } from './triggers';
-import { initializeAllSchemas } from '../services/dbSetup';
 import { executeSwap, type JupiterSwapExecutionResult } from '../services/jupiterSwapService';
 import { getActiveAccounts } from '../services/accountPoolService';
 import { analyzeTradeDirection } from '../services/webhookParser';
@@ -273,7 +272,6 @@ export class StrategyEngineDurableObject {
   }
 
   public async fetch(request: Request): Promise<Response> {
-    await initializeAllSchemas(this.env);
     const url = new URL(request.url);
     await this.ensureHydrated();
 
@@ -343,7 +341,6 @@ export class StrategyEngineDurableObject {
   }
 
   public async alarm(): Promise<void> {
-    await initializeAllSchemas(this.env);
     await this.ensureHydrated();
     const state = this.persistedState;
     const config = state.config;
@@ -713,7 +710,7 @@ export class StrategyEngineDurableObject {
     }
 
     if (input.clearPendingTasks ?? true) {
-      this.discardPendingTaskSnapshots();
+      this.supersedePendingTaskSnapshots('debug-simulation');
       this.persistedState.pendingTasks = [];
       await this.ctx.storage.deleteAlarm();
       await this.persistState({ scheduleAlarm: false });
@@ -1030,7 +1027,6 @@ export class StrategyEngineDurableObject {
     }
 
     if (replacePendingTasks) {
-      this.discardPendingTaskSnapshots();
       this.persistedState.pendingTasks = [];
     }
 
@@ -1566,13 +1562,6 @@ export class StrategyEngineDurableObject {
     snapshot.lastError = null;
   }
 
-  private discardPendingTaskSnapshots(): void {
-    const pendingTaskIds = new Set(this.persistedState.pendingTasks.map((task) => task.id));
-    this.persistedState.taskSnapshots = this.persistedState.taskSnapshots.filter(
-      (snapshot) => !pendingTaskIds.has(snapshot.id),
-    );
-  }
-
   private supersedePendingTaskSnapshots(triggerTxHash: string): void {
     const pendingTaskIds = new Set(this.persistedState.pendingTasks.map((task) => task.id));
     const supersededAt = Date.now();
@@ -1624,7 +1613,51 @@ export class StrategyEngineDurableObject {
     await this.persistState({ scheduleAlarm: false });
   }
 
+  private restoreMissingReviewedTaskSnapshots(): void {
+    const state = this.persistedState;
+    const plan = state.config?.reviewedPlan;
+    const startTime = state.metrics.startTime;
+    if (!plan || !startTime || state.status === 'idle') {
+      return;
+    }
+
+    const existingIds = new Set(state.taskSnapshots.map((task) => task.id));
+    const pendingById = new Map(state.pendingTasks.map((task) => [task.id, task]));
+    const latestTrigger = [...state.observedOrders]
+      .reverse()
+      .find((order) => order.source === 'external');
+    for (const task of plan.tasks) {
+      const id = `base:reviewed:${task.taskId}`;
+      if (existingIds.has(id)) {
+        continue;
+      }
+      const pendingTask = pendingById.get(id);
+      const scheduledAt = pendingTask?.scheduledAt ?? (
+        startTime + INITIAL_EXECUTION_DELAY_MS + Math.max(0, task.scheduledAt - plan.generatedAt)
+      );
+      state.taskSnapshots.push({
+        id,
+        side: task.side,
+        amountUsd: task.totalVolumeUsd,
+        scheduledAt,
+        nextExecutionTime: pendingTask?.scheduledAt ?? null,
+        source: 'base',
+        status: pendingTask ? 'pending' : 'superseded',
+        attemptCount: 0,
+        executedVolumeUsd: 0,
+        completedAt: null,
+        lastFailedAt: null,
+        lastError: null,
+        supersededAt: pendingTask ? null : latestTrigger?.occurredAt ?? Date.now(),
+        planRevision: 0,
+        triggerTxHash: pendingTask ? null : latestTrigger?.id ?? null,
+      });
+      existingIds.add(id);
+    }
+  }
+
   private buildMetricsResponse() {
+    this.restoreMissingReviewedTaskSnapshots();
     return {
       status: this.persistedState.status,
       runId: this.persistedState.config?.runId ?? null,

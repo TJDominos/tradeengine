@@ -1,4 +1,2 @@
--- Add total_holders persistence for Jupiter holder-count snapshots.
-
-ALTER TABLE token_market_snapshots
-ADD COLUMN total_holders INTEGER;
+-- total_holders is part of the canonical table definition in 0004.
+SELECT 1;

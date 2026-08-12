@@ -53,20 +53,19 @@ The Worker uses the following binding (already configured in `wrangler.jsonc`):
 }
 ```
 
-### Apply the schema migration (optional pre-provisioning)
+### Apply schema migrations
 
-The Worker now auto-initialises the core D1 schema on the first write-capable auth request (`/api/auth/bootstrap` or `/api/auth/login`) by running idempotent `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` statements that match `migrations/0001_init.sql`.
+Formal D1 migrations are the only schema creation and upgrade path. Worker HTTP
+requests, scheduled jobs, and Durable Object requests never execute schema DDL.
 
-`/api/auth/status` only probes the existing auth tables and no longer runs schema DDL, which keeps cold-start status checks from getting stuck behind broader trade-domain schema work.
-
-You can still run migrations manually to pre-provision environments:
+Use the project scripts to prepare legacy migration history and apply pending migrations:
 
 ```bash
 # remote (production)
-npx wrangler d1 migrations apply tradingbot --remote
+npm run db:migrate:remote
 
 # local dev (uses a local SQLite file under .wrangler/)
-npx wrangler d1 migrations apply tradingbot --local
+npm run db:migrate:local
 ```
 
 Migrations are located in `migrations/`:
@@ -78,6 +77,14 @@ Migrations are located in `migrations/`:
 | `0003_rpc_endpoints.sql` | User-scoped Solana HTTP RPC failover pool |
 | `0004_token_market_snapshots.sql` | Historical token market snapshots and related indexes |
 | `0009_base_token_address_backfill.sql` | Backfills legacy `contract_address` values into the renamed `base_token_address` columns |
+| `0015_schema_convergence.sql` | Migration boundary retained for previously migrated environments |
+| `0016_canonical_token_address_schema.sql` | Migrates data to canonical `base_token_address` fields and removes deprecated database columns |
+| `0017_managed_account_pagination_indexes.sql` | Covers managed-account newest, USDC, SOL, and token pagination sorts |
+
+Databases created by older Worker versions may already contain the complete schema
+while `d1_migrations` is empty. `scripts/prepare-d1-migrations.mjs` verifies every
+required table and column before baselining that legacy state through migration 0013.
+It refuses to baseline incomplete schemas; migrations 0014 and later then run normally.
 
 ### Verify the backfill
 
@@ -128,16 +135,13 @@ npx wrangler secret put ALCHEMY_WEBHOOK_SIGNING_KEY
    ```bash
    npm install
    ```
-2. Apply migrations locally:
-   ```bash
-   npx wrangler d1 migrations apply tradingbot --local
-   ```
-3. Start the local Worker dev server (serves both the React UI and API):
+2. Start the local Worker dev server (serves both the React UI and API):
    ```bash
    npm run dev
    ```
-4. Open `http://localhost:5173` (or the port shown by Vite).
-5. On first launch, create the initial admin username and password in the bootstrap screen.
+   This applies pending local D1 migrations before Vite starts.
+3. Open `http://localhost:5173` (or the port shown by Vite).
+4. On first launch, create the initial admin username and password in the bootstrap screen.
    - Passwords shorter than 12 characters are rejected with a clear `400` error response.
 
 > **Note:** For local development the `PRIVATE_KEY_ENCRYPTION_KEY` secret is read from a `.dev.vars` file.  
@@ -149,7 +153,7 @@ npx wrangler secret put ALCHEMY_WEBHOOK_SIGNING_KEY
 ## Deployment
 
 ```bash
-# Build the frontend and deploy the Worker to Cloudflare
+# Build, apply remote D1 migrations, then deploy the Worker
 npm run deploy
 ```
 

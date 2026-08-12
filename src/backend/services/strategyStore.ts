@@ -574,7 +574,7 @@ function mapStrategyEvaluationRow(row: {
   source: string;
   event_type: string;
   external_id: string | null;
-  contract_address: string;
+  base_token_address: string;
   wallet_address: string | null;
   tx_signature: string | null;
   status: string;
@@ -590,7 +590,7 @@ function mapStrategyEvaluationRow(row: {
     source: row.source,
     eventType: row.event_type,
     externalId: row.external_id,
-    contractAddress: row.contract_address,
+    contractAddress: row.base_token_address,
     walletAddress: row.wallet_address,
     txSignature: row.tx_signature,
     status: row.status,
@@ -1167,7 +1167,7 @@ export async function dbListStrategyEvaluations(
          se.source,
          se.event_type,
          se.external_id,
-         se.contract_address,
+         se.base_token_address,
          se.wallet_address,
          se.tx_signature,
          se.status,
@@ -1189,7 +1189,7 @@ export async function dbListStrategyEvaluations(
       source: string;
       event_type: string;
       external_id: string | null;
-      contract_address: string;
+      base_token_address: string;
       wallet_address: string | null;
       tx_signature: string | null;
       status: string;
@@ -1236,7 +1236,7 @@ async function dbCreateStrategyEvaluation(
          source,
          event_type,
          external_id,
-         contract_address,
+         base_token_address,
          wallet_address,
          tx_signature,
          status,

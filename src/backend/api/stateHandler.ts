@@ -450,7 +450,6 @@ export async function handleStateRoutes(
           sortParam === 'usdc' || sortParam === 'sol' || sortParam === 'token'
             ? sortParam
             : 'newest',
-        envRpcUrl: env.SOLANA_RPC_URL,
       },
     );
 

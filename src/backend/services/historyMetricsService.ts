@@ -22,7 +22,7 @@ export async function dbCreateHistoricalSetupSnapshot(
         net_buyin_target,
         volatility_target,
         pullback_target,
-        contract_address,
+        base_token_address,
         metadata,
         created_at
       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
@@ -193,7 +193,7 @@ export async function dbListHistoricalSetups(
     .prepare(
       `SELECT
          hs.id,
-         hs.contract_address,
+         hs.base_token_address,
          hs.time_range_target,
          hs.max_transactions,
          hs.max_slippage,
@@ -212,7 +212,7 @@ export async function dbListHistoricalSetups(
     .bind(userId)
     .all<{
       id: number;
-      contract_address: string | null;
+      base_token_address: string | null;
       time_range_target: string;
       max_transactions: number;
       max_slippage: number;
@@ -226,7 +226,7 @@ export async function dbListHistoricalSetups(
   return rows.results.map((row) => ({
     id: row.id,
     tokenSymbol: row.token_symbol,
-    baseTokenAddress: row.contract_address,
+    baseTokenAddress: row.base_token_address,
     timeRangeTarget: row.time_range_target,
     maxTransactions: row.max_transactions,
     maxSlippage: row.max_slippage,
