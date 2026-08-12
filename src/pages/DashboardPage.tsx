@@ -158,6 +158,12 @@ export default function DashboardPage({
     : fdvChangePercent == null
       ? 'Unavailable'
       : `${fdvChangePercent >= 0 ? '+' : ''}${fdvChangePercent.toFixed(2)}%`;
+  const fdvChangeColorClass =
+    fdvChangePercent == null
+      ? 'text-slate-400'
+      : fdvChangePercent >= 0
+        ? 'text-emerald-400'
+        : 'text-red-400';
 
   return (
     <div className="space-y-6">
@@ -226,7 +232,15 @@ export default function DashboardPage({
         <StatCard
           title="FDV"
           value={formatOptionalUsd(dashboardSnapshot?.fdv)}
-          subtitle={`Selected range change: ${fdvChangeLabel} | ${marketSnapshotSubtitle}`}
+          subtitle={
+            <span className="inline-flex flex-wrap items-center gap-1.5">
+              <span>Selected range change:</span>
+              <span className={`text-[16px] font-semibold ${fdvChangeColorClass}`}>
+                {fdvChangeLabel}
+              </span>
+              <span>| {marketSnapshotSubtitle}</span>
+            </span>
+          }
         />
         <StatCard
           title={`Price: ${activeTokenName}`}

@@ -1713,7 +1713,7 @@ export default function App() {
   const activeTokenName =
     dashboardSnapshot?.tokenName ?? engineState.marketSnapshot?.tokenName ?? activeTrackedToken?.name ?? activeTokenSymbol;
   const marketSnapshotSubtitle = dashboardSnapshot?.fetchedAt
-    ? `Snapshot: ${formatDate(dashboardSnapshot.fetchedAt)}${dashboardSnapshot.dexId ? ` | Source: ${dashboardSnapshot.dexId}` : ''}`
+    ? `Snapshot: ${formatDate(dashboardSnapshot.fetchedAt)}`
     : loadingMarketSnapshots
       ? 'Loading selected range...'
       : 'No market snapshot in the selected range';

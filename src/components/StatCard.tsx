@@ -1,7 +1,7 @@
 type StatCardProps = {
   title: string;
   value: string;
-  subtitle?: string;
+  subtitle?: React.ReactNode;
   copyable?: boolean;
   isAddress?: boolean;
 };
@@ -31,7 +31,7 @@ export default function StatCard({
           {value}
         </h2>
       </div>
-      {subtitle ? <p className="mt-3 text-xs text-slate-500">{subtitle}</p> : null}
+      {subtitle ? <div className="mt-3 text-xs text-slate-500">{subtitle}</div> : null}
     </div>
   );
 }
