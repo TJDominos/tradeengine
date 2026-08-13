@@ -29,9 +29,6 @@ function resolveApiTimeoutMs(pathname: string): number {
   if (pathname === '/api/strategy/active') {
     return LONG_RUNNING_API_TIMEOUT_MS;
   }
-  if (pathname.startsWith('/api/webhook') || pathname.startsWith('/api/webhooks/')) {
-    return LONG_RUNNING_API_TIMEOUT_MS;
-  }
   return DEFAULT_API_TIMEOUT_MS;
 }
 
@@ -70,12 +67,18 @@ async function handleApi(
   ctx: ExecutionContext,
 ): Promise<Response> {
   try {
+    // Webhook ingress must acknowledge on its own schedule; the timeout race below
+    // would turn a slow delivery into a 504 and get the webhook deactivated upstream.
+    const webhookResponse = await handleWebhookRoutes(request, env, ctx);
+    if (webhookResponse) {
+      return webhookResponse;
+    }
+
     return await withApiTimeout(
       request,
       (async () => {
         const handlers = [
           () => handleAuthRoutes(request, env),
-          () => handleWebhookRoutes(request, env, ctx),
           () => handleStateRoutes(request, env),
           () => handleSettingsRoutes(request, env),
           () => handleStrategyRoutes(request, env, ctx),

@@ -1143,41 +1143,66 @@ async function processAlchemyNotifyWebhookPayload(
   };
 }
 
+export const ALCHEMY_ACK_BODY_READ_TIMEOUT_MS = 2_000;
+
 async function handleAlchemyNotifyWebhook(
   request: Request,
   url: URL,
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const backgroundRequest = request.clone();
-  const contractFromQuery = tryNormalizeSolanaPubkey(
-    url.searchParams.get('contractAddress'),
-  );
+  try {
+    const contractFromQuery = tryNormalizeSolanaPubkey(
+      url.searchParams.get('contractAddress'),
+    );
+    const rawBodyPromise = request.text().catch((err: unknown) => {
+      console.error('Alchemy webhook body read failed:', err);
+      return null;
+    });
 
-  ctx.waitUntil(
-    (async () => {
-      try {
-        const rawBody = await backgroundRequest.text();
-        await assertAlchemyWebhookSignature(request, env, rawBody);
-        const payload = parseJsonText<AlchemyWebhookPayload>(rawBody);
-        const derivedSignals = deriveAlchemySignalsFromPayload(
-          payload,
-          contractFromQuery,
-        );
-        const result = await processAlchemyNotifyWebhookPayload(
-          env,
-          payload,
-          contractFromQuery,
-          derivedSignals,
-        );
-        console.log(
-          `[webhook] Routed ${result.routedTargets} targets, processed ${result.processed} signal(s), duplicates ${result.duplicates}, ignored ${result.ignored}`,
-        );
-      } catch (err) {
-        console.error('Alchemy webhook background processing failed:', err);
-      }
-    })(),
-  );
+    ctx.waitUntil(
+      (async () => {
+        const rawBody = await rawBodyPromise;
+        if (rawBody == null) {
+          return;
+        }
+        try {
+          await assertAlchemyWebhookSignature(request, env, rawBody);
+          const payload = parseJsonText<AlchemyWebhookPayload>(rawBody);
+          const derivedSignals = deriveAlchemySignalsFromPayload(
+            payload,
+            contractFromQuery,
+          );
+          const result = await processAlchemyNotifyWebhookPayload(
+            env,
+            payload,
+            contractFromQuery,
+            derivedSignals,
+          );
+          console.log(
+            `[webhook] Routed ${result.routedTargets} targets, processed ${result.processed} signal(s), duplicates ${result.duplicates}, ignored ${result.ignored}`,
+          );
+        } catch (err) {
+          console.error('Alchemy webhook background processing failed:', err);
+        }
+      })(),
+    );
+
+    // Consume the delivery body before acknowledging so the sender never sees the
+    // response race its own upload, but never let a stalled body delay the 2xx ack.
+    let ackTimer: ReturnType<typeof setTimeout> | null = null;
+    await Promise.race([
+      rawBodyPromise,
+      new Promise<void>((resolve) => {
+        ackTimer = setTimeout(resolve, ALCHEMY_ACK_BODY_READ_TIMEOUT_MS);
+      }),
+    ]);
+    if (ackTimer != null) {
+      clearTimeout(ackTimer);
+    }
+  } catch (err) {
+    console.error('Alchemy webhook acknowledgement path failed:', err);
+  }
 
   return jsonResponse({ ok: true, accepted: true }, 200);
 }

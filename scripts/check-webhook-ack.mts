@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 
-import { handleWebhookRoutes } from '../src/backend/api/webhookHandler';
+import {
+  ALCHEMY_ACK_BODY_READ_TIMEOUT_MS,
+  handleWebhookRoutes,
+} from '../src/backend/api/webhookHandler';
 import type { Env } from '../src/backend/workerShared';
 
 const backgroundTasks: Promise<unknown>[] = [];
@@ -60,6 +63,7 @@ const streamingContext = {
   passThroughOnException() {},
   props: {},
 } as unknown as ExecutionContext;
+const startedAt = Date.now();
 const streamingResponsePromise = handleWebhookRoutes(
   new Request('https://example.com/api/webhooks/alchemy/notify', {
     method: 'POST',
@@ -76,9 +80,10 @@ const streamingResponsePromise = handleWebhookRoutes(
 const acknowledgementResult = await Promise.race([
   streamingResponsePromise.then(() => 'acknowledged' as const),
   new Promise<'timed-out'>((resolve) => {
-    setTimeout(() => resolve('timed-out'), 50);
+    setTimeout(() => resolve('timed-out'), ALCHEMY_ACK_BODY_READ_TIMEOUT_MS + 2_000);
   }),
 ]);
+const acknowledgementMs = Date.now() - startedAt;
 closeBody?.();
 const streamingResponse = await streamingResponsePromise;
 
@@ -86,6 +91,10 @@ assert.equal(
   acknowledgementResult,
   'acknowledged',
   'Alchemy webhook acknowledgement must not wait for the complete request body',
+);
+assert.ok(
+  acknowledgementMs < ALCHEMY_ACK_BODY_READ_TIMEOUT_MS + 1_000,
+  `Alchemy webhook acknowledgement took ${acknowledgementMs}ms, which exceeds the bounded body wait`,
 );
 assert.equal(streamingResponse?.status, 200);
 await Promise.all(streamingBackgroundTasks);
