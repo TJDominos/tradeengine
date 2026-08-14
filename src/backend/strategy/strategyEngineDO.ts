@@ -949,6 +949,8 @@ export class StrategyEngineDurableObject {
       maxOrderCount: config.strategyDocument.parameters.maxTransactions,
       baseTotalVolumeUsd: config.targetTotalVolumeUsd,
       baseDurationMs: config.baseDurationMs,
+      targetPullbackPct: config.strategyDocument.targets.pullbackPctMax,
+      targetVolatilityPct: config.strategyDocument.targets.volatilityPctMin,
       minOrderUsd: config.strategyDocument.parameters.minOrderUsd,
       maxOrderUsd: config.strategyDocument.parameters.maxOrderUsd,
       execution: config.execution,

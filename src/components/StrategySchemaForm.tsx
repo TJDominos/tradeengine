@@ -199,6 +199,103 @@ function FieldShell({
   );
 }
 
+function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volatilityReview'] }) {
+  const points = review.points.filter((point) => point.priceUsd != null);
+  if (!review.available || points.length < 2) {
+    return null;
+  }
+
+  const width = 360;
+  const height = 150;
+  const paddingX = 18;
+  const paddingY = 16;
+  const chartHeight = 96;
+  const bottomY = paddingY + chartHeight;
+  const prices = points.map((point) => point.priceUsd ?? 0);
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const priceRange = Math.max(0.000001, maxPrice - minPrice);
+  const maxAbsFlow = Math.max(1, ...points.map((point) => Math.abs(point.netFlowUsd)));
+  const elapsedValues = points.map((point, index) => point.elapsedMs ?? index);
+  const maxElapsed = Math.max(1, ...elapsedValues);
+  const xForPoint = (point: (typeof points)[number], index: number) => {
+    const elapsed = point.elapsedMs ?? index;
+    return paddingX + (elapsed / maxElapsed) * (width - paddingX * 2);
+  };
+  const yForPrice = (priceUsd: number) => paddingY + ((maxPrice - priceUsd) / priceRange) * chartHeight;
+  const pricePath = points
+    .map((point, index) => {
+      const command = index === 0 ? 'M' : 'L';
+      return `${command} ${xForPoint(point, index).toFixed(2)} ${yForPrice(point.priceUsd ?? 0).toFixed(2)}`;
+    })
+    .join(' ');
+  const firstActionPoint = points.find((point) => point.side !== 'start');
+  const lastPoint = points[points.length - 1];
+  const minimumSlopePct = Math.min(
+    ...points
+      .map((point) => point.slopePctPerHour ?? point.slopePct)
+      .filter((value): value is number => value != null),
+  );
+
+  return (
+    <div className="mt-4 rounded-xl border border-slate-700 bg-slate-950/50 px-3 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Price Slope Chart</p>
+          <p className="mt-1 text-xs text-slate-400">
+            Net flow {formatCurrency(Math.abs(lastPoint?.cumulativeNetFlowUsd ?? 0))} {((lastPoint?.cumulativeNetFlowUsd ?? 0) >= 0) ? 'buy' : 'sell'} pressure
+          </p>
+        </div>
+        <div className="text-right text-xs text-slate-400">
+          <p>{minimumSlopePct.toFixed(2)}%/h max down-slope</p>
+          <p className="mt-1">First action: {titleCase(firstActionPoint?.side ?? 'start')}</p>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Projected price slope chart" className="mt-3 h-40 w-full overflow-visible">
+        <line x1={paddingX} y1={bottomY} x2={width - paddingX} y2={bottomY} stroke="rgb(51 65 85)" strokeWidth="1" />
+        <path d={pricePath} fill="none" stroke="rgb(96 165 250)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        {points.map((point, index) => {
+          const x = xForPoint(point, index);
+          const priceY = yForPrice(point.priceUsd ?? 0);
+          const barHeight = Math.max(3, Math.min(24, (Math.abs(point.netFlowUsd) / maxAbsFlow) * 24));
+          const isSell = point.side === 'sell';
+          const isBuy = point.side === 'buy';
+          return (
+            <g key={`${point.index}-${point.side}-${index}`}>
+              {isSell || isBuy ? (
+                <line
+                  x1={x}
+                  y1={bottomY + (isSell ? 0 : 2)}
+                  x2={x}
+                  y2={bottomY + (isSell ? barHeight : -barHeight)}
+                  stroke={isSell ? 'rgb(251 113 133)' : 'rgb(52 211 153)'}
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                />
+              ) : null}
+              <circle cx={x} cy={priceY} r={index === 0 ? 3 : 2.5} fill={isSell ? 'rgb(251 113 133)' : isBuy ? 'rgb(52 211 153)' : 'rgb(148 163 184)'} />
+            </g>
+          );
+        })}
+      </svg>
+      <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-400">
+        <div>
+          <p className="text-slate-500">Start</p>
+          <p className="mt-1 font-medium text-slate-200">{formatCurrency(review.startPriceUsd)}</p>
+        </div>
+        <div>
+          <p className="text-slate-500">Low</p>
+          <p className="mt-1 font-medium text-rose-200">{formatCurrency(review.projectedLowPriceUsd)}</p>
+        </div>
+        <div>
+          <p className="text-slate-500">High</p>
+          <p className="mt-1 font-medium text-emerald-200">{formatCurrency(review.projectedHighPriceUsd)}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function textInputClassName(readOnly = false): string {
   return [
     'w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none transition',
@@ -416,9 +513,9 @@ export default function StrategySchemaForm({
           onSubmit(planPreview);
         }
       })}
-      className="grid grid-cols-1 gap-6 lg:grid-cols-3"
+      className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.65fr)_minmax(360px,0.95fr)]"
     >
-      <div className="space-y-6 lg:col-span-2">
+      <div className="space-y-6 xl:order-2">
         <FormCard
           title="Macro Objective"
           description="Choose the campaign behavior that drives the hierarchical state machine, then set the token context and operator notes."
@@ -717,7 +814,7 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
-            <FieldShell label="Volatility Target (%)" helper="Optional filter used when full market metrics are available.">
+            <FieldShell label="Volatility Target (%)" helper="Raises curve aggression for shakeout previews and remains the optional volatility target shown in the curve review.">
               <Controller
                 control={control}
                 name="targets.volatilityPctMin"
@@ -733,7 +830,7 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
-            <FieldShell label="Pullback Limit (%)" helper="Maximum tolerated outsider pullback before the setup blocks execution.">
+            <FieldShell label="Pullback Target (%)" helper="For shakeout, deeper pullback targets increase front-loaded sell pressure and delay buyback recovery.">
               <Controller
                 control={control}
                 name="targets.pullbackPctMax"
@@ -994,7 +1091,7 @@ export default function StrategySchemaForm({
         </FormCard>
       </div>
 
-      <div className="lg:col-span-1">
+      <div className="xl:order-1">
         <div className="sticky top-6 rounded-2xl border border-slate-700 bg-slate-800 p-6 shadow-2xl shadow-slate-950/30">
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -1078,6 +1175,28 @@ export default function StrategySchemaForm({
 
             {planPreview ? (
               <>
+                <div className="mt-4 rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-sm text-slate-200">
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Projected Price Curve</p>
+                  {planPreview.volatilityReview.available ? (
+                    <>
+                      <p className="mt-2 text-lg font-semibold">
+                        {planPreview.volatilityReview.projectedVolatilityPct?.toFixed(2)}% projected
+                        {planPreview.volatilityReview.targetVolatilityPct != null
+                          ? ` / ${planPreview.volatilityReview.targetVolatilityPct.toFixed(2)}% optional target`
+                          : ''}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-400">
+                        Estimated range {formatCurrency(planPreview.volatilityReview.projectedLowPriceUsd ?? 0)}–{formatCurrency(planPreview.volatilityReview.projectedHighPriceUsd ?? 0)} from {formatCurrency(planPreview.volatilityReview.startPriceUsd ?? 0)}, using {formatCurrency(planPreview.volatilityReview.liquidityUsd ?? 0)} snapshot liquidity. This estimate does not block execution.
+                      </p>
+                      <PriceSlopeChart review={planPreview.volatilityReview} />
+                    </>
+                  ) : (
+                    <p className="mt-2 text-xs text-slate-400">
+                      Projection unavailable until both market price and liquidity are present. The optional volatility target does not block execution.
+                    </p>
+                  )}
+                </div>
+
                 <div className={`mt-4 rounded-xl border px-4 py-3 text-sm ${planPreview.isExecutable ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100' : 'border-rose-500/20 bg-rose-500/10 text-rose-100'}`}>
                   <p className="text-xs font-semibold uppercase tracking-[0.18em] opacity-80">
                     {planPreview.isExecutable ? 'Executable Plan' : 'Plan Cannot Execute'}
@@ -1100,27 +1219,6 @@ export default function StrategySchemaForm({
                   <p className="mt-1 text-xs opacity-80">
                     {planPreview.eligibleTradingAccountCount} account(s) hold at least one pair asset; {planPreview.eligibleAccountCount} can fund an initial minimum buy. Capability skipped {planPreview.skippedForCapabilityCount}, no pair assets {planPreview.skippedForNoPairAssetCount}, low-SOL warning {planPreview.skippedForSolReserveCount}
                   </p>
-                </div>
-
-                <div className="mt-4 rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-sm text-slate-200">
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Projected Price Curve</p>
-                  {planPreview.volatilityReview.available ? (
-                    <>
-                      <p className="mt-2 text-lg font-semibold">
-                        {planPreview.volatilityReview.projectedVolatilityPct?.toFixed(2)}% projected
-                        {planPreview.volatilityReview.targetVolatilityPct != null
-                          ? ` / ${planPreview.volatilityReview.targetVolatilityPct.toFixed(2)}% optional target`
-                          : ''}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-400">
-                        Estimated range {formatCurrency(planPreview.volatilityReview.projectedLowPriceUsd ?? 0)}–{formatCurrency(planPreview.volatilityReview.projectedHighPriceUsd ?? 0)} from {formatCurrency(planPreview.volatilityReview.startPriceUsd ?? 0)}, using {formatCurrency(planPreview.volatilityReview.liquidityUsd ?? 0)} snapshot liquidity. This estimate does not block execution.
-                      </p>
-                    </>
-                  ) : (
-                    <p className="mt-2 text-xs text-slate-400">
-                      Projection unavailable until both market price and liquidity are present. The optional volatility target does not block execution.
-                    </p>
-                  )}
                 </div>
 
                 <div className="mt-4 rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-3 text-sm text-slate-200">

@@ -87,6 +87,8 @@ export type StrategyPlannerConfig = {
   maxOrderCount: number;
   baseTotalVolumeUsd: number;
   baseDurationMs: number;
+  targetPullbackPct: number;
+  targetVolatilityPct: number;
   minOrderUsd: number;
   maxOrderUsd: number;
   execution: StrategyExecutionConfig;
@@ -110,8 +112,26 @@ type PlannedAccountOrder = {
   volumeUsd: number;
 };
 
+type SelfCyclingOrderEntry = {
+  order: PlannedAccountOrder;
+  side: 'buy' | 'sell';
+  rank: number;
+  index: number;
+};
+
 function roundToSixDecimals(value: number): number {
   return Number(value.toFixed(6));
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function curveProgress(position: number, count: number, exponent: number): number {
+  if (count <= 1) {
+    return 0;
+  }
+  return clamp(position / (count - 1), 0, 1) ** exponent;
 }
 
 function positiveNumber(value: number | null | undefined): number {
@@ -411,7 +431,7 @@ function buildAccountAwareSelfCyclingTasks(input: {
   }
   const buybackOrders = sellOrders.map((order) => ({ ...order }));
   const sequenceRandom = createDeterministicRandom(`${input.seedBase}:self-cycling:sequence`);
-  const remainingOrders = [
+  const remainingOrders: SelfCyclingOrderEntry[] = [
     ...netBuyOrders.map((order, index) => ({
       order,
       side: 'buy' as const,
@@ -431,10 +451,73 @@ function buildAccountAwareSelfCyclingTasks(input: {
       index: netBuyOrders.length + buybackOrders.length + index,
     })),
   ];
+  if (input.config.macroObjective === 'shakeout') {
+    const rankedOrders = remainingOrders.sort((left, right) => {
+      if (left.side !== right.side) {
+        return left.side === 'sell' ? -1 : 1;
+      }
+      if (left.side === 'sell' && right.side === 'sell') {
+        return right.order.volumeUsd - left.order.volumeUsd || left.rank - right.rank || left.index - right.index;
+      }
+      return left.rank - right.rank || left.index - right.index;
+    });
+    const sellCount = rankedOrders.filter((entry) => entry.side === 'sell').length;
+    const buyCount = rankedOrders.length - sellCount;
+    const dumpRatio = positiveNumber(input.config.execution.tactics.dumpRatio);
+    const pullbackRatio = clamp(positiveNumber(input.config.targetPullbackPct) / 100, 0, 0.3);
+    const volatilityRatio = clamp(positiveNumber(input.config.targetVolatilityPct) / 100, 0, 0.3);
+    const curveAggression = clamp(dumpRatio / 4 + pullbackRatio * 2 + volatilityRatio, 0, 1);
+    const sellWindowRatio = clamp(0.42 - curveAggression * 0.2, 0.18, 0.4);
+    const recoveryGapRatio = clamp(0.12 + pullbackRatio * 0.7, 0.1, 0.28);
+    const buyStartRatio = clamp(sellWindowRatio + recoveryGapRatio, 0.36, 0.7);
+    const sellCurveExponent = 1.25 + curveAggression * 1.35;
+    const buyCurveExponent = 0.95 - curveAggression * 0.35;
+    const tasks = rankedOrders.map((entry, index) => {
+      const spec = entry.side === 'buy' ? input.taskSpecs[1] : input.taskSpecs[0];
+      const stageIndex = entry.side === 'sell' ? index : index - sellCount;
+      const stageProgress = entry.side === 'sell'
+        ? curveProgress(stageIndex, sellCount, sellCurveExponent)
+        : curveProgress(stageIndex, buyCount, buyCurveExponent);
+      const scheduledAtRatio = entry.side === 'sell'
+        ? sellWindowRatio * stageProgress
+        : buyStartRatio + (1 - buyStartRatio) * stageProgress;
+      return {
+        taskId: `${spec.pulse ?? entry.side}-${entry.side}-${index + 1}`,
+        side: entry.side,
+        pulse: spec.pulse,
+        orderIndex: index + 1,
+        totalOrders: rankedOrders.length,
+        scheduledAt: Math.round(
+          input.startTime + input.config.baseDurationMs * scheduledAtRatio,
+        ),
+        totalVolumeUsd: entry.order.volumeUsd,
+        unallocatedVolumeUsd: 0,
+        allocations: [{
+          accountId: entry.order.account.accountId,
+          label: entry.order.account.label,
+          walletAddress: entry.order.account.walletAddress,
+          plannedVolumeUsd: entry.order.volumeUsd,
+          quoteAvailableAmount: entry.order.account.quoteAvailableAmount,
+          baseTokenAmount: entry.order.account.baseTokenAmount,
+          solBalance: entry.order.account.solBalance,
+          accountBuyOverAllocated: false,
+          accountBuyOverAllocationUsd: 0,
+        }],
+      } satisfies StrategyPlannerTask;
+    });
+
+    for (const order of sellOrders) {
+      reservePlannedAllocation(order.account, 'sell', order.volumeUsd);
+    }
+    for (const order of [...buybackOrders, ...netBuyOrders]) {
+      reservePlannedAllocation(order.account, 'buy', order.volumeUsd);
+    }
+    return tasks;
+  }
   const availableQuoteByAccountId = new Map(
     input.accounts.map((account) => [account.accountId, account.buyRemainingQuoteUsd]),
   );
-  const rankedOrders: typeof remainingOrders = [];
+  const rankedOrders: SelfCyclingOrderEntry[] = [];
   while (remainingOrders.length > 0) {
     let executableOrders = remainingOrders
       .filter((entry) =>
@@ -550,8 +633,16 @@ function resolveMinimumSelfCyclingSellVolume(
   config: StrategyPlannerConfig,
 ): number {
   const baseVolumeUsd = positiveNumber(config.baseTotalVolumeUsd);
+  const pullbackIntensity = clamp(positiveNumber(config.targetPullbackPct) / 100, 0, 0.3);
+  const volatilityIntensity = clamp(positiveNumber(config.targetVolatilityPct) / 100, 0, 0.3);
   const tacticRatio = config.macroObjective === 'shakeout'
-    ? Math.min(0.45, Math.max(0.1, config.execution.tactics.dumpRatio * 0.15))
+    ? Math.min(
+        0.6,
+        Math.max(
+          0.1,
+          config.execution.tactics.dumpRatio * 0.12 + pullbackIntensity + volatilityIntensity * 0.5,
+        ),
+      )
     : Math.min(0.25, Math.max(0.05, config.execution.tactics.absorbRatio * 0.1));
   return roundToSixDecimals(Math.max(
     config.minOrderUsd,

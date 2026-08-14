@@ -161,6 +161,8 @@ const config = {
   maxOrderCount: document.parameters.maxTransactions,
   baseTotalVolumeUsd: 150,
   baseDurationMs: 24 * 60 * 60 * 1000,
+  targetPullbackPct: document.targets.pullbackPctMax,
+  targetVolatilityPct: document.targets.volatilityPctMin,
   minOrderUsd: document.parameters.minOrderUsd,
   maxOrderUsd: document.parameters.maxOrderUsd,
   execution: document.execution,
@@ -468,6 +470,97 @@ assert.equal(
   accumulation25Plan.isExecutable,
   true,
   'optional volatility review must not block an otherwise executable plan',
+);
+
+const shakeoutDocument = buildStrategyDocumentFromSettings({
+  baseTokenAddress,
+  quoteTokenAddress,
+  minTransactions: 25,
+  volatilityTarget: 0,
+  pullbackTarget: 0,
+  volumeTarget: 180,
+  netBuyinTarget: 60,
+  timeRangeTarget: '24h',
+  maxTransactions: 50,
+  maxSlippage: 1,
+  strategyNotes: 'shakeout preview sell-first regression',
+  macroObjective: 'shakeout',
+  tactics: {
+    dumpRatio: 3,
+  },
+});
+shakeoutDocument.parameters.minOrderUsd = 5;
+shakeoutDocument.parameters.maxOrderUsd = 30;
+const shakeoutConfig = {
+  ...config,
+  macroObjective: shakeoutDocument.execution.macroObjective,
+  baseOrderCount: resolveBasePlannedTransactionCount(shakeoutDocument),
+  baseTotalVolumeUsd: 180,
+  targetPullbackPct: shakeoutDocument.targets.pullbackPctMax,
+  targetVolatilityPct: shakeoutDocument.targets.volatilityPctMin,
+  minOrderUsd: 5,
+  maxOrderUsd: 30,
+  execution: shakeoutDocument.execution,
+};
+const shakeoutPlan = buildStrategyPlanningResult({
+  document: shakeoutDocument,
+  config: shakeoutConfig,
+  accounts: accumulation25Accounts,
+  taskSpecs: buildStrategyPlanTaskSpecs(shakeoutConfig, 60),
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'shakeout-preview-sell-first',
+});
+assert.equal(shakeoutPlan.isExecutable, true);
+const shakeoutFirstBuyIndex = shakeoutPlan.tasks.findIndex((task) => task.side === 'buy');
+assert.ok(shakeoutFirstBuyIndex > 0, 'shakeout preview should include an initial sell phase');
+assert.ok(
+  shakeoutPlan.tasks.slice(0, shakeoutFirstBuyIndex).every((task) => task.side === 'sell'),
+  'shakeout preview should sell first before showing buyback tasks',
+);
+assert.ok(
+  shakeoutPlan.tasks.slice(shakeoutFirstBuyIndex).some((task) => task.side === 'buy'),
+  'shakeout preview should still schedule buybacks after the sell phase',
+);
+assert.ok(
+  shakeoutPlan.tasks[shakeoutFirstBuyIndex - 1]!.scheduledAt <=
+    1_000 + shakeoutConfig.baseDurationMs * 0.4,
+  'shakeout sell pressure should complete in the front part of the operating window',
+);
+assert.ok(
+  shakeoutPlan.tasks[shakeoutFirstBuyIndex]!.scheduledAt >=
+    shakeoutPlan.tasks[shakeoutFirstBuyIndex - 1]!.scheduledAt + shakeoutConfig.baseDurationMs * 0.08,
+  'shakeout buyback should wait until after the initial pressure window',
+);
+const shakeoutPriceCurveReview = buildStrategyPriceCurveReview({
+  tasks: shakeoutPlan.tasks,
+  targetVolatilityPct: 10,
+  priceUsd: 2,
+  liquidityUsd: 10_000,
+});
+assert.equal(shakeoutPriceCurveReview.points.length, shakeoutPlan.tasks.length + 1);
+assert.ok(
+  (shakeoutPriceCurveReview.points.find((point) => point.side === 'sell')?.slopePct ?? 0) < 0,
+  'shakeout price curve should expose negative slope during the initial sell phase',
+);
+const softerShakeoutConfig = {
+  ...shakeoutConfig,
+  targetPullbackPct: 0,
+  targetVolatilityPct: 0,
+  execution: {
+    ...shakeoutConfig.execution,
+    tactics: {
+      ...shakeoutConfig.execution.tactics,
+      dumpRatio: 1,
+    },
+  },
+};
+const aggressiveShakeoutSpecs = buildStrategyPlanTaskSpecs(shakeoutConfig, 60);
+const softerShakeoutSpecs = buildStrategyPlanTaskSpecs(softerShakeoutConfig, 60);
+assert.ok(
+  aggressiveShakeoutSpecs.find((spec) => spec.side === 'sell')!.totalVolumeUsd >
+    softerShakeoutSpecs.find((spec) => spec.side === 'sell')!.totalVolumeUsd,
+  'higher dump/pullback/volatility controls should increase shakeout sell pressure',
 );
 
 const wltUsdcAccounts = [

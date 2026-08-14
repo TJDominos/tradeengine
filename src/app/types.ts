@@ -238,6 +238,20 @@ export type StrategyPlanPreviewAccount = {
   eligibleForSell: boolean;
 };
 
+export type StrategyPriceCurvePoint = {
+  index: number;
+  side: 'buy' | 'sell' | 'start';
+  scheduledAt: number | null;
+  elapsedMs: number | null;
+  volumeUsd: number;
+  netFlowUsd: number;
+  cumulativeNetFlowUsd: number;
+  priceUsd: number | null;
+  priceChangePct: number | null;
+  slopePct: number | null;
+  slopePctPerHour: number | null;
+};
+
 export type StrategyPriceCurveReview = {
   targetVolatilityPct: number | null;
   projectedVolatilityPct: number | null;
@@ -246,6 +260,7 @@ export type StrategyPriceCurveReview = {
   projectedHighPriceUsd: number | null;
   liquidityUsd: number | null;
   available: boolean;
+  points: StrategyPriceCurvePoint[];
 };
 
 export type StrategyPlanPreview = {

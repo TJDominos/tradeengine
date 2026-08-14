@@ -219,6 +219,8 @@ export function buildStrategyRecordConfigFromDocument(
     baseDurationMs: parseTimeRangeTargetToDurationMs(
       document.parameters.timeRangeTarget,
     ),
+    targetPullbackPct: document.targets.pullbackPctMax,
+    targetVolatilityPct: document.targets.volatilityPctMin,
     minOrderUsd: document.parameters.minOrderUsd,
     maxOrderUsd: document.parameters.maxOrderUsd,
     distributionChunkCount: DEFAULT_SERIAL_STRATEGY_DISTRIBUTION_CHUNK_COUNT,

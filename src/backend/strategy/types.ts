@@ -264,6 +264,8 @@ export interface StrategyRecordConfig {
   maxOrderCount: number;
   baseTotalVolumeUsd: number;
   baseDurationMs: number;
+  targetPullbackPct: number;
+  targetVolatilityPct: number;
   minOrderUsd: number;
   maxOrderUsd: number;
   distributionChunkCount: number;
