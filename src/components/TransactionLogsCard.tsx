@@ -97,13 +97,15 @@ export default function TransactionLogsCard({
       <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
         meta.ownership === 'internal'
           ? 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+          : meta.ownership === 'lp'
+            ? 'border border-cyan-500/20 bg-cyan-500/10 text-cyan-300'
           : meta.ownership === 'external'
             ? 'border border-amber-500/20 bg-amber-500/10 text-amber-300'
             : meta.ownership === 'system'
               ? 'border border-slate-700 bg-slate-800 text-slate-300'
               : 'border border-slate-700 bg-slate-900 text-slate-400'
       }`}>
-        {meta.ownership}
+        {meta.ownership === 'lp' ? 'LP' : meta.ownership}
       </span>
       {options?.showSourceLabel ? (
         <span className="rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 text-[10px] uppercase tracking-wider text-slate-300">

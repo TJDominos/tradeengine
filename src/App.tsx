@@ -1716,6 +1716,14 @@ export default function App() {
       ? ((marketSnapshotFdvRange.latestFdv - marketSnapshotFdvRange.earliestFdv) /
           marketSnapshotFdvRange.earliestFdv) * 100
       : null;
+  const liquidityChangeUsd =
+    hasDateRange &&
+    marketSnapshotFdvRange &&
+    marketSnapshotFdvRange.hasMultipleSnapshots &&
+    marketSnapshotFdvRange.earliestLiquidityUsd != null &&
+    marketSnapshotFdvRange.latestLiquidityUsd != null
+      ? marketSnapshotFdvRange.latestLiquidityUsd - marketSnapshotFdvRange.earliestLiquidityUsd
+      : null;
   const totalInternalTokenAmount =
     activeTokenContractAddress
       ? engineState.internalAccountSummary.totalTrackedTokenAmount ?? 0
@@ -1819,6 +1827,7 @@ export default function App() {
       profitUsdc={engineState.profitUsdc}
       dashboardSnapshot={dashboardSnapshot}
       fdvChangePercent={fdvChangePercent}
+      liquidityChangeUsd={liquidityChangeUsd}
       fdvChangeLoading={loadingMarketSnapshots}
       tokenHolderAggregate={engineState.tokenHolderAggregate}
       tokenHolderAggregateLoading={tokenHolderAggregateLoading}

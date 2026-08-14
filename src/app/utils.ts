@@ -120,6 +120,22 @@ export function formatWebhookEventLabel(eventType: string) {
 
 export function buildWalletOwnershipLookup(engineState: EngineState): Map<string, WalletOwnershipMeta> {
   const lookup = new Map<string, WalletOwnershipMeta>();
+  const activeBaseTokenAddress =
+    engineState.settings.activeBaseTokenAddress?.trim() || engineState.settings.baseTokenAddress.trim();
+  const activeQuoteTokenAddress = engineState.settings.activeQuoteTokenAddress?.trim() || '';
+  const activeTrackedToken = engineState.tradableTokens.find(
+    (token) =>
+      token.baseTokenAddress === activeBaseTokenAddress &&
+      (!activeQuoteTokenAddress || token.quoteTokenAddress === activeQuoteTokenAddress),
+  );
+  const activeLpAddress = activeTrackedToken?.ammPoolAddress?.trim() ?? '';
+
+  if (activeLpAddress) {
+    lookup.set(activeLpAddress, {
+      ownership: 'lp',
+      accountLabel: 'LP',
+    });
+  }
 
   for (const account of engineState.internalAccountDirectory) {
     lookup.set(account.address, {

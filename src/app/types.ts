@@ -125,6 +125,8 @@ export type TokenMarketSnapshot = {
 export type TokenMarketFdvRange = {
   earliestFdv: number | null;
   latestFdv: number | null;
+  earliestLiquidityUsd: number | null;
+  latestLiquidityUsd: number | null;
   hasMultipleSnapshots: boolean;
 };
 
@@ -382,7 +384,7 @@ export type DashboardTransactionLog =
   | ({ kind: 'trade' } & TradeLog)
   | ({ kind: 'webhook' } & WebhookTransactionLog);
 
-export type WalletOwnership = 'internal' | 'external' | 'system' | 'untracked';
+export type WalletOwnership = 'internal' | 'external' | 'lp' | 'system' | 'untracked';
 
 export type WalletOwnershipMeta = {
   ownership: WalletOwnership;

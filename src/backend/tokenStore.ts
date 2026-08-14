@@ -869,6 +869,8 @@ export async function dbGetTokenMarketSnapshotsByTimeRange(
 export type TokenMarketFdvRange = {
   earliestFdv: number | null;
   latestFdv: number | null;
+  earliestLiquidityUsd: number | null;
+  latestLiquidityUsd: number | null;
   hasMultipleSnapshots: boolean;
 };
 
@@ -881,14 +883,14 @@ export async function dbGetTokenMarketFdvRange(
   const row = await db
     .prepare(
       `WITH earliest AS (
-         SELECT id, fdv
+         SELECT id, fdv, liquidity_usd
          FROM token_market_snapshots
          WHERE token_id = ?1 AND fetched_at BETWEEN ?2 AND ?3
          ORDER BY fetched_at ASC, id ASC
          LIMIT 1
        ),
        latest AS (
-         SELECT id, fdv
+         SELECT id, fdv, liquidity_usd
          FROM token_market_snapshots
          WHERE token_id = ?1 AND fetched_at BETWEEN ?2 AND ?3
          ORDER BY fetched_at DESC, id DESC
@@ -897,6 +899,8 @@ export async function dbGetTokenMarketFdvRange(
        SELECT
          (SELECT fdv FROM earliest) AS earliest_fdv,
          (SELECT fdv FROM latest) AS latest_fdv,
+         (SELECT liquidity_usd FROM earliest) AS earliest_liquidity_usd,
+         (SELECT liquidity_usd FROM latest) AS latest_liquidity_usd,
          (SELECT id FROM earliest) AS earliest_id,
          (SELECT id FROM latest) AS latest_id`,
     )
@@ -904,6 +908,8 @@ export async function dbGetTokenMarketFdvRange(
     .first<{
       earliest_fdv: number | null;
       latest_fdv: number | null;
+      earliest_liquidity_usd: number | null;
+      latest_liquidity_usd: number | null;
       earliest_id: number | null;
       latest_id: number | null;
     }>();
@@ -911,6 +917,8 @@ export async function dbGetTokenMarketFdvRange(
   return {
     earliestFdv: row?.earliest_fdv ?? null,
     latestFdv: row?.latest_fdv ?? null,
+    earliestLiquidityUsd: row?.earliest_liquidity_usd ?? null,
+    latestLiquidityUsd: row?.latest_liquidity_usd ?? null,
     hasMultipleSnapshots:
       row?.earliest_id != null &&
       row.latest_id != null &&

@@ -46,6 +46,7 @@ type DashboardPageProps = {
   profitUsdc: number;
   dashboardSnapshot: TokenMarketSnapshot | null;
   fdvChangePercent: number | null;
+  liquidityChangeUsd: number | null;
   fdvChangeLoading: boolean;
   tokenHolderAggregate: TokenHolderAggregate | null;
   tokenHolderAggregateLoading: boolean;
@@ -76,6 +77,7 @@ export default function DashboardPage({
   profitUsdc,
   dashboardSnapshot,
   fdvChangePercent,
+  liquidityChangeUsd,
   fdvChangeLoading,
   tokenHolderAggregate,
   tokenHolderAggregateLoading,
@@ -86,7 +88,10 @@ export default function DashboardPage({
   const hasActiveToken = Boolean(activeTokenContractAddress);
   const internalHolderCount = tokenHolderAggregate?.internalHolderCount ?? null;
   const outsiderHolderCount = tokenHolderAggregate?.outsiderHolderCount ?? null;
+  const classifiedHolderCount = tokenHolderAggregate?.activeHolderCount ?? null;
   const totalHolders = dashboardSnapshot?.totalHolders ?? null;
+  const holderCountsDiffer =
+    totalHolders != null && classifiedHolderCount != null && totalHolders !== classifiedHolderCount;
   const outsiderAmountHolding = tokenHolderAggregate
     ? Math.max(
         0,
@@ -112,19 +117,26 @@ export default function DashboardPage({
     : totalHolders != null
       ? formatNum(totalHolders)
       : 'Unavailable';
+  const totalHoldersSubtitle = !hasActiveToken
+    ? 'Set an active pair to load holder data.'
+    : totalHolders != null
+      ? holderCountsDiffer && classifiedHolderCount != null
+        ? `Current market-source count. Previous classified holder sync: ${formatNum(classifiedHolderCount)}.`
+        : `Current market-source count. ${marketSnapshotSubtitle}`
+      : marketSnapshotSubtitle;
   const internalHolderSubtitle = !hasActiveToken
     ? 'Set an active pair to load holder data.'
     : tokenHolderAggregateLoading
       ? 'Loading internal accounts that hold the selected pair token...'
       : internalHolderCount != null
-        ? `Internal accounts with a positive ${activeTokenSymbol} balance for the selected pair.`
+        ? `${holderCountsDiffer ? 'Previous classified sync. ' : ''}Internal accounts with a positive ${activeTokenSymbol} balance for the selected pair.`
         : 'Holder aggregate unavailable';
   const outsideHolderSubtitle = !hasActiveToken
     ? 'Set an active pair to load holder data.'
     : tokenHolderAggregateLoading
       ? 'Loading holder counts and token total...'
       : outsiderAmountHolding != null
-        ? `Token total ${formatNum(outsiderAmountHolding)} ${activeTokenSymbol}`
+        ? `${holderCountsDiffer ? 'Previous classified sync. ' : ''}Token total ${formatNum(outsiderAmountHolding)} ${activeTokenSymbol}`
         : 'Holder aggregate unavailable';
   const pairOptions = React.useMemo(
     () =>
@@ -162,6 +174,17 @@ export default function DashboardPage({
     fdvChangePercent == null
       ? 'text-slate-400'
       : fdvChangePercent >= 0
+        ? 'text-emerald-400'
+        : 'text-red-400';
+  const liquidityChangeLabel = fdvChangeLoading
+    ? 'Loading...'
+    : liquidityChangeUsd == null
+      ? 'Unavailable'
+      : `${liquidityChangeUsd >= 0 ? '+' : ''}${formatUSD(liquidityChangeUsd)}`;
+  const liquidityChangeColorClass =
+    liquidityChangeUsd == null
+      ? 'text-slate-400'
+      : liquidityChangeUsd >= 0
         ? 'text-emerald-400'
         : 'text-red-400';
 
@@ -250,7 +273,15 @@ export default function DashboardPage({
         <StatCard
           title="Liquidity (USDC)"
           value={formatOptionalUsd(dashboardSnapshot?.liquidityUsd)}
-          subtitle={marketSnapshotSubtitle}
+          subtitle={
+            <span className="inline-flex flex-wrap items-center gap-1.5">
+              <span>Selected range change:</span>
+              <span className={`text-[16px] font-semibold ${liquidityChangeColorClass}`}>
+                {liquidityChangeLabel}
+              </span>
+              <span>| {marketSnapshotSubtitle}</span>
+            </span>
+          }
         />
         <StatCard
           title="Number of Transaction and Volumes"
@@ -258,17 +289,17 @@ export default function DashboardPage({
           subtitle={`Selected range volume ${formatUSD(transactionVolumeUsd)}`}
         />
         <StatCard
-          title="Total Token Holders"
+          title="Current Token Holders"
           value={totalHoldersValue}
-          subtitle={marketSnapshotSubtitle}
+          subtitle={totalHoldersSubtitle}
         />
         <StatCard
-          title="Internal Token Holders"
+          title={holderCountsDiffer ? 'Previous Internal Token Holders' : 'Internal Token Holders'}
           value={internalHolderValue}
           subtitle={internalHolderSubtitle}
         />
         <StatCard
-          title="Outside Token Holders"
+          title={holderCountsDiffer ? 'Previous Outside Token Holders' : 'Outside Token Holders'}
           value={outsideHolderValue}
           subtitle={outsideHolderSubtitle}
         />

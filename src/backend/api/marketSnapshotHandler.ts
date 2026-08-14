@@ -27,6 +27,7 @@ import { syncSolanaTokenHolderBalancesPaged } from '../services/tokenHolderSyncS
 function buildDashboardRefreshSummaryText(
   marketSnapshot: TokenMarketSnapshot | null,
   outsideAccountRefreshScheduled: boolean,
+  previousClassifiedHolderCount: number | null,
 ): string {
   if (!marketSnapshot) {
     return 'Dashboard market data refresh completed, but no live market snapshot is available.';
@@ -38,14 +39,18 @@ function buildDashboardRefreshSummaryText(
 
   const holderCountMessage =
     marketSnapshot.totalHolders != null
-      ? ` Holder count reported: ${marketSnapshot.totalHolders}.`
+      ? ` Current market holder count: ${marketSnapshot.totalHolders}.`
+      : '';
+  const previousHolderCountMessage =
+    previousClassifiedHolderCount != null
+      ? ` Previous classified holder sync: ${previousClassifiedHolderCount}.`
       : '';
 
   const outsideAccountRefreshMessage = outsideAccountRefreshScheduled
     ? ' Outside account refresh scheduled.'
     : '';
 
-  return `Dashboard market data refreshed.${holderCountMessage}${outsideAccountRefreshMessage}`;
+  return `Dashboard market data refreshed.${holderCountMessage}${previousHolderCountMessage}${outsideAccountRefreshMessage}`;
 }
 
 async function runManualMarketRefreshWorkflow(
@@ -54,6 +59,7 @@ async function runManualMarketRefreshWorkflow(
   contractAddress: string,
   rpcUrls: string[],
   knownHolderCount: number,
+  previousClassifiedHolderCount: number | null,
   options?: {
     ensureActive?: () => Promise<void>;
   },
@@ -83,6 +89,7 @@ async function runManualMarketRefreshWorkflow(
   const summaryText = buildDashboardRefreshSummaryText(
     marketSnapshot,
     shouldRefreshOutsideAccounts,
+    previousClassifiedHolderCount,
   );
 
   await dbAddAuditLog(
@@ -273,6 +280,7 @@ export async function handleMarketSnapshotRoutes(
             contractAddress,
             rpcUrls,
             knownHolderCount,
+            tokenHolderAggregate?.activeHolderCount ?? null,
             {
               ensureActive: async () => {
                 await assertMarketRefreshLeaseActive(
