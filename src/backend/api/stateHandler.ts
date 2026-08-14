@@ -162,6 +162,7 @@ function parseStrategyDebugSimulateRequest(body: unknown): StrategyDebugSimulate
 export async function handleStateRoutes(
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const { method } = request;
@@ -399,37 +400,50 @@ export async function handleStateRoutes(
       env.SOLANA_RPC_URL,
     );
 
-    const reconciliation = await reconcileTokenTransactionsFromRpc(
-      env.TRADINGBOT_DB,
-      user.id,
-      contractAddress,
-      rpcUrls,
-      {
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const reconciliation = await reconcileTokenTransactionsFromRpc(
+            env.TRADINGBOT_DB,
+            user.id,
+            contractAddress,
+            rpcUrls,
+            {
           perAddressMaxPages: TRANSACTION_LOG_REFRESH_PRIMARY_MAX_PAGES,
-        startTimeMs,
-        endTimeMs,
-      },
-    );
-    const detailReconciliation = await reconcileWebhookTransactionDetailsInWindow(
-      env.TRADINGBOT_DB,
-      user.id,
-      contractAddress,
-      rpcUrls,
-      startTimeMs,
-      endTimeMs,
-    );
-    const tradeLogBackfill = await backfillTradeLogChainTimes(
-      env.TRADINGBOT_DB,
-      rpcUrls,
+              startTimeMs,
+              endTimeMs,
+            },
+          );
+          const detailReconciliation = await reconcileWebhookTransactionDetailsInWindow(
+            env.TRADINGBOT_DB,
+            user.id,
+            contractAddress,
+            rpcUrls,
+            startTimeMs,
+            endTimeMs,
+          );
+          const tradeLogBackfill = await backfillTradeLogChainTimes(
+            env.TRADINGBOT_DB,
+            rpcUrls,
+          );
+          console.log('[transaction-log-refresh] completed', {
+            userId: user.id,
+            contractAddress,
+            reconciliation,
+            detailReconciliation,
+            tradeLogBackfill,
+          });
+        } catch (err) {
+          console.error('[transaction-log-refresh] failed', err);
+        }
+      })(),
     );
 
     return jsonResponse({
       ok: true,
+      accepted: true,
       contractAddress,
-      reconciliation,
-      detailReconciliation,
-      tradeLogBackfill,
-    });
+    }, 202);
   }
 
   if (method === 'GET' && pathname === '/api/accounts/managed') {

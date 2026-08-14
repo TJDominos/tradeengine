@@ -439,7 +439,7 @@ function parseHexString(value: string): Uint8Array {
 async function assertAlchemyWebhookSignature(
   request: Request,
   env: Env,
-  rawBody: string,
+  rawBody: Uint8Array,
 ): Promise<void> {
   const signature = request.headers.get('X-Alchemy-Signature')?.trim();
   if (!signature) {
@@ -458,7 +458,7 @@ async function assertAlchemyWebhookSignature(
     'HMAC',
     key,
     parseHexString(signature),
-    new TextEncoder().encode(rawBody),
+    rawBody,
   );
   if (!isValid) {
     throw new ApiError(401, 'Alchemy webhook signature is invalid');
@@ -1155,7 +1155,9 @@ async function handleAlchemyNotifyWebhook(
     const contractFromQuery = tryNormalizeSolanaPubkey(
       url.searchParams.get('contractAddress'),
     );
-    const rawBodyPromise = request.text().catch((err: unknown) => {
+    const rawBodyPromise = request.arrayBuffer().then(
+      (body) => new Uint8Array(body),
+    ).catch((err: unknown) => {
       console.error('Alchemy webhook body read failed:', err);
       return null;
     });
@@ -1168,7 +1170,9 @@ async function handleAlchemyNotifyWebhook(
         }
         try {
           await assertAlchemyWebhookSignature(request, env, rawBody);
-          const payload = parseJsonText<AlchemyWebhookPayload>(rawBody);
+          const payload = parseJsonText<AlchemyWebhookPayload>(
+            new TextDecoder().decode(rawBody),
+          );
           const derivedSignals = deriveAlchemySignalsFromPayload(
             payload,
             contractFromQuery,

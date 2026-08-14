@@ -79,7 +79,7 @@ async function handleApi(
       (async () => {
         const handlers = [
           () => handleAuthRoutes(request, env),
-          () => handleStateRoutes(request, env),
+          () => handleStateRoutes(request, env, ctx),
           () => handleSettingsRoutes(request, env),
           () => handleStrategyRoutes(request, env, ctx),
           () => handleMarketSnapshotRoutes(request, env, ctx),

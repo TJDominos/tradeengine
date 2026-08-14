@@ -842,27 +842,16 @@ export default function App() {
         : '';
       const result = await api<{
         ok: boolean;
+        accepted: boolean;
         contractAddress: string;
-        reconciliation: {
-          scannedSignatures: number;
-          insertedSignals: number;
-          duplicates: number;
-          skippedIrrelevant: number;
-        };
-        tradeLogBackfill: {
-          candidateLogs: number;
-          updatedLogs: number;
-          unresolvedLogs: number;
-        };
       }>(`/api/transaction-logs/refresh${refreshQuery}`, {
         method: 'POST',
       });
 
-      await loadState();
-      const { scannedSignatures, insertedSignals, duplicates, skippedIrrelevant } = result.reconciliation;
-      const { candidateLogs, updatedLogs, unresolvedLogs } = result.tradeLogBackfill;
       setNotice(
-        `Transaction log refresh scanned ${scannedSignatures} signature(s), inserted ${insertedSignals}, skipped ${duplicates} duplicate(s), ignored ${skippedIrrelevant} irrelevant transaction(s), and backfilled chain time for ${updatedLogs} of ${candidateLogs} trade log(s) with ${unresolvedLogs} still pending.`,
+        result.accepted
+          ? 'Transaction log refresh started. New records will appear automatically as reconciliation completes.'
+          : 'Transaction log refresh could not be started.',
       );
     });
 
