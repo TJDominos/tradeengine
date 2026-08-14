@@ -104,6 +104,23 @@ function formatCurrency(value: number | null | undefined): string {
   }).format(value);
 }
 
+function formatPriceCurrency(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) {
+    return '$0.00';
+  }
+  if (value === 0) {
+    return '$0.00';
+  }
+  if (Math.abs(value) < 0.01) {
+    return `$${value.toFixed(6)}`;
+  }
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: value >= 1000 ? 0 : 2,
+  }).format(value);
+}
+
 function formatPercentFromBps(value: number | null | undefined): string {
   const percent = (Number(value) || 0) / 100;
   return `${percent.toFixed(percent % 1 === 0 ? 0 : 2)}%`;
@@ -238,6 +255,19 @@ function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volatilityRe
   );
   const maxDrawdownPct = review.maxDrawdownPct ?? 0;
 
+  const startPrice = review.startPriceUsd;
+  const lowPrice = review.projectedLowPriceUsd;
+  const highPrice = review.projectedHighPriceUsd;
+
+  const lowChangePct =
+    startPrice != null && startPrice > 0 && lowPrice != null
+      ? ((lowPrice - startPrice) / startPrice) * 100
+      : null;
+  const highChangePct =
+    startPrice != null && startPrice > 0 && highPrice != null
+      ? ((highPrice - startPrice) / startPrice) * 100
+      : null;
+
   return (
     <div className="mt-4 rounded-xl border border-slate-700 bg-slate-950/50 px-3 py-3">
       <div className="flex items-start justify-between gap-3">
@@ -283,16 +313,25 @@ function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volatilityRe
       <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-400">
         <div>
           <p className="text-slate-500">Start</p>
-          <p className="mt-1 font-medium text-slate-200">{formatCurrency(review.startPriceUsd)}</p>
+          <p className="mt-1 font-medium text-slate-200">{formatPriceCurrency(startPrice)}</p>
         </div>
         <div>
           <p className="text-slate-500">Low</p>
-          <p className="mt-1 font-medium text-rose-200">{formatCurrency(review.projectedLowPriceUsd)}</p>
-          <p className="mt-0.5 text-[11px] text-rose-300">{maxDrawdownPct.toFixed(2)}% from start</p>
+          <p className="mt-1 font-medium text-rose-200">{formatPriceCurrency(lowPrice)}</p>
+          {lowChangePct != null ? (
+            <p className="mt-0.5 text-[11px] text-rose-300">
+              {lowChangePct >= 0 ? '+' : ''}{lowChangePct.toFixed(2)}% from start
+            </p>
+          ) : null}
         </div>
         <div>
           <p className="text-slate-500">High</p>
-          <p className="mt-1 font-medium text-emerald-200">{formatCurrency(review.projectedHighPriceUsd)}</p>
+          <p className="mt-1 font-medium text-emerald-200">{formatPriceCurrency(highPrice)}</p>
+          {highChangePct != null ? (
+            <p className="mt-0.5 text-[11px] text-emerald-300">
+              {highChangePct >= 0 ? '+' : ''}{highChangePct.toFixed(2)}% from start
+            </p>
+          ) : null}
         </div>
       </div>
     </div>
@@ -1189,7 +1228,7 @@ export default function StrategySchemaForm({
                           : ''}
                       </p>
                       <p className="mt-1 text-xs text-slate-400">
-                        Estimated range {formatCurrency(planPreview.volatilityReview.projectedLowPriceUsd ?? 0)}–{formatCurrency(planPreview.volatilityReview.projectedHighPriceUsd ?? 0)} from {formatCurrency(planPreview.volatilityReview.startPriceUsd ?? 0)}, using {formatCurrency(planPreview.volatilityReview.liquidityUsd ?? 0)} snapshot liquidity. This estimate does not block execution.
+                        Estimated range {formatPriceCurrency(planPreview.volatilityReview.projectedLowPriceUsd)}–{formatPriceCurrency(planPreview.volatilityReview.projectedHighPriceUsd)} from {formatPriceCurrency(planPreview.volatilityReview.startPriceUsd)}, using {formatCurrency(planPreview.volatilityReview.liquidityUsd)} snapshot liquidity. This estimate does not block execution.
                       </p>
                       <PriceSlopeChart review={planPreview.volatilityReview} />
                     </>
