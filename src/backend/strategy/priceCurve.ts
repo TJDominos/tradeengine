@@ -17,6 +17,7 @@ export type StrategyPriceCurvePoint = {
 export type StrategyPriceCurveReview = {
   targetVolatilityPct: number | null;
   projectedVolatilityPct: number | null;
+  maxDrawdownPct: number | null;
   startPriceUsd: number | null;
   projectedLowPriceUsd: number | null;
   projectedHighPriceUsd: number | null;
@@ -50,6 +51,7 @@ export function buildStrategyPriceCurveReview(input: {
     return {
       targetVolatilityPct,
       projectedVolatilityPct: null,
+      maxDrawdownPct: null,
       startPriceUsd: priceUsd,
       projectedLowPriceUsd: null,
       projectedHighPriceUsd: null,
@@ -129,6 +131,9 @@ export function buildStrategyPriceCurveReview(input: {
     targetVolatilityPct,
     projectedVolatilityPct: roundToSixDecimals(
       ((projectedHighPriceUsd - projectedLowPriceUsd) / projectedLowPriceUsd) * 100,
+    ),
+    maxDrawdownPct: roundToSixDecimals(
+      Math.max(0, ((priceUsd - projectedLowPriceUsd) / priceUsd) * 100),
     ),
     startPriceUsd: priceUsd,
     projectedLowPriceUsd: roundToSixDecimals(projectedLowPriceUsd),

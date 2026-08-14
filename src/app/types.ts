@@ -255,6 +255,7 @@ export type StrategyPriceCurvePoint = {
 export type StrategyPriceCurveReview = {
   targetVolatilityPct: number | null;
   projectedVolatilityPct: number | null;
+  maxDrawdownPct: number | null;
   startPriceUsd: number | null;
   projectedLowPriceUsd: number | null;
   projectedHighPriceUsd: number | null;

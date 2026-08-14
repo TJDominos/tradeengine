@@ -236,6 +236,7 @@ function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volatilityRe
       .map((point) => point.slopePctPerHour ?? point.slopePct)
       .filter((value): value is number => value != null),
   );
+  const maxDrawdownPct = review.maxDrawdownPct ?? 0;
 
   return (
     <div className="mt-4 rounded-xl border border-slate-700 bg-slate-950/50 px-3 py-3">
@@ -247,7 +248,8 @@ function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volatilityRe
           </p>
         </div>
         <div className="text-right text-xs text-slate-400">
-          <p>{minimumSlopePct.toFixed(2)}%/h max down-slope</p>
+          <p>{maxDrawdownPct.toFixed(2)}% Start -&gt; Low</p>
+          <p className="mt-1">{minimumSlopePct.toFixed(2)}%/h steepest slope</p>
           <p className="mt-1">First action: {titleCase(firstActionPoint?.side ?? 'start')}</p>
         </div>
       </div>
@@ -286,6 +288,7 @@ function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volatilityRe
         <div>
           <p className="text-slate-500">Low</p>
           <p className="mt-1 font-medium text-rose-200">{formatCurrency(review.projectedLowPriceUsd)}</p>
+          <p className="mt-0.5 text-[11px] text-rose-300">{maxDrawdownPct.toFixed(2)}% from start</p>
         </div>
         <div>
           <p className="text-slate-500">High</p>

@@ -221,6 +221,68 @@ function allocateAccountOrders(
   }
 
   const accountAmounts = new Map<number, number>();
+  if (selectionMode === 'random') {
+    let remainingRandomVolume = roundToSixDecimals(
+      targetUsd - selectedAccounts.length * minOrderUsd,
+    );
+    if (remainingRandomVolume < -MIN_VOLUME_EPSILON) {
+      return null;
+    }
+    for (const { account } of selectedAccounts) {
+      accountAmounts.set(account.accountId, minOrderUsd);
+    }
+
+    let randomActiveAccounts = selectedAccounts
+      .map((candidate) => ({
+        ...candidate,
+        remainingCapacity: roundToSixDecimals(candidate.capacity - minOrderUsd),
+      }))
+      .filter((candidate) => candidate.remainingCapacity > MIN_VOLUME_EPSILON);
+    while (remainingRandomVolume > MIN_VOLUME_EPSILON && randomActiveAccounts.length > 0) {
+      const weights = randomActiveAccounts.map(() => Math.max(MIN_VOLUME_EPSILON, random()));
+      const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+      let distributed = 0;
+      const nextActiveAccounts: typeof randomActiveAccounts = [];
+      for (let index = 0; index < randomActiveAccounts.length; index += 1) {
+        const candidate = randomActiveAccounts[index]!;
+        const weightedShare = remainingRandomVolume * ((weights[index] ?? 0) / totalWeight);
+        const amountUsd = roundToSixDecimals(
+          Math.min(candidate.remainingCapacity, weightedShare),
+        );
+        if (amountUsd <= MIN_VOLUME_EPSILON) {
+          nextActiveAccounts.push(candidate);
+          continue;
+        }
+        accountAmounts.set(
+          candidate.account.accountId,
+          roundToSixDecimals((accountAmounts.get(candidate.account.accountId) ?? 0) + amountUsd),
+        );
+        distributed = roundToSixDecimals(distributed + amountUsd);
+        const remainingCapacity = roundToSixDecimals(candidate.remainingCapacity - amountUsd);
+        if (remainingCapacity > MIN_VOLUME_EPSILON) {
+          nextActiveAccounts.push({ ...candidate, remainingCapacity });
+        }
+      }
+      if (distributed <= MIN_VOLUME_EPSILON) {
+        break;
+      }
+      remainingRandomVolume = roundToSixDecimals(remainingRandomVolume - distributed);
+      randomActiveAccounts = nextActiveAccounts;
+    }
+    if (remainingRandomVolume > MIN_VOLUME_EPSILON) {
+      const residualTarget = selectedAccounts.find(({ account, capacity }) => {
+        const amount = accountAmounts.get(account.accountId) ?? 0;
+        return capacity - amount + MIN_VOLUME_EPSILON >= remainingRandomVolume;
+      });
+      if (!residualTarget) {
+        return null;
+      }
+      accountAmounts.set(
+        residualTarget.account.accountId,
+        roundToSixDecimals((accountAmounts.get(residualTarget.account.accountId) ?? 0) + remainingRandomVolume),
+      );
+    }
+  } else {
   let remaining = roundToSixDecimals(targetUsd);
   let activeAccounts = [...selectedAccounts];
 
@@ -264,6 +326,7 @@ function allocateAccountOrders(
       roundToSixDecimals(currentAmount + remaining),
     );
     remaining = 0;
+  }
   }
 
   const allocatedAccountTotal = roundToSixDecimals(

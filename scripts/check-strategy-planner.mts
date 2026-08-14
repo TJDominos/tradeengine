@@ -545,6 +545,7 @@ const shakeoutPriceCurveReview = buildStrategyPriceCurveReview({
   liquidityUsd: 10_000,
 });
 assert.equal(shakeoutPriceCurveReview.points.length, shakeoutPlan.tasks.length + 1);
+assert.ok((shakeoutPriceCurveReview.maxDrawdownPct ?? 0) > 0);
 assert.ok(
   (shakeoutPriceCurveReview.points.find((point) => point.side === 'sell')?.slopePct ?? 0) < 0,
   'shakeout price curve should expose negative slope during the initial sell phase',
@@ -633,6 +634,10 @@ assert.equal(
 assert.ok(
   fragmentedShakeoutPlan.tasks.findIndex((task) => task.side === 'buy') > 0,
   'fragmented shakeout plan should still sell before buy recovery',
+);
+assert.ok(
+  new Set(fragmentedShakeoutPlan.tasks.map((task) => task.totalVolumeUsd.toFixed(2))).size > 8,
+  'random-pool order amounts should vary instead of staying near-equal',
 );
 
 const wltUsdcAccounts = [
