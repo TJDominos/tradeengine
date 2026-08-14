@@ -106,19 +106,12 @@ function formatCurrency(value: number | null | undefined): string {
 
 function formatPriceCurrency(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) {
-    return '$0.00';
+    return 'Unavailable';
   }
-  if (value === 0) {
-    return '$0.00';
+  if (value <= 0) {
+    return 'Unavailable';
   }
-  if (Math.abs(value) < 0.01) {
-    return `$${value.toFixed(6)}`;
-  }
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: value >= 1000 ? 0 : 2,
-  }).format(value);
+  return `$${value.toFixed(6)}`;
 }
 
 function formatPercentFromBps(value: number | null | undefined): string {
@@ -314,13 +307,14 @@ function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volatilityRe
         <div>
           <p className="text-slate-500">Start</p>
           <p className="mt-1 font-medium text-slate-200">{formatPriceCurrency(startPrice)}</p>
+          <p className="mt-0.5 text-[11px] text-slate-500">Baseline</p>
         </div>
         <div>
           <p className="text-slate-500">Low</p>
           <p className="mt-1 font-medium text-rose-200">{formatPriceCurrency(lowPrice)}</p>
           {lowChangePct != null ? (
             <p className="mt-0.5 text-[11px] text-rose-300">
-              {lowChangePct >= 0 ? '+' : ''}{lowChangePct.toFixed(2)}% from start
+              {lowChangePct >= 0 ? '+' : ''}{lowChangePct.toFixed(2)}% vs start
             </p>
           ) : null}
         </div>
@@ -329,7 +323,7 @@ function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volatilityRe
           <p className="mt-1 font-medium text-emerald-200">{formatPriceCurrency(highPrice)}</p>
           {highChangePct != null ? (
             <p className="mt-0.5 text-[11px] text-emerald-300">
-              {highChangePct >= 0 ? '+' : ''}{highChangePct.toFixed(2)}% from start
+              {highChangePct >= 0 ? '+' : ''}{highChangePct.toFixed(2)}% vs start
             </p>
           ) : null}
         </div>

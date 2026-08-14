@@ -30,6 +30,10 @@ function roundToSixDecimals(value: number): number {
   return Number(value.toFixed(6));
 }
 
+function roundPriceUsd(value: number): number {
+  return Number(value.toPrecision(12));
+}
+
 export function buildStrategyPriceCurveReview(input: {
   tasks: Array<{ side: 'buy' | 'sell'; totalVolumeUsd: number; scheduledAt?: number }>;
   targetVolatilityPct: number;
@@ -88,7 +92,7 @@ export function buildStrategyPriceCurveReview(input: {
     volumeUsd: 0,
     netFlowUsd: 0,
     cumulativeNetFlowUsd: 0,
-    priceUsd: roundToSixDecimals(priceUsd),
+    priceUsd: roundPriceUsd(priceUsd),
     priceChangePct: 0,
     slopePct: null,
     slopePctPerHour: null,
@@ -119,7 +123,7 @@ export function buildStrategyPriceCurveReview(input: {
       volumeUsd: roundToSixDecimals(volumeUsd),
       netFlowUsd: roundToSixDecimals(netFlowUsd),
       cumulativeNetFlowUsd: roundToSixDecimals(cumulativeNetFlowUsd),
-      priceUsd: roundToSixDecimals(projectedPriceUsd),
+      priceUsd: roundPriceUsd(projectedPriceUsd),
       priceChangePct: roundToSixDecimals(((projectedPriceUsd - priceUsd) / priceUsd) * 100),
       slopePct: roundToSixDecimals(slopePct),
       slopePctPerHour: elapsedHours > 0 ? roundToSixDecimals(slopePct / elapsedHours) : null,
@@ -135,9 +139,9 @@ export function buildStrategyPriceCurveReview(input: {
     maxDrawdownPct: roundToSixDecimals(
       Math.max(0, ((priceUsd - projectedLowPriceUsd) / priceUsd) * 100),
     ),
-    startPriceUsd: priceUsd,
-    projectedLowPriceUsd: roundToSixDecimals(projectedLowPriceUsd),
-    projectedHighPriceUsd: roundToSixDecimals(projectedHighPriceUsd),
+    startPriceUsd: roundPriceUsd(priceUsd),
+    projectedLowPriceUsd: roundPriceUsd(projectedLowPriceUsd),
+    projectedHighPriceUsd: roundPriceUsd(projectedHighPriceUsd),
     liquidityUsd,
     available: true,
     points,

@@ -550,6 +550,15 @@ assert.ok(
   (shakeoutPriceCurveReview.points.find((point) => point.side === 'sell')?.slopePct ?? 0) < 0,
   'shakeout price curve should expose negative slope during the initial sell phase',
 );
+const tinyPriceCurveReview = buildStrategyPriceCurveReview({
+  tasks: shakeoutPlan.tasks,
+  targetVolatilityPct: 10,
+  priceUsd: 0.000000012345,
+  liquidityUsd: 10_000,
+});
+assert.ok((tinyPriceCurveReview.startPriceUsd ?? 0) > 0, 'tiny start prices must not round to zero');
+assert.ok((tinyPriceCurveReview.projectedLowPriceUsd ?? 0) > 0, 'tiny low prices must not round to zero');
+assert.ok((tinyPriceCurveReview.projectedHighPriceUsd ?? 0) > 0, 'tiny high prices must not round to zero');
 const softerShakeoutConfig = {
   ...shakeoutConfig,
   targetPullbackPct: 0,
