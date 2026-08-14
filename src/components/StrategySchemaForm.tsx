@@ -513,9 +513,9 @@ export default function StrategySchemaForm({
           onSubmit(planPreview);
         }
       })}
-      className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.65fr)_minmax(360px,0.95fr)]"
+      className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(360px,0.95fr)_minmax(0,1.65fr)]"
     >
-      <div className="space-y-6 xl:order-2">
+      <div className="space-y-6 lg:col-start-1 lg:row-start-1">
         <FormCard
           title="Macro Objective"
           description="Choose the campaign behavior that drives the hierarchical state machine, then set the token context and operator notes."
@@ -1091,7 +1091,7 @@ export default function StrategySchemaForm({
         </FormCard>
       </div>
 
-      <div className="xl:order-1">
+      <div className="lg:col-start-2 lg:row-start-1">
         <div className="sticky top-6 rounded-2xl border border-slate-700 bg-slate-800 p-6 shadow-2xl shadow-slate-950/30">
           <div className="flex items-start justify-between gap-3">
             <div>
