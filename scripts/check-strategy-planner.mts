@@ -284,6 +284,12 @@ assert.equal(
   'self-cycling net buys should use every funded eligible account before concentrating orders',
 );
 assert.ok(
+  planning.tasks
+    .filter((task) => task.side === 'buy')
+    .some((task) => task.allocations.some((allocation) => allocation.accountId > 3)),
+  'accumulation buys should include accounts that become eligible after planned sells',
+);
+assert.ok(
   planning.tasks.filter((task) => task.side === 'sell').length >= 5,
   'sell order count should expand enough to cover per-account sell capacity',
 );
@@ -561,6 +567,72 @@ assert.ok(
   aggressiveShakeoutSpecs.find((spec) => spec.side === 'sell')!.totalVolumeUsd >
     softerShakeoutSpecs.find((spec) => spec.side === 'sell')!.totalVolumeUsd,
   'higher dump/pullback/volatility controls should increase shakeout sell pressure',
+);
+
+const fragmentedShakeoutDocument = buildStrategyDocumentFromSettings({
+  baseTokenAddress,
+  quoteTokenAddress,
+  minTransactions: 20,
+  volatilityTarget: 10,
+  pullbackTarget: 10,
+  volumeTarget: 400,
+  netBuyinTarget: 200,
+  timeRangeTarget: '3d',
+  maxTransactions: 60,
+  maxSlippage: 1,
+  strategyNotes: 'fragmented shakeout seller capacity regression',
+  macroObjective: 'shakeout',
+  tactics: {
+    dumpRatio: 2,
+  },
+});
+fragmentedShakeoutDocument.parameters.minOrderUsd = 5;
+fragmentedShakeoutDocument.parameters.maxOrderUsd = 30;
+const fragmentedShakeoutConfig = {
+  ...config,
+  macroObjective: fragmentedShakeoutDocument.execution.macroObjective,
+  baseOrderCount: resolveBasePlannedTransactionCount(fragmentedShakeoutDocument),
+  maxOrderCount: fragmentedShakeoutDocument.parameters.maxTransactions,
+  baseTotalVolumeUsd: fragmentedShakeoutDocument.targets.volumeUsdMin,
+  baseDurationMs: 3 * 24 * 60 * 60 * 1000,
+  targetPullbackPct: fragmentedShakeoutDocument.targets.pullbackPctMax,
+  targetVolatilityPct: fragmentedShakeoutDocument.targets.volatilityPctMin,
+  minOrderUsd: 5,
+  maxOrderUsd: 30,
+  execution: fragmentedShakeoutDocument.execution,
+};
+const fragmentedShakeoutPlan = buildStrategyPlanningResult({
+  document: fragmentedShakeoutDocument,
+  config: fragmentedShakeoutConfig,
+  accounts: [
+    ...Array.from({ length: 6 }, (_, index) => buildAccount(index + 1, 1012 / 6, 0)),
+    ...Array.from({ length: 34 }, (_, index) => buildAccount(index + 7, 0, 5.5)),
+  ],
+  taskSpecs: buildStrategyPlanTaskSpecs(fragmentedShakeoutConfig, 200),
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'fragmented-shakeout-seller-capacity',
+});
+assert.equal(
+  fragmentedShakeoutPlan.isExecutable,
+  true,
+  JSON.stringify({
+    requestedTaskCount: fragmentedShakeoutPlan.requestedTaskCount,
+    plannedTaskCount: fragmentedShakeoutPlan.plannedTaskCount,
+    unallocatedVolumeUsd: fragmentedShakeoutPlan.unallocatedVolumeUsd,
+    sellVolumeUsd: fragmentedShakeoutPlan.tasks.reduce(
+      (sum, task) => sum + (task.side === 'sell' ? task.totalVolumeUsd : 0),
+      0,
+    ),
+    buyVolumeUsd: fragmentedShakeoutPlan.tasks.reduce(
+      (sum, task) => sum + (task.side === 'buy' ? task.totalVolumeUsd : 0),
+      0,
+    ),
+  }),
+);
+assert.ok(
+  fragmentedShakeoutPlan.tasks.findIndex((task) => task.side === 'buy') > 0,
+  'fragmented shakeout plan should still sell before buy recovery',
 );
 
 const wltUsdcAccounts = [
