@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 
-import { handleWebhookRoutes } from '../src/backend/api/webhookHandler';
+import {
+  deriveAlchemySignalsFromPayload,
+  handleWebhookRoutes,
+} from '../src/backend/api/webhookHandler';
 import type { Env } from '../src/backend/workerShared';
 
 const testContractAddress = 'So11111111111111111111111111111111111111112';
@@ -31,7 +34,21 @@ function createMockDb(userIds: number[]) {
               : null;
           }
           if (sql.includes('FROM signals')) {
-            return null;
+            return {
+              id: 1,
+              source: 'alchemy_notify:ack-regression:user:1',
+              external_id: `evt-123:5R1x1111111111111111111111111111111111111111:0:${testContractAddress}`,
+              event_type: 'ADDRESS_ACTIVITY:token',
+              wallet_address: null,
+              tx_signature: '5R1x1111111111111111111111111111111111111111',
+              payload: '{}',
+              details_json: null,
+              processed: 1,
+              processed_at: 1,
+              error_message: null,
+              retry_count: 0,
+              created_at: 1,
+            };
           }
           return { id: 1 };
         },
@@ -54,8 +71,11 @@ const env = {
   TRADINGBOT_DB: mockDb,
 } as Env;
 
+const backgroundTasks: Promise<unknown>[] = [];
 const context = {
-  waitUntil(_task: Promise<unknown>) {},
+  waitUntil(task: Promise<unknown>) {
+    backgroundTasks.push(task);
+  },
   passThroughOnException() {},
   props: {},
 } as unknown as ExecutionContext;
@@ -65,15 +85,24 @@ const validBody = JSON.stringify({
   id: 'evt-123',
   type: 'ADDRESS_ACTIVITY',
   event: {
-    activity: [
-      {
-        category: 'token',
-        hash: '5R1x1111111111111111111111111111111111111111',
-        rawContract: { address: testContractAddress },
-      },
-    ],
+    activity: {
+      category: 'token',
+      hash: '5R1x1111111111111111111111111111111111111111',
+      rawContract: { address: testContractAddress },
+    },
   },
 });
+
+const parsedSignals = deriveAlchemySignalsFromPayload(
+  JSON.parse(validBody),
+  testContractAddress,
+);
+assert.equal(parsedSignals.length, 1, 'Single-object activity payloads must produce a signal');
+assert.equal(
+  parsedSignals[0]?.txSignature,
+  '5R1x1111111111111111111111111111111111111111',
+  'Single-object activity payloads must preserve the transaction signature',
+);
 
 const hmacKey = await crypto.subtle.importKey(
   'raw',
@@ -104,7 +133,9 @@ assert.ok(validResponse, 'Webhook route should return a response');
 assert.equal(validResponse.status, 200, 'Valid webhooks must return HTTP 200');
 const validJson = await validResponse.json<{ ok: boolean; routedTargets: number }>();
 assert.equal(validJson.ok, true);
-assert.equal(validJson.routedTargets, 1);
+assert.deepEqual(validJson, { ok: true, accepted: true });
+assert.equal(backgroundTasks.length, 1, 'Valid webhook processing must run in waitUntil');
+await Promise.all(backgroundTasks.splice(0));
 
 // 2. Check invalid HMAC signature -> HTTP 401 Error (not 200)
 try {
@@ -149,7 +180,7 @@ try {
   assert.equal((err as { status?: number }).status, 400, 'Invalid JSON body must yield HTTP 400');
 }
 
-// 4. Check unrouted token address -> HTTP 422 Error (not 200)
+// 4. Valid deliveries are acknowledged even when no active target is found later.
 const unroutedDb = createMockDb([]);
 
 const unroutedEnv = {
@@ -157,23 +188,20 @@ const unroutedEnv = {
   TRADINGBOT_DB: unroutedDb,
 };
 
-try {
-  await handleWebhookRoutes(
-    new Request('https://example.com/api/webhooks/alchemy/notify?contractAddress=Unmatched111111111111111111111111111111111', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-alchemy-signature': validSignature,
-      },
-      body: validBody,
-    }),
-    unroutedEnv,
-    context,
-  );
-  assert.fail('Unrouted token address should throw ApiError(422)');
-} catch (err: unknown) {
-  assert.equal((err as { status?: number }).status, 422, 'Unrouted token address must yield HTTP 422');
-}
+const unroutedResponse = await handleWebhookRoutes(
+  new Request(`https://example.com/api/webhooks/alchemy/notify?contractAddress=${testContractAddress}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-alchemy-signature': validSignature,
+    },
+    body: validBody,
+  }),
+  unroutedEnv,
+  context,
+);
+assert.equal(unroutedResponse?.status, 200);
+await Promise.all(backgroundTasks.splice(0));
 
 console.log('Webhook synchronous error and acknowledgement check passed.');
 

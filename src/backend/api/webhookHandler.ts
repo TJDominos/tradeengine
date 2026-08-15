@@ -107,7 +107,7 @@ async function resolveSignalStorageTarget(
 export async function handleWebhookRoutes(
   request: Request,
   env: Env,
-  _ctx: ExecutionContext,
+  ctx: ExecutionContext,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (
@@ -117,7 +117,7 @@ export async function handleWebhookRoutes(
     return handleRustNodeWebhook(request, env);
   }
   if (request.method === 'POST' && url.pathname === '/api/webhooks/alchemy/notify') {
-    return handleAlchemyNotifyWebhook(request, url, env);
+    return handleAlchemyNotifyWebhook(request, url, env, ctx);
   }
   return null;
 }
@@ -632,7 +632,7 @@ function buildCompactAlchemySignalPayload(input: {
   );
 }
 
-function deriveAlchemySignalsFromPayload(
+export function deriveAlchemySignalsFromPayload(
   payload: AlchemyWebhookPayload,
   defaultContractAddress: string | null,
 ): DerivedChainSignal[] {
@@ -642,8 +642,13 @@ function deriveAlchemySignalsFromPayload(
   const event = isRecord(payload.event) ? payload.event : null;
   const fallbackContracts = defaultContractAddress ? [defaultContractAddress] : [];
 
-  if (event && Array.isArray(event.activity)) {
-    const activitySignals = event.activity.flatMap((item, index) => {
+  const activities = event && Array.isArray(event.activity)
+    ? event.activity
+    : event && isRecord(event.activity)
+      ? [event.activity]
+      : [];
+  if (activities.length > 0) {
+    const activitySignals = activities.flatMap((item, index) => {
       if (!isRecord(item)) {
         return [];
       }
@@ -1178,6 +1183,7 @@ async function handleAlchemyNotifyWebhook(
   request: Request,
   url: URL,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<Response> {
   const contractFromQuery = tryNormalizeSolanaPubkey(
     url.searchParams.get('contractAddress'),
@@ -1208,40 +1214,30 @@ async function handleAlchemyNotifyWebhook(
     throw new ApiError(500, 'Database binding TRADINGBOT_DB is not configured');
   }
 
-  let fallbackContracts: string[] = [];
-  if (contractFromQuery) {
-    fallbackContracts = [contractFromQuery];
-  } else {
-    fallbackContracts = await dbListActiveBaseTokenAddresses(env.TRADINGBOT_DB);
-  }
+  ctx.waitUntil((async () => {
+    try {
+      const fallbackContracts = contractFromQuery
+        ? [contractFromQuery]
+        : await dbListActiveBaseTokenAddresses(env.TRADINGBOT_DB);
+      const fallbackContract = fallbackContracts[0] ?? null;
+      const derivedSignals = deriveAlchemySignalsFromPayload(
+        payload,
+        fallbackContract,
+      );
+      const result = await processAlchemyNotifyWebhookPayload(
+        env,
+        payload,
+        fallbackContract,
+        derivedSignals,
+      );
+      console.log(
+        `[webhook] Routed ${result.routedTargets} targets, processed ${result.processed} signal(s), duplicates ${result.duplicates}, ignored ${result.ignored}`,
+      );
+    } catch (err) {
+      console.error('Alchemy webhook background processing failed:', err);
+    }
+  })());
 
-  const fallbackContract = fallbackContracts[0] ?? null;
-  const derivedSignals = deriveAlchemySignalsFromPayload(
-    payload,
-    fallbackContract,
-  );
-
-  const result = await processAlchemyNotifyWebhookPayload(
-    env,
-    payload,
-    fallbackContract,
-    derivedSignals,
-  );
-
-  console.log(
-    `[webhook] Routed ${result.routedTargets} targets, processed ${result.processed} signal(s), duplicates ${result.duplicates}, ignored ${result.ignored}`,
-  );
-
-  return jsonResponse(
-    {
-      ok: true,
-      received: result.received,
-      routedTargets: result.routedTargets,
-      processed: result.processed,
-      duplicates: result.duplicates,
-      ignored: result.ignored,
-    },
-    200,
-  );
+  return jsonResponse({ ok: true, accepted: true }, 200);
 }
 
