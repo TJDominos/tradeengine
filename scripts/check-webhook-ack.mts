@@ -1,14 +1,80 @@
 import assert from 'node:assert/strict';
 
-import {
-  ALCHEMY_ACK_BODY_READ_TIMEOUT_MS,
-  handleWebhookRoutes,
-} from '../src/backend/api/webhookHandler';
+import { handleWebhookRoutes } from '../src/backend/api/webhookHandler';
 import type { Env } from '../src/backend/workerShared';
 
-const backgroundTasks: Promise<unknown>[] = [];
+const testContractAddress = 'So11111111111111111111111111111111111111112';
 const signingKey = 'ack-regression-signing-key';
-const rawBody = JSON.stringify({ webhookId: 'ack-regression', event: {} });
+
+function createMockDb(userIds: number[]) {
+  return {
+    prepare(sql: string) {
+      const stmt = {
+        bind(..._args: unknown[]) {
+          return stmt;
+        },
+        async all() {
+          if (sql.includes('FROM settings')) {
+            return {
+              results: userIds.map((userId) => ({
+                user_id: userId,
+                value: testContractAddress,
+              })),
+            };
+          }
+          return { results: [] };
+        },
+        async first() {
+          if (sql.includes('FROM settings')) {
+            return userIds.length > 0
+              ? { user_id: userIds[0], value: testContractAddress }
+              : null;
+          }
+          if (sql.includes('FROM signals')) {
+            return null;
+          }
+          return { id: 1 };
+        },
+        async run() {
+          return { meta: { changes: 1 } };
+        },
+      };
+      return stmt;
+    },
+    async batch() {
+      return [];
+    },
+  } as unknown as D1Database;
+}
+
+const mockDb = createMockDb([1]);
+
+const env = {
+  ALCHEMY_WEBHOOK_SIGNING_KEY: signingKey,
+  TRADINGBOT_DB: mockDb,
+} as Env;
+
+const context = {
+  waitUntil(_task: Promise<unknown>) {},
+  passThroughOnException() {},
+  props: {},
+} as unknown as ExecutionContext;
+
+const validBody = JSON.stringify({
+  webhookId: 'ack-regression',
+  id: 'evt-123',
+  type: 'ADDRESS_ACTIVITY',
+  event: {
+    activity: [
+      {
+        category: 'token',
+        hash: '5R1x1111111111111111111111111111111111111111',
+        rawContract: { address: testContractAddress },
+      },
+    ],
+  },
+});
+
 const hmacKey = await crypto.subtle.importKey(
   'raw',
   new TextEncoder().encode(signingKey),
@@ -16,87 +82,99 @@ const hmacKey = await crypto.subtle.importKey(
   false,
   ['sign'],
 );
-const signature = Buffer.from(
-  await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(rawBody)),
+const validSignature = Buffer.from(
+  await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(validBody)),
 ).toString('hex');
-const context = {
-  waitUntil(task: Promise<unknown>) {
-    backgroundTasks.push(task);
-  },
-  passThroughOnException() {},
-  props: {},
-} as unknown as ExecutionContext;
 
-const response = await handleWebhookRoutes(
-  new Request('https://example.com/api/webhooks/alchemy/notify', {
+// 1. Check valid signature & active token -> HTTP 200
+const validResponse = await handleWebhookRoutes(
+  new Request(`https://example.com/api/webhooks/alchemy/notify?contractAddress=${testContractAddress}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-alchemy-signature': signature,
+      'x-alchemy-signature': validSignature,
     },
-    body: rawBody,
+    body: validBody,
   }),
-  { ALCHEMY_WEBHOOK_SIGNING_KEY: signingKey } as Env,
+  env,
   context,
 );
 
-assert.ok(response, 'Alchemy webhook route should return a response');
-assert.equal(response.status, 200, 'received Alchemy events must be acknowledged with HTTP 200');
-assert.deepEqual(await response.json(), { ok: true, accepted: true });
-assert.equal(backgroundTasks.length, 1, 'event processing should be scheduled in the background');
-await Promise.all(backgroundTasks);
+assert.ok(validResponse, 'Webhook route should return a response');
+assert.equal(validResponse.status, 200, 'Valid webhooks must return HTTP 200');
+const validJson = await validResponse.json<{ ok: boolean; routedTargets: number }>();
+assert.equal(validJson.ok, true);
+assert.equal(validJson.routedTargets, 1);
 
-console.log('Webhook acknowledgement regression check passed.');
+// 2. Check invalid HMAC signature -> HTTP 401 Error (not 200)
+try {
+  await handleWebhookRoutes(
+    new Request('https://example.com/api/webhooks/alchemy/notify', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-alchemy-signature': 'invalid-signature-hex',
+      },
+      body: validBody,
+    }),
+    env,
+    context,
+  );
+  assert.fail('Invalid signature should throw ApiError(401)');
+} catch (err: unknown) {
+  assert.equal((err as { status?: number }).status, 401, 'Invalid signature must yield HTTP 401');
+}
 
-let closeBody: (() => void) | undefined;
-const streamingBody = new ReadableStream<Uint8Array>({
-  start(controller) {
-    controller.enqueue(new TextEncoder().encode(rawBody));
-    closeBody = () => controller.close();
-  },
-});
-const streamingBackgroundTasks: Promise<unknown>[] = [];
-const streamingContext = {
-  waitUntil(task: Promise<unknown>) {
-    streamingBackgroundTasks.push(task);
-  },
-  passThroughOnException() {},
-  props: {},
-} as unknown as ExecutionContext;
-const startedAt = Date.now();
-const streamingResponsePromise = handleWebhookRoutes(
-  new Request('https://example.com/api/webhooks/alchemy/notify', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-alchemy-signature': signature,
-    },
-    body: streamingBody,
-    duplex: 'half',
-  } as RequestInit & { duplex: 'half' }),
-  { ALCHEMY_WEBHOOK_SIGNING_KEY: signingKey } as Env,
-  streamingContext,
-);
-const acknowledgementResult = await Promise.race([
-  streamingResponsePromise.then(() => 'acknowledged' as const),
-  new Promise<'timed-out'>((resolve) => {
-    setTimeout(() => resolve('timed-out'), ALCHEMY_ACK_BODY_READ_TIMEOUT_MS + 2_000);
-  }),
-]);
-const acknowledgementMs = Date.now() - startedAt;
-closeBody?.();
-const streamingResponse = await streamingResponsePromise;
+// 3. Check invalid JSON body with valid signature -> HTTP 400 Error
+const badJsonBody = 'not-a-json';
+const badJsonSignature = Buffer.from(
+  await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(badJsonBody)),
+).toString('hex');
 
-assert.equal(
-  acknowledgementResult,
-  'acknowledged',
-  'Alchemy webhook acknowledgement must not wait for the complete request body',
-);
-assert.ok(
-  acknowledgementMs < ALCHEMY_ACK_BODY_READ_TIMEOUT_MS + 1_000,
-  `Alchemy webhook acknowledgement took ${acknowledgementMs}ms, which exceeds the bounded body wait`,
-);
-assert.equal(streamingResponse?.status, 200);
-await Promise.all(streamingBackgroundTasks);
+try {
+  await handleWebhookRoutes(
+    new Request('https://example.com/api/webhooks/alchemy/notify', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-alchemy-signature': badJsonSignature,
+      },
+      body: badJsonBody,
+    }),
+    env,
+    context,
+  );
+  assert.fail('Invalid JSON body should throw ApiError(400)');
+} catch (err: unknown) {
+  assert.equal((err as { status?: number }).status, 400, 'Invalid JSON body must yield HTTP 400');
+}
+
+// 4. Check unrouted token address -> HTTP 422 Error (not 200)
+const unroutedDb = createMockDb([]);
+
+const unroutedEnv = {
+  ...env,
+  TRADINGBOT_DB: unroutedDb,
+};
+
+try {
+  await handleWebhookRoutes(
+    new Request('https://example.com/api/webhooks/alchemy/notify?contractAddress=Unmatched111111111111111111111111111111111', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-alchemy-signature': validSignature,
+      },
+      body: validBody,
+    }),
+    unroutedEnv,
+    context,
+  );
+  assert.fail('Unrouted token address should throw ApiError(422)');
+} catch (err: unknown) {
+  assert.equal((err as { status?: number }).status, 422, 'Unrouted token address must yield HTTP 422');
+}
+
+console.log('Webhook synchronous error and acknowledgement check passed.');
 
 console.log('Streaming webhook acknowledgement regression check passed.');

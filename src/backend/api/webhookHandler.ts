@@ -107,7 +107,7 @@ async function resolveSignalStorageTarget(
 export async function handleWebhookRoutes(
   request: Request,
   env: Env,
-  ctx: ExecutionContext,
+  _ctx: ExecutionContext,
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (
@@ -117,7 +117,7 @@ export async function handleWebhookRoutes(
     return handleRustNodeWebhook(request, env);
   }
   if (request.method === 'POST' && url.pathname === '/api/webhooks/alchemy/notify') {
-    return handleAlchemyNotifyWebhook(request, url, env, ctx);
+    return handleAlchemyNotifyWebhook(request, url, env);
   }
   return null;
 }
@@ -411,6 +411,21 @@ async function dbListUserIdsByActiveContractAddress(
   return rows.results.map((row) => row.user_id);
 }
 
+async function dbListActiveBaseTokenAddresses(
+  db: D1Database,
+): Promise<string[]> {
+  const rows = await db
+    .prepare(
+      `SELECT DISTINCT value
+       FROM settings
+       WHERE key IN ('activeBaseTokenAddress', 'contractAddress')
+         AND value IS NOT NULL
+         AND TRIM(value) <> ''`,
+    )
+    .all<{ value: string }>();
+  return uniqueSolanaPubkeys(rows.results.map((row) => row.value));
+}
+
 function resolveAlchemyWebhookSigningKey(env: Env): string {
   const signingKey =
     env.ALCHEMY_WEBHOOK_SIGNING_KEY?.trim() ||
@@ -447,19 +462,24 @@ async function assertAlchemyWebhookSignature(
   }
 
   const signingKey = resolveAlchemyWebhookSigningKey(env);
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(signingKey),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['verify'],
-  );
-  const isValid = await crypto.subtle.verify(
-    'HMAC',
-    key,
-    parseHexString(signature),
-    rawBody,
-  );
+  let isValid = false;
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(signingKey),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['verify'],
+    );
+    isValid = await crypto.subtle.verify(
+      'HMAC',
+      key,
+      parseHexString(signature),
+      rawBody,
+    );
+  } catch {
+    isValid = false;
+  }
   if (!isValid) {
     throw new ApiError(401, 'Alchemy webhook signature is invalid');
   }
@@ -1134,6 +1154,17 @@ async function processAlchemyNotifyWebhookPayload(
     }
   }
 
+  if (routedTargets === 0) {
+    const checkedAddresses = uniqueSolanaPubkeys([
+      ...derivedSignals.flatMap((s) => s.contractAddresses),
+      ...(contractFromQuery ? [contractFromQuery] : []),
+    ]);
+    throw new ApiError(
+      422,
+      `No active user settings match webhook token address: ${checkedAddresses.join(', ') || 'none'}`,
+    );
+  }
+
   return {
     received: derivedSignals.length,
     routedTargets,
@@ -1143,71 +1174,74 @@ async function processAlchemyNotifyWebhookPayload(
   };
 }
 
-export const ALCHEMY_ACK_BODY_READ_TIMEOUT_MS = 2_000;
-
 async function handleAlchemyNotifyWebhook(
   request: Request,
   url: URL,
   env: Env,
-  ctx: ExecutionContext,
 ): Promise<Response> {
+  const contractFromQuery = tryNormalizeSolanaPubkey(
+    url.searchParams.get('contractAddress'),
+  );
+
+  let rawBody: Uint8Array;
   try {
-    const contractFromQuery = tryNormalizeSolanaPubkey(
-      url.searchParams.get('contractAddress'),
+    const bodyBuffer = await request.arrayBuffer();
+    rawBody = new Uint8Array(bodyBuffer);
+  } catch (err: unknown) {
+    throw new ApiError(
+      400,
+      `Failed to read webhook request body: ${err instanceof Error ? err.message : String(err)}`,
     );
-    const rawBodyPromise = request.arrayBuffer().then(
-      (body) => new Uint8Array(body),
-    ).catch((err: unknown) => {
-      console.error('Alchemy webhook body read failed:', err);
-      return null;
-    });
-
-    ctx.waitUntil(
-      (async () => {
-        const rawBody = await rawBodyPromise;
-        if (rawBody == null) {
-          return;
-        }
-        try {
-          await assertAlchemyWebhookSignature(request, env, rawBody);
-          const payload = parseJsonText<AlchemyWebhookPayload>(
-            new TextDecoder().decode(rawBody),
-          );
-          const derivedSignals = deriveAlchemySignalsFromPayload(
-            payload,
-            contractFromQuery,
-          );
-          const result = await processAlchemyNotifyWebhookPayload(
-            env,
-            payload,
-            contractFromQuery,
-            derivedSignals,
-          );
-          console.log(
-            `[webhook] Routed ${result.routedTargets} targets, processed ${result.processed} signal(s), duplicates ${result.duplicates}, ignored ${result.ignored}`,
-          );
-        } catch (err) {
-          console.error('Alchemy webhook background processing failed:', err);
-        }
-      })(),
-    );
-
-    // Consume the delivery body before acknowledging so the sender never sees the
-    // response race its own upload, but never let a stalled body delay the 2xx ack.
-    let ackTimer: ReturnType<typeof setTimeout> | null = null;
-    await Promise.race([
-      rawBodyPromise,
-      new Promise<void>((resolve) => {
-        ackTimer = setTimeout(resolve, ALCHEMY_ACK_BODY_READ_TIMEOUT_MS);
-      }),
-    ]);
-    if (ackTimer != null) {
-      clearTimeout(ackTimer);
-    }
-  } catch (err) {
-    console.error('Alchemy webhook acknowledgement path failed:', err);
   }
 
-  return jsonResponse({ ok: true, accepted: true }, 200);
+  if (rawBody.length === 0) {
+    throw new ApiError(400, 'Webhook request body is empty');
+  }
+
+  await assertAlchemyWebhookSignature(request, env, rawBody);
+
+  const payload = parseJsonText<AlchemyWebhookPayload>(
+    new TextDecoder().decode(rawBody),
+  );
+
+  if (!env.TRADINGBOT_DB) {
+    throw new ApiError(500, 'Database binding TRADINGBOT_DB is not configured');
+  }
+
+  let fallbackContracts: string[] = [];
+  if (contractFromQuery) {
+    fallbackContracts = [contractFromQuery];
+  } else {
+    fallbackContracts = await dbListActiveBaseTokenAddresses(env.TRADINGBOT_DB);
+  }
+
+  const fallbackContract = fallbackContracts[0] ?? null;
+  const derivedSignals = deriveAlchemySignalsFromPayload(
+    payload,
+    fallbackContract,
+  );
+
+  const result = await processAlchemyNotifyWebhookPayload(
+    env,
+    payload,
+    fallbackContract,
+    derivedSignals,
+  );
+
+  console.log(
+    `[webhook] Routed ${result.routedTargets} targets, processed ${result.processed} signal(s), duplicates ${result.duplicates}, ignored ${result.ignored}`,
+  );
+
+  return jsonResponse(
+    {
+      ok: true,
+      received: result.received,
+      routedTargets: result.routedTargets,
+      processed: result.processed,
+      duplicates: result.duplicates,
+      ignored: result.ignored,
+    },
+    200,
+  );
 }
 
