@@ -169,11 +169,7 @@ export default function TransactionLogsCard({
           </thead>
           <tbody className="divide-y divide-slate-800">
             {currentTransactionLogs.map((log) => {
-              const displayTime = log.kind === 'webhook'
-                ? log.chainTimeMs
-                : log.txSignature
-                  ? log.chainTimeMs
-                  : log.createdAt;
+              const displayTime = log.chainTimeMs ?? log.createdAt;
               const walletOwnershipMeta = resolveWalletOwnershipMeta(
                 log.walletAddress,
                 walletOwnershipLookup,

@@ -525,6 +525,51 @@ function extractTokenTransferContractAddresses(value: unknown): string[] {
   );
 }
 
+const SOLANA_SIGNATURE_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{80,90}$/;
+const TRANSACTION_SIGNATURE_KEYS = new Set([
+  'hash',
+  'signature',
+  'signatures',
+  'transactionHash',
+  'txHash',
+  'txSignature',
+]);
+
+function collectNestedTransactionSignatures(
+  value: unknown,
+  depth = 0,
+  signatures = new Set<string>(),
+): string[] {
+  if (depth > 10 || value == null) {
+    return [...signatures];
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectNestedTransactionSignatures(item, depth + 1, signatures);
+    }
+    return [...signatures];
+  }
+  if (!isRecord(value)) {
+    return [...signatures];
+  }
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    if (TRANSACTION_SIGNATURE_KEYS.has(key)) {
+      const candidates = Array.isArray(nestedValue) ? nestedValue : [nestedValue];
+      for (const candidate of candidates) {
+        const signature = readNonEmptyString(candidate);
+        if (signature && SOLANA_SIGNATURE_PATTERN.test(signature)) {
+          signatures.add(signature);
+        }
+      }
+    }
+    if (typeof nestedValue === 'object' && nestedValue != null) {
+      collectNestedTransactionSignatures(nestedValue, depth + 1, signatures);
+    }
+  }
+  return [...signatures];
+}
+
 function buildCompactAlchemyLogPayload(
   logValue: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
@@ -742,6 +787,31 @@ export function deriveAlchemySignalsFromPayload(
     if (logSignals.length > 0) {
       return logSignals;
     }
+  }
+
+  const nestedSignatures = collectNestedTransactionSignatures(event);
+  if (nestedSignatures.length > 0) {
+    const contractAddresses = uniqueSolanaPubkeys([
+      ...fallbackContracts,
+      event?.contractAddress,
+      event?.address,
+      event?.tokenAddress,
+      event?.mint,
+    ]);
+    return nestedSignatures.map((txSignature, index) => ({
+      externalId: `${eventId}:${txSignature}:${index}`,
+      eventType: `${payloadType}:transaction`,
+      walletAddress: null,
+      txSignature,
+      contractAddresses,
+      payload: buildCompactAlchemySignalPayload({
+        webhookId,
+        eventId,
+        type: payloadType,
+        txSignature,
+        contractAddresses,
+      }),
+    }));
   }
 
   return [

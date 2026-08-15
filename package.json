@@ -11,6 +11,7 @@
     "lint": "tsc --noEmit",
     "check:webhook-ack": "npx --yes tsx scripts/check-webhook-ack.mts",
     "check:webhook-parser": "npx --yes tsx scripts/check-webhook-parser.mjs",
+    "check:transaction-log-merge": "npx --yes tsx scripts/check-transaction-log-merge.mts",
     "check:strategy-queue-recovery": "node scripts/check-strategy-queue-recovery.mjs",
     "check:strategy-do-lifecycle": "npm run build && node scripts/check-strategy-do-lifecycle.mjs",
     "check:strategy-do-completion-advance": "node scripts/check-strategy-do-completion-advance.mjs",

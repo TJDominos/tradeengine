@@ -104,6 +104,31 @@ assert.equal(
   'Single-object activity payloads must preserve the transaction signature',
 );
 
+const nestedSignature = '26Xy84ZNRDtvAqBSGzVaDeWokSZuyJDABCFz6WS9Z5EDtV27HrTZ3tCLJjBJsGSwyhKgqfxwFAiW8CH16rxPMswe';
+const nestedSignals = deriveAlchemySignalsFromPayload(
+  {
+    webhookId: 'nested-regression',
+    id: 'evt-nested',
+    type: 'ADDRESS_ACTIVITY',
+    event: {
+      data: {
+        block: {
+          transactions: [
+            { transaction: { signatures: [nestedSignature] } },
+          ],
+        },
+      },
+    },
+  },
+  testContractAddress,
+);
+assert.equal(nestedSignals.length, 1, 'Nested transaction payloads must produce a signal');
+assert.equal(
+  nestedSignals[0]?.txSignature,
+  nestedSignature,
+  'Nested transaction payloads must preserve the Solana signature',
+);
+
 const hmacKey = await crypto.subtle.importKey(
   'raw',
   new TextEncoder().encode(signingKey),
