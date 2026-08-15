@@ -130,6 +130,7 @@ function validateReviewedPlan(input: {
   config: StrategyRecordConfig;
   accounts: ManagedAccountBalanceRecord[];
   baseTokenPriceUsd: number | null;
+  liquidityUsd: number | null;
 }): StrategyReviewedPlan {
   if (!input.rawPlan || typeof input.rawPlan !== 'object' || Array.isArray(input.rawPlan)) {
     throw new ApiError(400, 'An executable reviewed plan is required for deployment');
@@ -262,7 +263,17 @@ function validateReviewedPlan(input: {
   ) {
     throw new ApiError(409, 'Reviewed plan volume or net buy-in no longer matches the strategy');
   }
-  return { generatedAt, documentSignature, tasks };
+  return {
+    generatedAt,
+    documentSignature,
+    volatilityReview: buildStrategyPriceCurveReview({
+      tasks,
+      targetVolatilityPct: input.document.targets.volatilityPctMin,
+      priceUsd: input.baseTokenPriceUsd,
+      liquidityUsd: input.liquidityUsd,
+    }),
+    tasks,
+  };
 }
 
 function formatQuoteLabel(quoteMint: string): string {
@@ -614,6 +625,7 @@ export async function handleStrategyRoutes(
       config: buildStrategyRecordConfigFromDocument(normalizedDocument, user.id),
       accounts: planningAccounts,
       baseTokenPriceUsd: deploymentMarketSnapshot?.priceUsd ?? null,
+      liquidityUsd: deploymentMarketSnapshot?.liquidityUsd ?? null,
     });
 
     const strategySave = await dbSaveActiveStrategyVersionDocument(

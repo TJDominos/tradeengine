@@ -10,7 +10,9 @@ import {
 } from 'lucide-react';
 import React from 'react';
 
+import type { StrategyPriceCurveReview } from '../app/types';
 import { api, compactAddress, formatDate, formatUSD } from '../app/utils';
+import { PriceSlopeChart } from '../components/StrategySchemaForm';
 
 type QueueExecutionReport = {
   actualTotalVolume: number;
@@ -36,6 +38,10 @@ type QueueStrategyConfig = {
   macroObjective: 'shakeout' | 'distribution' | 'accumulation';
   baseTotalVolumeUsd: number;
   document: QueueStrategyDocument;
+  reviewedPlan?: {
+    generatedAt: number;
+    volatilityReview?: StrategyPriceCurveReview;
+  };
 };
 
 type QueueStrategyRecord = {
@@ -110,6 +116,32 @@ function resolveDisplayStatus(record: QueueStrategyRecord): string {
     return 'Aborted';
   }
   return titleCase(record.status);
+}
+
+function ProjectedPriceCurveSnapshot({ record }: { record: QueueStrategyRecord }) {
+  const review = record.config.reviewedPlan?.volatilityReview;
+  const generatedAt = record.config.reviewedPlan?.generatedAt;
+
+  return (
+    <div className="mt-5 border-t border-slate-700 pt-5">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Projected Price Curve</p>
+          <p className="mt-1 text-sm text-slate-300">Preview snapshot captured before this run started</p>
+        </div>
+        {generatedAt ? <p className="text-xs text-slate-500">Previewed {formatDate(generatedAt)}</p> : null}
+      </div>
+      {review?.available ? (
+        <PriceSlopeChart review={review} />
+      ) : (
+        <div className="mt-3 rounded-xl border border-dashed border-slate-700 bg-slate-900/70 px-4 py-4 text-sm text-slate-500">
+          {review
+            ? 'The preview did not have enough market price and liquidity data to project a curve.'
+            : 'No projected price curve snapshot was recorded for this run.'}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function HistoricalSetupsPage() {
@@ -312,6 +344,7 @@ export default function HistoricalSetupsPage() {
                     <p className="mt-2 text-lg font-semibold text-white">{metrics?.tacticsTriggeredCount ?? 0}</p>
                   </div>
                 </div>
+                <ProjectedPriceCurveSnapshot record={active} />
               </div>
             ) : null}
           </div>
@@ -531,6 +564,7 @@ export default function HistoricalSetupsPage() {
                                     Abort Reason: {record.report.abortReason}
                                   </div>
                                 ) : null}
+                                <ProjectedPriceCurveSnapshot record={record} />
                                 <div className="mt-4">
                                   <div className="flex flex-wrap items-end justify-between gap-3">
                                     <div>

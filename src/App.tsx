@@ -993,6 +993,7 @@ export default function App() {
           reviewedPlan: {
             generatedAt: reviewedPlan.generatedAt,
             documentSignature: reviewedPlan.documentSignature,
+            volatilityReview: reviewedPlan.volatilityReview,
             tasks: reviewedPlan.tasks,
           },
         }),

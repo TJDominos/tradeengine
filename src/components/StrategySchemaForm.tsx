@@ -209,7 +209,7 @@ function FieldShell({
   );
 }
 
-function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volatilityReview'] }) {
+export function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volatilityReview'] }) {
   const points = review.points.filter((point) => point.priceUsd != null);
   if (!review.available || points.length < 2) {
     return null;

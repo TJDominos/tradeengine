@@ -1,3 +1,5 @@
+import type { StrategyPriceCurveReview } from './priceCurve';
+
 export type StrategyType = 'solana-auto-trade';
 
 export type StrategyVersionStatus =
@@ -299,6 +301,7 @@ export interface StrategyReviewedPlanTask {
 export interface StrategyReviewedPlan {
   generatedAt: number;
   documentSignature: string;
+  volatilityReview?: StrategyPriceCurveReview;
   tasks: StrategyReviewedPlanTask[];
 }
 

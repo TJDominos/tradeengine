@@ -12,6 +12,7 @@ import {
   type StrategyEngineDurableObjectStatus,
   type StrategyEngineTaskSnapshot,
 } from '../strategy/strategyEngineDO';
+import { buildStrategyPriceCurveReview } from '../strategy/priceCurve';
 import { StrategyStatus } from '../strategy/types';
 import type {
   ExecutionReport,
@@ -32,7 +33,7 @@ import {
   getAvailableAccount,
   dbListManagedAccountAddresses,
 } from '../userStore';
-import { dbGetLatestTokenMarketSnapshot, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
+import { dbGetLatestTokenMarketSnapshot, dbGetTokenMarketSnapshotsByTimeRange, dbResolveSolanaRpcUrls, dbResolveTradableTokenId } from '../tokenStore';
 import type { Env } from '../workerShared';
 import {
   executeTradeTask,
@@ -344,13 +345,18 @@ export class StrategyAutomationService {
   public async getQueueSnapshot(env: Env): Promise<StrategyQueueSnapshot> {
     const currentMetrics = await this.getCurrentMetrics(env);
     const grouped = await getAllStrategies(env);
-    const latestHistory = grouped.history[grouped.history.length - 1] ?? null;
-    const latestAbortedState = !grouped.active[0] && latestHistory?.status === StrategyStatus.Aborted
+    const [active, pending, history] = await Promise.all([
+      Promise.all(grouped.active.map((record) => this.attachPreviewPriceCurve(env, record))),
+      Promise.all(grouped.pending.map((record) => this.attachPreviewPriceCurve(env, record))),
+      Promise.all(grouped.history.map((record) => this.attachPreviewPriceCurve(env, record))),
+    ]);
+    const latestHistory = history[history.length - 1] ?? null;
+    const latestAbortedState = !active[0] && latestHistory?.status === StrategyStatus.Aborted
       ? await this.fetchCurrentMetricsResponse(env, latestHistory)
       : null;
     const queueStatus = currentMetrics?.status === 'paused'
       ? 'paused'
-      : grouped.active[0]
+      : active[0]
         ? 'active'
         : latestHistory?.status === StrategyStatus.Aborted
           ? 'aborted'
@@ -358,9 +364,9 @@ export class StrategyAutomationService {
             ? 'paused'
             : 'active';
     return {
-      active: grouped.active[0] ?? null,
-      pending: grouped.pending,
-      history: grouped.history,
+      active: active[0] ?? null,
+      pending,
+      history,
       paused: queueStatus === 'paused' || grouped.paused,
       queueStatus,
       tasks: currentMetrics?.tasks ?? (
@@ -370,6 +376,49 @@ export class StrategyAutomationService {
       ),
       currentEngineState: currentMetrics?.currentEngineState ?? null,
       currentMetrics: currentMetrics?.metrics ?? null,
+    };
+  }
+
+  private async attachPreviewPriceCurve(
+    env: Env,
+    record: StrategyRecord,
+  ): Promise<StrategyRecord> {
+    const reviewedPlan = record.config.reviewedPlan;
+    if (!reviewedPlan || reviewedPlan.volatilityReview) {
+      return record;
+    }
+    const tokenId = await dbResolveTradableTokenId(
+      env.TRADINGBOT_DB,
+      record.config.baseTokenAddress,
+      record.config.quoteTokenAddress,
+    );
+    if (!tokenId) {
+      return record;
+    }
+    const [snapshot] = await dbGetTokenMarketSnapshotsByTimeRange(
+      env.TRADINGBOT_DB,
+      tokenId,
+      0,
+      reviewedPlan.generatedAt,
+      1,
+    );
+    if (!snapshot) {
+      return record;
+    }
+    return {
+      ...record,
+      config: {
+        ...record.config,
+        reviewedPlan: {
+          ...reviewedPlan,
+          volatilityReview: buildStrategyPriceCurveReview({
+            tasks: reviewedPlan.tasks,
+            targetVolatilityPct: record.config.targetVolatilityPct,
+            priceUsd: snapshot.priceUsd,
+            liquidityUsd: snapshot.liquidityUsd,
+          }),
+        },
+      },
     };
   }
 
