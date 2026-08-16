@@ -1637,9 +1637,9 @@ export default function App() {
 
   const resolveTransactionLogTimestamp = (log: DashboardTransactionLog): number | null =>
     log.kind === 'webhook'
-      ? log.chainTimeMs
+      ? log.chainTimeMs ?? log.createdAt
       : log.txSignature
-        ? log.chainTimeMs
+        ? log.chainTimeMs ?? log.createdAt
         : log.createdAt;
 
   const filteredSnapshots = (engineState.marketSnapshotHistory ?? []).filter((snapshot) =>

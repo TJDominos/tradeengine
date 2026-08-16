@@ -1714,8 +1714,9 @@ export async function dbListWebhookTransactionLogs(
        FROM webhook_transaction_logs wtl
        LEFT JOIN tradable_tokens tt ON tt.id = wtl.token_id
        WHERE wtl.user_id = ?1
-      ORDER BY wtl.created_at DESC, wtl.id DESC
-       LIMIT 50`,
+      ORDER BY COALESCE(wtl.chain_time_ms, CASE WHEN wtl.created_at >= 1000000000000 THEN wtl.created_at ELSE wtl.created_at * 1000 END) DESC,
+           wtl.id DESC
+       LIMIT 200`,
     )
     .bind(userId)
     .all<{
