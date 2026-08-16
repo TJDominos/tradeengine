@@ -4,6 +4,7 @@ import { nowTs } from './time';
 import {
   dedupeStrings,
   isHeliusRpcUrl,
+  normalizeHeliusRpcUrl,
   normalizePubkey,
   normalizeRpcUrl,
   solanaRpc,
@@ -69,8 +70,8 @@ export async function dbResolveSolanaRpcUrls(
     (endpoint) => endpoint.isActive,
   );
   return dedupeStrings([
-    ...endpoints.map((endpoint) => endpoint.url),
-    envRpcUrl ?? '',
+    ...endpoints.map((endpoint) => normalizeHeliusRpcUrl(endpoint.url)),
+    envRpcUrl ? normalizeHeliusRpcUrl(envRpcUrl) : '',
   ]);
 }
 

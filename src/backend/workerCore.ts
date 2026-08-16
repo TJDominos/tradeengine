@@ -584,7 +584,7 @@ export function normalizeRpcUrl(value: string): string {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new ApiError(400, 'RPC URL must use http or https');
   }
-  return parsed.toString();
+  return normalizeHeliusRpcUrl(parsed.toString());
 }
 
 export function isHeliusRpcUrl(value: string): boolean {

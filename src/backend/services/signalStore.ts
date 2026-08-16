@@ -1300,7 +1300,6 @@ function isWebhookTransactionDetailsComplete(
     details.fromWalletAddress &&
     details.toWalletAddress &&
     details.action &&
-    details.usdcAmount != null &&
     details.tokenAmount != null
   );
 }
@@ -1335,13 +1334,16 @@ export async function reconcileWebhookTransactionDetailsInWindow(
   let enrichedTransactions = 0;
   let holderDeltasApplied = 0;
   for (const group of groupsToReconcile) {
-    const rpcResult = await fetchSolanaWebhookTransactionDetailsFromRpc(
-      rpcUrls,
-      group.txSignature!,
-      contractAddress,
-      group.mergedDetails,
-      solPriceUsd,
-    );
+    const needsProviderEnrichment = !isWebhookTransactionDetailsComplete(group.mergedDetails);
+    const rpcResult = needsProviderEnrichment
+      ? await fetchSolanaWebhookTransactionDetailsFromRpc(
+          rpcUrls,
+          group.txSignature!,
+          contractAddress,
+          group.mergedDetails,
+          solPriceUsd,
+        )
+      : null;
     const chainTimeMs = rpcResult.chainTimeMs ?? group.chainTimeMs ?? null;
     const mergedDetails = mergeStoredSignalTransactionDetails(
       group.mergedDetails,
