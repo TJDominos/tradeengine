@@ -32,10 +32,14 @@ import { requireAdmin, requireUser } from '../services/accessControl';
 import { dbComputeManagedProfitUsdc, dbListHistoricalSetups } from '../services/historyMetricsService';
 import { dbGetMarketRefreshState } from '../services/marketRefreshStateService';
 import {
-  backfillTradeLogChainTimes,
+  dbCompleteTransactionLogRefresh,
+  dbFailTransactionLogRefresh,
+  dbGetTransactionLogRefreshState,
+  dbTryStartTransactionLogRefresh,
+} from '../services/transactionLogRefreshStateService';
+import {
   dbGetLatestBaseTokenTransactionTimeMs,
   reconcileTokenTransactionsFromRpc,
-  reconcileWebhookTransactionDetailsInWindow,
 } from '../services/signalStore';
 import { StrategyAutomationService } from '../services/strategyAutomationService';
 import {
@@ -278,6 +282,21 @@ export async function handleStateRoutes(
     return jsonResponse({ baseTokenAddress, profitUsdc });
   }
 
+  if (method === 'GET' && pathname === '/api/transaction-logs/refresh/status') {
+    const user = await requireAdmin(request, env);
+    const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
+    const contractAddress =
+      settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
+    const transactionLogRefreshStatus = contractAddress
+      ? await dbGetTransactionLogRefreshState(
+          env.TRADINGBOT_DB,
+          user.id,
+          contractAddress,
+        )
+      : null;
+    return jsonResponse({ transactionLogRefreshStatus });
+  }
+
   if (method === 'GET' && pathname === '/api/state') {
     const user = await requireUser(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
@@ -423,6 +442,24 @@ export async function handleStateRoutes(
       user.id,
       env.SOLANA_RPC_URL,
     );
+    const refreshStart = await dbTryStartTransactionLogRefresh(
+      env.TRADINGBOT_DB,
+      user.id,
+      contractAddress,
+    );
+    if (!refreshStart.acquired) {
+      return jsonResponse({
+        ok: true,
+        accepted: true,
+        status: 'running',
+        contractAddress,
+        transactionLogRefreshStatus: refreshStart.state,
+      }, 202);
+    }
+    const requestId = refreshStart.state.requestId;
+    if (!requestId) {
+      return jsonResponse({ error: 'Failed to initialize transaction log refresh request' }, 500);
+    }
 
     ctx.waitUntil(
       (async () => {
@@ -438,27 +475,42 @@ export async function handleStateRoutes(
               endTimeMs,
             },
           );
-          const detailReconciliation = await reconcileWebhookTransactionDetailsInWindow(
+          const insertedTransactions = reconciliation.insertedSignals;
+          const holderDeltasApplied = reconciliation.holderDeltasApplied;
+          const enrichedTransactions = 0;
+          const summaryText = insertedTransactions > 0
+            ? `Transaction Log refresh completed: ${insertedTransactions} new, ${holderDeltasApplied} holder updates.`
+            : `Transaction Log refresh completed: no missing transactions found after scanning ${reconciliation.scannedSignatures}.`;
+          await dbCompleteTransactionLogRefresh(
             env.TRADINGBOT_DB,
             user.id,
             contractAddress,
-            rpcUrls,
-            startTimeMs,
-            endTimeMs,
-          );
-          const tradeLogBackfill = await backfillTradeLogChainTimes(
-            env.TRADINGBOT_DB,
-            rpcUrls,
+            requestId,
+            {
+              summaryText,
+              scannedTransactions: reconciliation.scannedSignatures,
+              insertedTransactions,
+              holderDeltasApplied,
+              enrichedTransactions,
+            },
           );
           console.log('[transaction-log-refresh] completed', {
             userId: user.id,
             contractAddress,
             reconciliation,
-            detailReconciliation,
-            tradeLogBackfill,
           });
         } catch (err) {
           console.error('[transaction-log-refresh] failed', err);
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          await dbFailTransactionLogRefresh(
+            env.TRADINGBOT_DB,
+            user.id,
+            contractAddress,
+            requestId,
+            errorMessage,
+          ).catch((updateErr) => {
+            console.error('Failed to persist transaction log refresh failure state:', updateErr);
+          });
         }
       })(),
     );
@@ -466,10 +518,12 @@ export async function handleStateRoutes(
     return jsonResponse({
       ok: true,
       accepted: true,
+      status: 'started',
       contractAddress,
       latestTransactionTimeMs,
       startTimeMs,
       endTimeMs,
+      transactionLogRefreshStatus: refreshStart.state,
     }, 202);
   }
 

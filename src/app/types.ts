@@ -177,6 +177,21 @@ export type MarketRefreshStatus = {
   completedAt: number | null;
 };
 
+export type TransactionLogRefreshStatus = {
+  contractAddress: string;
+  status: 'idle' | 'running' | 'completed' | 'failed';
+  requestId: string | null;
+  errorMessage: string | null;
+  summaryText: string | null;
+  scannedTransactions: number;
+  insertedTransactions: number;
+  holderDeltasApplied: number;
+  enrichedTransactions: number;
+  startedAt: number | null;
+  updatedAt: number;
+  completedAt: number | null;
+};
+
 export type OutsideTokenHolder = {
   address: string;
   label: string | null;

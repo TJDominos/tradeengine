@@ -27,6 +27,7 @@ import type {
   TokenWebhookCheck,
   TokenMarketFdvRange,
   TokenMarketSnapshot,
+  TransactionLogRefreshStatus,
   TradableToken,
   WalletBalance,
 } from './app/types';
@@ -149,6 +150,7 @@ export default function App() {
 
   const [loadingMarketSnapshots, setLoadingMarketSnapshots] = React.useState(false);
   const [marketSnapshotFdvRange, setMarketSnapshotFdvRange] = React.useState<TokenMarketFdvRange | null>(null);
+  const [transactionLogRefreshStatus, setTransactionLogRefreshStatus] = React.useState<TransactionLogRefreshStatus | null>(null);
 
   const activeBaseTokenAddress =
     settings.activeBaseTokenAddress?.trim() || settings.baseTokenAddress.trim();
@@ -170,7 +172,7 @@ export default function App() {
   const marketRefreshPollInFlightRef = React.useRef(false);
   const marketSnapshotHistoryRequestRef = React.useRef(0);
   const profitPollInFlightRef = React.useRef(false);
-  const transactionLogRefreshPollTimeoutsRef = React.useRef<number[]>([]);
+  const lastTransactionLogRefreshStatusKeyRef = React.useRef<string | null>(null);
   const outsideHolderPageRef = React.useRef(outsideHolderPage);
   const outsideHolderQueryMetaRef = React.useRef<{
     signature: string;
@@ -185,6 +187,7 @@ export default function App() {
   const dateFilterReady = dateRange.from !== '' && dateRange.to !== '';
   const hasDateRange = dateFilterActive && dateFilterReady;
   const marketRefreshRunning = engineState?.marketRefreshStatus?.status === 'running';
+  const transactionLogRefreshRunning = transactionLogRefreshStatus?.status === 'running';
   const isRefreshPending = submitting === 'refresh' || marketRefreshRunning;
 
   useEffect(() => {
@@ -250,7 +253,7 @@ export default function App() {
     return status;
   }, []);
 
-  const loadState = React.useCallback(async () => {
+  const loadState = React.useCallback(async (options?: { refreshProfit?: boolean }) => {
     const state = await api<EngineState>('/api/state');
     setEngineState((current) => {
       const currentBaseTokenAddress =
@@ -272,7 +275,7 @@ export default function App() {
     syncStrategyDraftFromServer(state, { preserveDraft: true });
     setLastUpdated(new Date().toLocaleString());
 
-    if (!profitPollInFlightRef.current) {
+    if (options?.refreshProfit !== false && !profitPollInFlightRef.current) {
       profitPollInFlightRef.current = true;
       void api<{ baseTokenAddress: string; profitUsdc: number }>('/api/profit')
         .then((profit) => {
@@ -297,6 +300,32 @@ export default function App() {
     }
     return state;
   }, [syncSettingsFromServer, syncStrategyDraftFromServer]);
+
+  useEffect(() => {
+    const status = transactionLogRefreshStatus;
+    if (!status) {
+      return;
+    }
+    const statusKey = `${status.requestId ?? 'none'}:${status.status}:${status.updatedAt}`;
+    const previousKey = lastTransactionLogRefreshStatusKeyRef.current;
+    if (previousKey === statusKey) {
+      return;
+    }
+    lastTransactionLogRefreshStatusKeyRef.current = statusKey;
+    if (!previousKey || status.status === 'running') {
+      return;
+    }
+    if (status.status === 'completed') {
+      setError('');
+      setNotice(status.summaryText ?? `Transaction Log refresh completed: ${status.insertedTransactions} new transactions.`);
+      void loadState({ refreshProfit: false });
+      return;
+    }
+    if (status.status === 'failed') {
+      setNotice('');
+      setError(`Transaction Log refresh failed: ${status.errorMessage ?? 'Unknown error'}`);
+    }
+  }, [loadState, transactionLogRefreshStatus]);
 
   const loadInternalAccountPage = React.useCallback(async () => {
     if (!auth?.authenticated) {
@@ -481,13 +510,6 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  useEffect(() => () => {
-    for (const timeoutId of transactionLogRefreshPollTimeoutsRef.current) {
-      window.clearTimeout(timeoutId);
-    }
-    transactionLogRefreshPollTimeoutsRef.current = [];
-  }, []);
 
   useEffect(() => {
     if (!auth?.authenticated || activeTab !== 'dashboard' || marketRefreshRunning) {
@@ -848,31 +870,57 @@ export default function App() {
       const result = await api<{
         ok: boolean;
         accepted: boolean;
+        status: 'started' | 'running';
         contractAddress: string;
+        transactionLogRefreshStatus: TransactionLogRefreshStatus;
       }>('/api/transaction-logs/refresh', {
         method: 'POST',
       });
 
+      setTransactionLogRefreshStatus(result.transactionLogRefreshStatus);
+
       setNotice(
-        result.accepted
-          ? 'Transaction log refresh started. New records will appear automatically as reconciliation completes.'
+        result.accepted && result.status === 'running'
+          ? 'Transaction Log refresh is already running. Reading progress from the database.'
+          : result.accepted
+            ? 'Transaction Log refresh started. Reading progress from the database.'
           : 'Transaction log refresh could not be started.',
       );
-      if (result.accepted) {
-        for (const timeoutId of transactionLogRefreshPollTimeoutsRef.current) {
-          window.clearTimeout(timeoutId);
-        }
-        transactionLogRefreshPollTimeoutsRef.current = [];
-        await loadState();
-        transactionLogRefreshPollTimeoutsRef.current = [3000, 7000, 12000].map((delayMs) =>
-          window.setTimeout(() => {
-            void loadState().catch((err: unknown) => {
-              console.warn('Failed to reload transaction logs after refresh:', err);
-            });
-          }, delayMs),
-        );
-      }
     });
+
+  useEffect(() => {
+    if (!auth?.authenticated || !transactionLogRefreshRunning) {
+      return;
+    }
+    let cancelled = false;
+    let pollInFlight = false;
+    const pollStatus = async () => {
+      if (cancelled || pollInFlight || document.visibilityState !== 'visible') {
+        return;
+      }
+      pollInFlight = true;
+      try {
+        const result = await api<{
+          transactionLogRefreshStatus: TransactionLogRefreshStatus | null;
+        }>('/api/transaction-logs/refresh/status');
+        if (!cancelled) {
+          setTransactionLogRefreshStatus(result.transactionLogRefreshStatus);
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          console.warn('Failed to poll Transaction Log refresh status:', err);
+        }
+      } finally {
+        pollInFlight = false;
+      }
+    };
+    const intervalId = window.setInterval(() => void pollStatus(), 2000);
+    void pollStatus();
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [auth?.authenticated, transactionLogRefreshRunning]);
 
   useEffect(() => {
     if (!auth?.authenticated || activeTab !== 'dashboard') return;
@@ -885,6 +933,19 @@ export default function App() {
     hasDateRange,
     loadMarketSnapshotHistory,
   ]);
+
+  useEffect(() => {
+    if (!auth?.authenticated || activeTab !== 'dashboard' || !activeBaseTokenAddress) {
+      return;
+    }
+    void api<{
+      transactionLogRefreshStatus: TransactionLogRefreshStatus | null;
+    }>('/api/transaction-logs/refresh/status')
+      .then((result) => setTransactionLogRefreshStatus(result.transactionLogRefreshStatus))
+      .catch((err: unknown) => {
+        console.warn('Failed to load Transaction Log refresh status:', err);
+      });
+  }, [activeBaseTokenAddress, activeTab, auth?.authenticated]);
 
   useEffect(() => {
     if (activeTab !== 'accounts') {
@@ -1786,8 +1847,8 @@ export default function App() {
       onDashboardLogTabChange={setDashboardLogTab}
       currentTransactionLogs={currentTransactionLogs}
       onRefreshTransactionLogs={handleRefreshTransactionLogs}
-      transactionLogRefreshPending={submitting === 'transaction-log-refresh'}
-      requestLocked={requestLocked}
+      transactionLogRefreshPending={submitting === 'transaction-log-refresh' || transactionLogRefreshRunning}
+      requestLocked={requestLocked || transactionLogRefreshRunning}
       totalTransactionLogsCount={combinedTransactionLogs.length}
       filteredTransactionLogsCount={filteredTransactionLogs.length}
       transactionLogSearchTerm={transactionLogSearchTerm}

@@ -239,6 +239,20 @@ export interface MarketRefreshStatusRecord {
   updatedAt: number;
   completedAt: number | null;
 }
+export interface TransactionLogRefreshStatusRecord {
+  contractAddress: string;
+  status: MarketRefreshStatus;
+  requestId: string | null;
+  errorMessage: string | null;
+  summaryText: string | null;
+  scannedTransactions: number;
+  insertedTransactions: number;
+  holderDeltasApplied: number;
+  enrichedTransactions: number;
+  startedAt: number | null;
+  updatedAt: number;
+  completedAt: number | null;
+}
 export interface StoredSignalTransactionDetails {
   tokenContractAddress: string | null;
   fromWalletAddress: string | null;
