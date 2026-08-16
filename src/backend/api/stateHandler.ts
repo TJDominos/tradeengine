@@ -477,9 +477,9 @@ export async function handleStateRoutes(
           );
           const insertedTransactions = reconciliation.insertedSignals;
           const holderDeltasApplied = reconciliation.holderDeltasApplied;
-          const enrichedTransactions = 0;
-          const summaryText = insertedTransactions > 0
-            ? `Transaction Log refresh completed: ${insertedTransactions} new, ${holderDeltasApplied} holder updates.`
+          const enrichedTransactions = Math.max(0, reconciliation.updatedLogs - insertedTransactions);
+          const summaryText = reconciliation.updatedLogs > 0
+            ? `Transaction Log refresh completed: ${insertedTransactions} new, ${enrichedTransactions} updated, ${holderDeltasApplied} holder updates.`
             : `Transaction Log refresh completed: no missing transactions found after scanning ${reconciliation.scannedSignatures}.`;
           await dbCompleteTransactionLogRefresh(
             env.TRADINGBOT_DB,

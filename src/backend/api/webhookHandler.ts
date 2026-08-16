@@ -40,7 +40,6 @@ import {
   dbResolvePreferredSignalWalletAddress,
   dbUpsertWebhookTransactionLog,
   dbUpdateSignalTransactionDetails,
-  fetchSolanaWebhookTransactionDetailsFromRpc,
 } from '../services/signalStore';
 import { StrategyAutomationService } from '../services/strategyAutomationService';
 import { getActiveStrategy, runAndPersistStrategyEvaluation } from '../services/strategyStore';
@@ -259,11 +258,6 @@ async function handleRustNodeWebhook(
       let latestWalletAddress = payload.wallet_address;
       let latestChainTimeMs: number | null = null;
       try {
-        const rpcUrls = await dbResolveSolanaRpcUrls(
-          env.TRADINGBOT_DB,
-          activeTarget.record.config.userId,
-          env.SOLANA_RPC_URL,
-        );
         const tokenId = await dbResolveTradableTokenId(
           env.TRADINGBOT_DB,
           payload.contractAddress,
@@ -272,19 +266,9 @@ async function handleRustNodeWebhook(
           payload.payloadJson ?? JSON.stringify(payload),
           payload.contractAddress,
         );
-        const rpcResult = payload.txHash
-          ? await fetchSolanaWebhookTransactionDetailsFromRpc(
-              rpcUrls,
-              payload.txHash,
-              payload.contractAddress,
-              payloadDetails,
-            )
-          : null;
-        latestChainTimeMs = rpcResult?.chainTimeMs ?? null;
         const mergedDetails = mergeStoredSignalTransactionDetails(
           initialDetails,
           payloadDetails,
-          rpcResult?.details,
         );
         const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
           env.TRADINGBOT_DB,
@@ -970,21 +954,6 @@ async function processTokenActivitySignal(
       input.payload,
       normalizedContractAddress,
     );
-    const payloadHasCompleteTransactionDetails = !!(
-      payloadDetails.fromWalletAddress &&
-      payloadDetails.toWalletAddress &&
-      payloadDetails.action &&
-      payloadDetails.tokenAmount != null
-    );
-    const rpcResult = input.txSignature && !payloadHasCompleteTransactionDetails
-      ? await fetchSolanaWebhookTransactionDetailsFromRpc(
-          rpcUrls,
-          input.txSignature,
-          normalizedContractAddress,
-          payloadDetails,
-        )
-      : null;
-    latestChainTimeMs = rpcResult?.chainTimeMs ?? null;
     const mergedDetails = mergeStoredSignalTransactionDetails(
       {
         tokenContractAddress: normalizedContractAddress,
@@ -993,7 +962,6 @@ async function processTokenActivitySignal(
         detailSource: 'unknown',
       },
       payloadDetails,
-      rpcResult?.details,
     );
     const correctedDetails = applyAmmPoolDirectionCorrection(
       mergedDetails,

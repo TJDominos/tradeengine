@@ -140,6 +140,7 @@ export function applyAmmPoolDirectionCorrection(
 }
 
 type RpcTokenBalanceEntry = {
+  accountIndex?: number;
   owner?: string;
   mint?: string;
   uiTokenAmount?: {
@@ -174,6 +175,12 @@ type AlchemyTransactionsForAddressEntry = {
   blockTime?: number | null;
   err?: unknown;
   meta?: RpcTransactionMeta | null;
+  transaction?: {
+    signatures?: string[];
+    message?: {
+      accountKeys?: Array<string | { pubkey?: string }>;
+    };
+  } | null;
 };
 
 type AlchemyTransactionsForAddressResult = {
@@ -608,6 +615,40 @@ function rpcMetaContainsTrackedToken(
   );
 }
 
+function readAlchemyTransactionSignature(entry: AlchemyTransactionsForAddressEntry): string | null {
+  return entry.signature?.trim() || entry.transaction?.signatures?.[0]?.trim() || null;
+}
+
+function readAlchemyAccountKey(value: string | { pubkey?: string } | undefined): string | null {
+  return typeof value === 'string'
+    ? tryNormalizeSolanaPubkey(value)
+    : tryNormalizeSolanaPubkey(value?.pubkey);
+}
+
+function normalizeAlchemyRpcMeta(entry: AlchemyTransactionsForAddressEntry): RpcTransactionMeta | null {
+  const meta = entry.meta;
+  if (!meta) {
+    return entry.err == null ? null : { err: entry.err };
+  }
+  const accountKeys = entry.transaction?.message?.accountKeys ?? [];
+  const normalizeBalances = (balances: RpcTokenBalanceEntry[] | undefined) =>
+    balances?.map((balance) => ({
+      ...balance,
+      owner:
+        tryNormalizeSolanaPubkey(balance.owner) ??
+        (typeof balance.accountIndex === 'number'
+          ? readAlchemyAccountKey(accountKeys[balance.accountIndex])
+          : null) ??
+        undefined,
+    }));
+  return {
+    ...meta,
+    err: meta.err ?? entry.err,
+    preTokenBalances: normalizeBalances(meta.preTokenBalances),
+    postTokenBalances: normalizeBalances(meta.postTokenBalances),
+  };
+}
+
 async function fetchAlchemyTransactionsForAddressInWindow(
   rpcUrls: string | string[],
   address: string,
@@ -677,7 +718,9 @@ async function fetchAlchemyTransactionsForAddressInWindow(
     }
     const batch = payload.result?.data ?? [];
     for (const transaction of batch) {
-      if (!transaction.signature || !rpcMetaContainsTrackedToken(transaction.meta, trackedContractAddress)) {
+      const txSignature = readAlchemyTransactionSignature(transaction);
+      const rpcMeta = normalizeAlchemyRpcMeta(transaction);
+      if (!txSignature || !rpcMetaContainsTrackedToken(rpcMeta, trackedContractAddress)) {
         continue;
       }
       const blockTimeMs = signatureBlockTimeToMs(transaction.blockTime);
@@ -688,13 +731,11 @@ async function fetchAlchemyTransactionsForAddressInWindow(
         continue;
       }
       results.push({
-        txSignature: transaction.signature,
+        txSignature,
         scannedAddress: address,
         blockTimeMs,
         transaction: null,
-        rpcMeta: transaction.meta ?? {
-          err: transaction.err,
-        },
+        rpcMeta,
       });
     }
 
@@ -1653,6 +1694,7 @@ export async function reconcileTokenTransactionsFromRpc(
 ): Promise<{
   scannedSignatures: number;
   insertedSignals: number;
+  updatedLogs: number;
   holderDeltasApplied: number;
   duplicates: number;
   skippedIrrelevant: number;
@@ -1666,6 +1708,7 @@ export async function reconcileTokenTransactionsFromRpc(
     return {
       scannedSignatures: 0,
       insertedSignals: 0,
+      updatedLogs: 0,
       holderDeltasApplied: 0,
       duplicates: 0,
       skippedIrrelevant: 0,
@@ -1750,6 +1793,7 @@ export async function reconcileTokenTransactionsFromRpc(
     }
   }
   let insertedSignals = 0;
+  let updatedLogs = 0;
   let holderDeltasApplied = 0;
   let duplicates = 0;
   let skippedIrrelevant = 0;
@@ -1773,9 +1817,9 @@ export async function reconcileTokenTransactionsFromRpc(
       skippedIrrelevant += 1;
       continue;
     }
-    if (await dbSignalExistsForUserTxSignature(db, userId, txSignature)) {
+    const signalExists = await dbSignalExistsForUserTxSignature(db, userId, txSignature);
+    if (signalExists) {
       duplicates += 1;
-      continue;
     }
     const scannedWalletAddress = transactionCandidate.scannedAddress !== contractAddress
       ? transactionCandidate.scannedAddress
@@ -1851,28 +1895,40 @@ export async function reconcileTokenTransactionsFromRpc(
     mergedDetails.primaryWalletAddress = preferredWalletAddress;
     const source = `rpc_reconcile:refresh:user:${userId}`;
     const externalId = `${txSignature}:${contractAddress}`;
-    const createdSignal = await dbCreateSignal(db, {
-      source,
-      externalId,
-      eventType: 'rpc_reconcile:transaction',
-      walletAddress: preferredWalletAddress,
-      txSignature,
-      payload: JSON.stringify({
-        type: 'rpc_reconcile',
+    const createdSignal = signalExists
+      ? null
+      : await dbCreateSignal(db, {
+          source,
+          externalId,
+          eventType: 'rpc_reconcile:transaction',
+          walletAddress: preferredWalletAddress,
+          txSignature,
+          payload: JSON.stringify({
+            type: 'rpc_reconcile',
+            txSignature,
+            contractAddress,
+            walletAddress: scannedWalletAddress,
+            scannedAddress: transactionCandidate.scannedAddress,
+            blockTimeMs: transactionCandidate.blockTimeMs,
+            discoverySource: transactionCandidate.rpcMeta
+              ? 'alchemy_get_transactions_for_address'
+              : transactionCandidate.transaction
+                ? 'helius_enhanced'
+                : 'solana_rpc',
+          }),
+          detailsJson: JSON.stringify(mergedDetails),
+        });
+    if (createdSignal) {
+      await dbMarkSignalProcessed(db, source, externalId);
+    } else {
+      await dbUpdateSignalsByTxSignatureForUser(
+        db,
+        userId,
         txSignature,
-        contractAddress,
-        walletAddress: scannedWalletAddress,
-        scannedAddress: transactionCandidate.scannedAddress,
-        blockTimeMs: transactionCandidate.blockTimeMs,
-        discoverySource: transactionCandidate.rpcMeta
-          ? 'alchemy_get_transactions_for_address'
-          : transactionCandidate.transaction
-            ? 'helius_enhanced'
-            : 'solana_rpc',
-      }),
-      detailsJson: JSON.stringify(mergedDetails),
-    });
-    await dbMarkSignalProcessed(db, source, externalId);
+        preferredWalletAddress,
+        mergedDetails,
+      );
+    }
     await dbUpsertWebhookTransactionLog(db, {
       userId,
       tokenId,
@@ -1886,7 +1942,7 @@ export async function reconcileTokenTransactionsFromRpc(
       processed: true,
       errorMessage: null,
       chainTimeMs,
-      createdAt: createdSignal.signal.createdAt,
+      createdAt: createdSignal?.signal.createdAt ?? chainTimeMs ?? nowTs(),
       metadata: {
         updateReason: 'rpc_reconcile_insert',
         scannedAddress: transactionCandidate.scannedAddress,
@@ -1898,6 +1954,7 @@ export async function reconcileTokenTransactionsFromRpc(
         blockTimeMs: chainTimeMs,
       },
     });
+    updatedLogs += 1;
     if (tokenId) {
       const deltaApplied = await dbApplyTokenHolderTransactionDelta(
         db,
@@ -1913,11 +1970,14 @@ export async function reconcileTokenTransactionsFromRpc(
         holderDeltasApplied += 1;
       }
     }
-    insertedSignals += 1;
+    if (createdSignal?.inserted) {
+      insertedSignals += 1;
+    }
   }
   return {
     scannedSignatures: transactionPool.size,
     insertedSignals,
+    updatedLogs,
     holderDeltasApplied,
     duplicates,
     skippedIrrelevant,
