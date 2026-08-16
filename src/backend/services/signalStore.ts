@@ -1635,6 +1635,83 @@ export async function backfillTradeLogChainTimes(
   };
 }
 
+export async function backfillWebhookTransactionLogChainTimes(
+  db: D1Database,
+  rpcUrls: string | string[],
+  options?: {
+    limit?: number;
+  },
+): Promise<{
+  candidateLogs: number;
+  updatedLogs: number;
+  unresolvedLogs: number;
+}> {
+  const limit = Math.min(
+    Math.max(options?.limit ?? TRADE_LOG_CHAIN_TIME_BACKFILL_LIMIT, 1),
+    TRADE_LOG_CHAIN_TIME_BACKFILL_LIMIT,
+  );
+  const rows = await db
+    .prepare(
+      `SELECT id, tx_signature
+       FROM webhook_transaction_logs
+       WHERE tx_signature IS NOT NULL
+         AND TRIM(tx_signature) <> ''
+         AND chain_time_ms IS NULL
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?1`,
+    )
+    .bind(limit)
+    .all<{
+      id: number;
+      tx_signature: string;
+    }>();
+
+  let updatedLogs = 0;
+  let unresolvedLogs = 0;
+  for (let index = 0; index < rows.results.length; index += TRADE_LOG_CHAIN_TIME_BACKFILL_CONCURRENCY) {
+    const chunk = rows.results.slice(
+      index,
+      index + TRADE_LOG_CHAIN_TIME_BACKFILL_CONCURRENCY,
+    );
+    const chainTimes = await Promise.allSettled(
+      chunk.map(async (row) => ({
+        id: row.id,
+        chainTimeMs: await fetchSolanaTransactionChainTimeMs(rpcUrls, row.tx_signature),
+      })),
+    );
+
+    const updateStatements: D1PreparedStatement[] = [];
+    const timestamp = nowTs();
+    for (const result of chainTimes) {
+      if (result.status !== 'fulfilled' || result.value.chainTimeMs == null) {
+        unresolvedLogs += 1;
+        continue;
+      }
+      updateStatements.push(
+        db
+          .prepare(
+            `UPDATE webhook_transaction_logs
+             SET chain_time_ms = ?2,
+                 updated_at = ?3
+             WHERE id = ?1`,
+          )
+          .bind(result.value.id, result.value.chainTimeMs, timestamp),
+      );
+    }
+
+    if (updateStatements.length > 0) {
+      await db.batch(updateStatements);
+      updatedLogs += updateStatements.length;
+    }
+  }
+
+  return {
+    candidateLogs: rows.results.length,
+    updatedLogs,
+    unresolvedLogs,
+  };
+}
+
 export async function dbGetLatestBaseTokenTransactionTimeMs(
   db: D1Database,
   userId: number,

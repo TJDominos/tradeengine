@@ -38,6 +38,8 @@ import {
   dbTryStartTransactionLogRefresh,
 } from '../services/transactionLogRefreshStateService';
 import {
+  backfillTradeLogChainTimes,
+  backfillWebhookTransactionLogChainTimes,
   dbGetLatestBaseTokenTransactionTimeMs,
   reconcileTokenTransactionsFromRpc,
 } from '../services/signalStore';
@@ -54,6 +56,13 @@ const TRANSACTION_LOG_REFRESH_PRIMARY_MAX_PAGES = 5;
 type TransactionLogRecord =
   | ({ kind: 'trade' } & TradeLogRecord)
   | ({ kind: 'webhook' } & WebhookTransactionLogRecord);
+
+function normalizeMsTimestamp(timestamp: number | null | undefined): number | null {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) {
+    return null;
+  }
+  return timestamp >= 1_000_000_000_000 ? timestamp : timestamp * 1000;
+}
 
 export function buildTransactionLogs(
   tradeLogs: TradeLogRecord[],
@@ -80,8 +89,8 @@ export function buildTransactionLogs(
   }
 
   return [...logsBySignature.values(), ...unsignedLogs].sort((left, right) => {
-    const leftTime = left.chainTimeMs ?? left.createdAt;
-    const rightTime = right.chainTimeMs ?? right.createdAt;
+    const leftTime = normalizeMsTimestamp(left.chainTimeMs) ?? normalizeMsTimestamp(left.createdAt);
+    const rightTime = normalizeMsTimestamp(right.chainTimeMs) ?? normalizeMsTimestamp(right.createdAt);
     if (leftTime == null && rightTime == null) return right.id - left.id;
     if (leftTime == null) return 1;
     if (rightTime == null) return -1;
@@ -475,12 +484,20 @@ export async function handleStateRoutes(
               endTimeMs,
             },
           );
+          const tradeLogBackfill = await backfillTradeLogChainTimes(
+            env.TRADINGBOT_DB,
+            rpcUrls,
+          );
+          const webhookLogBackfill = await backfillWebhookTransactionLogChainTimes(
+            env.TRADINGBOT_DB,
+            rpcUrls,
+          );
           const insertedTransactions = reconciliation.insertedSignals;
           const holderDeltasApplied = reconciliation.holderDeltasApplied;
           const enrichedTransactions = Math.max(0, reconciliation.updatedLogs - insertedTransactions);
           const summaryText = reconciliation.updatedLogs > 0
-            ? `Transaction Log refresh completed: ${insertedTransactions} new, ${enrichedTransactions} updated, ${holderDeltasApplied} holder updates.`
-            : `Transaction Log refresh completed: no missing transactions found after scanning ${reconciliation.scannedSignatures}.`;
+            ? `Transaction Log refresh completed: ${insertedTransactions} new, ${enrichedTransactions} updated, ${holderDeltasApplied} holder updates, ${tradeLogBackfill.updatedLogs} trade timestamps repaired, ${webhookLogBackfill.updatedLogs} webhook timestamps repaired.`
+            : `Transaction Log refresh completed: no missing transactions found after scanning ${reconciliation.scannedSignatures}. Timestamp repair: ${tradeLogBackfill.updatedLogs} trade, ${webhookLogBackfill.updatedLogs} webhook.`;
           await dbCompleteTransactionLogRefresh(
             env.TRADINGBOT_DB,
             user.id,
@@ -498,6 +515,8 @@ export async function handleStateRoutes(
             userId: user.id,
             contractAddress,
             reconciliation,
+            tradeLogBackfill,
+            webhookLogBackfill,
           });
         } catch (err) {
           console.error('[transaction-log-refresh] failed', err);
