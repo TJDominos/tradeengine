@@ -1591,6 +1591,7 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
          tl.created_at,
          tl.updated_at,
          tt.base_token_address AS token_contract_address,
+         tt.amm_pool_address,
          tt.symbol
        FROM trade_logs tl
        LEFT JOIN tradable_tokens tt ON tt.id = tl.token_id
@@ -1613,26 +1614,77 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
       created_at: number;
       updated_at: number;
       token_contract_address: string | null;
+      amm_pool_address: string | null;
       symbol: string | null;
     }>();
-  return rows.results.map((row) => ({
-    id: row.id,
-    tokenId: row.token_id,
-    tokenContractAddress: row.token_contract_address,
-    tokenSymbol: row.symbol,
-    walletAddress: row.wallet_address,
-    action: row.action,
-    requestedAmount: row.requested_amount,
-    executedAmount: row.executed_amount,
-    executedPrice: row.executed_price,
-    txSignature: row.tx_signature,
-    chainTimeMs: row.chain_time_ms,
-    executionTraceJson: row.execution_trace_json,
-    status: row.status,
-    errorMessage: row.error_message,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
+  return rows.results.map((row) => {
+    const amounts = resolveTradeLogAmounts({
+      action: row.action,
+      executedAmount: row.executed_amount,
+      executedPrice: row.executed_price,
+      executionTraceJson: row.execution_trace_json,
+    });
+    return {
+      id: row.id,
+      tokenId: row.token_id,
+      tokenContractAddress: row.token_contract_address,
+      tokenSymbol: row.symbol,
+      walletAddress: row.wallet_address,
+      fromWalletAddress: row.action === 'SELL' ? row.wallet_address : row.amm_pool_address,
+      toWalletAddress: row.action === 'SELL' ? row.amm_pool_address : row.wallet_address,
+      action: row.action,
+      requestedAmount: row.requested_amount,
+      executedAmount: row.executed_amount,
+      executedPrice: row.executed_price,
+      tokenAmount: amounts.tokenAmount,
+      usdcAmount: amounts.usdcAmount,
+      txSignature: row.tx_signature,
+      chainTimeMs: row.chain_time_ms,
+      executionTraceJson: row.execution_trace_json,
+      status: row.status,
+      errorMessage: row.error_message,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  });
+}
+
+export function resolveTradeLogAmounts(input: {
+  action: 'BUY' | 'SELL';
+  executedAmount: number | null;
+  executedPrice: number | null;
+  executionTraceJson: string | null;
+}): {
+  tokenAmount: number | null;
+  usdcAmount: number | null;
+} {
+    let trace: Record<string, unknown> | null = null;
+    try {
+      const parsed = input.executionTraceJson
+        ? JSON.parse(input.executionTraceJson) as unknown
+        : null;
+      trace = parsed != null && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      trace = null;
+    }
+    const tracedTokenAmount = toFiniteNumber(trace?.baseAmount);
+    const tracedUsdcAmount = toFiniteNumber(trace?.executedVolumeUsd);
+    const fallbackTokenAmount = input.action === 'BUY'
+      ? input.executedAmount
+      : input.executedAmount != null && input.executedPrice != null && input.executedPrice > 0
+        ? input.executedAmount / input.executedPrice
+        : null;
+    const fallbackUsdcAmount = input.action === 'SELL'
+      ? input.executedAmount
+      : input.executedAmount != null && input.executedPrice != null
+        ? input.executedAmount * input.executedPrice
+        : null;
+    return {
+      tokenAmount: tracedTokenAmount ?? fallbackTokenAmount,
+      usdcAmount: tracedUsdcAmount ?? fallbackUsdcAmount,
+    };
 }
 
 export async function dbListWebhookTransactionLogs(

@@ -510,6 +510,57 @@ function compactAddressParticipant(value: unknown): Record<string, unknown> | nu
   return address ? { address } : null;
 }
 
+function buildCompactAlchemyAccountDataPayload(value: unknown): Record<string, unknown>[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const accountData = value.filter((item) => isRecord(item)).map((item) => {
+    const record = item as Record<string, unknown>;
+    const tokenBalanceChanges = Array.isArray(record.tokenBalanceChanges)
+      ? record.tokenBalanceChanges.filter((change) => isRecord(change)).map((change) => {
+          const changeRecord = change as Record<string, unknown>;
+          const rawTokenAmount = isRecord(changeRecord.rawTokenAmount)
+            ? changeRecord.rawTokenAmount
+            : null;
+          return compactDefinedRecord([
+            ['mint', readNonEmptyString(changeRecord.mint)],
+            ['tokenAddress', readNonEmptyString(changeRecord.tokenAddress)],
+            ['userAccount', readNonEmptyString(changeRecord.userAccount)],
+            ['owner', readNonEmptyString(changeRecord.owner)],
+            ['tokenAccount', readNonEmptyString(changeRecord.tokenAccount)],
+            ['amount', changeRecord.amount],
+            ['tokenAmount', changeRecord.tokenAmount],
+            ['rawTokenAmount', compactDefinedRecord([
+              ['tokenAmount', rawTokenAmount?.tokenAmount],
+              ['decimals', rawTokenAmount?.decimals],
+            ])],
+          ]);
+        })
+      : null;
+    return compactDefinedRecord([
+      ['address', readNonEmptyString(record.address)],
+      ['nativeBalanceChange', record.nativeBalanceChange],
+      ['tokenBalanceChanges', tokenBalanceChanges],
+    ]);
+  }).filter((record) => Object.keys(record).length > 0);
+  return accountData.length > 0 ? accountData : null;
+}
+
+function buildCompactAlchemyNativeTransfersPayload(value: unknown): Record<string, unknown>[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const transfers = value.filter((item) => isRecord(item)).map((item) => {
+    const record = item as Record<string, unknown>;
+    return compactDefinedRecord([
+      ['fromUserAccount', readNonEmptyString(record.fromUserAccount)],
+      ['toUserAccount', readNonEmptyString(record.toUserAccount)],
+      ['amount', record.amount],
+    ]);
+  }).filter((record) => Object.keys(record).length > 0);
+  return transfers.length > 0 ? transfers : null;
+}
+
 function extractTokenTransferContractAddresses(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -645,6 +696,8 @@ function buildCompactAlchemyActivityPayload(
     ['feeUsd', activityValue.feeUsd],
     ['feeUSD', activityValue.feeUSD],
     ['tokenTransfers', tokenTransfers],
+    ['accountData', buildCompactAlchemyAccountDataPayload(activityValue.accountData)],
+    ['nativeTransfers', buildCompactAlchemyNativeTransfersPayload(activityValue.nativeTransfers)],
     [
       'rawContract',
       compactDefinedRecord([
@@ -917,7 +970,13 @@ async function processTokenActivitySignal(
       input.payload,
       normalizedContractAddress,
     );
-    const rpcResult = input.txSignature
+    const payloadHasCompleteTransactionDetails = !!(
+      payloadDetails.fromWalletAddress &&
+      payloadDetails.toWalletAddress &&
+      payloadDetails.action &&
+      payloadDetails.tokenAmount != null
+    );
+    const rpcResult = input.txSignature && !payloadHasCompleteTransactionDetails
       ? await fetchSolanaWebhookTransactionDetailsFromRpc(
           rpcUrls,
           input.txSignature,

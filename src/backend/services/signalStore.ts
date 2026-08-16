@@ -14,6 +14,7 @@ import type {
 import { parseJsonText } from '../workerSchema';
 import {
   extractStoredSignalContractAddresses,
+  isAlchemyRpcUrl,
   mergeStoredSignalTransactionDetails,
   parseStoredSignalTransactionDetails,
   solanaRpc,
@@ -158,6 +159,43 @@ type RpcTransactionMeta = {
 type RpcWebhookTransactionDetailsResult = {
   details: Partial<StoredSignalTransactionDetails>;
   chainTimeMs: number | null;
+};
+
+type EnhancedTransactionCandidate = {
+  txSignature: string;
+  scannedAddress: string;
+  blockTimeMs: number | null;
+  transaction: HeliusEnhancedTransaction | null;
+  rpcMeta?: RpcTransactionMeta | null;
+};
+
+type AlchemyTransactionsForAddressEntry = {
+  signature?: string;
+  blockTime?: number | null;
+  err?: unknown;
+  meta?: RpcTransactionMeta | null;
+};
+
+type AlchemyTransactionsForAddressResult = {
+  data?: AlchemyTransactionsForAddressEntry[];
+  paginationToken?: string | null;
+};
+
+type HeliusEnhancedTokenTransfer = {
+  fromUserAccount?: string | null;
+  toUserAccount?: string | null;
+  fromTokenAccount?: string | null;
+  toTokenAccount?: string | null;
+  mint?: string | null;
+  tokenAmount?: number | string | null;
+};
+
+type HeliusEnhancedTransaction = {
+  signature?: string;
+  timestamp?: number | null;
+  fee?: number | null;
+  transactionError?: unknown;
+  tokenTransfers?: HeliusEnhancedTokenTransfer[];
 };
 
 type PersistedWebhookTransactionLogRow = {
@@ -527,6 +565,401 @@ function readRpcUiTokenAmount(balance: RpcTokenBalanceEntry): number | null {
   return null;
 }
 
+function resolveEnrichedSignalSource(
+  payloadDetails: Partial<StoredSignalTransactionDetails>,
+): 'webhook' | 'rpc_reconcile' {
+  return payloadDetails.source === 'rpc_reconcile' ? 'rpc_reconcile' : 'webhook';
+}
+
+function readHeliusTokenTransferAmount(transfer: HeliusEnhancedTokenTransfer): number | null {
+  const amount = typeof transfer.tokenAmount === 'number'
+    ? transfer.tokenAmount
+    : typeof transfer.tokenAmount === 'string'
+      ? Number.parseFloat(transfer.tokenAmount)
+      : null;
+  return amount != null && Number.isFinite(amount) ? amount : null;
+}
+
+function extractHeliusApiKeyFromRpcUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value.trim());
+    if (!parsed.hostname.toLowerCase().includes('helius')) {
+      return null;
+    }
+    const apiKey = parsed.searchParams.get('api-key')?.trim();
+    return apiKey || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveAlchemyRpcUrl(rpcUrls: string | string[]): string | null {
+  return (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls])
+    .map((rpcUrl) => rpcUrl.trim())
+    .find((rpcUrl) => rpcUrl && isAlchemyRpcUrl(rpcUrl)) ?? null;
+}
+
+function rpcMetaContainsTrackedToken(
+  meta: RpcTransactionMeta | null | undefined,
+  trackedContractAddress: string,
+): boolean {
+  return [...(meta?.preTokenBalances ?? []), ...(meta?.postTokenBalances ?? [])].some(
+    (balance) => tryNormalizeSolanaPubkey(balance.mint) === trackedContractAddress,
+  );
+}
+
+async function fetchAlchemyTransactionsForAddressInWindow(
+  rpcUrls: string | string[],
+  address: string,
+  trackedContractAddress: string,
+  options?: {
+    pageSize?: number;
+    maxPages?: number;
+    startTimeMs?: number | null;
+    endTimeMs?: number | null;
+  },
+): Promise<EnhancedTransactionCandidate[] | null> {
+  const endpoint = resolveAlchemyRpcUrl(rpcUrls);
+  if (!endpoint) {
+    return null;
+  }
+
+  const pageSize = Math.min(Math.max(options?.pageSize ?? 100, 1), 100);
+  const maxPages = options?.maxPages ?? 10;
+  const startTimeSec = options?.startTimeMs != null ? Math.floor(options.startTimeMs / 1000) : null;
+  const endTimeSec = options?.endTimeMs != null ? Math.ceil(options.endTimeMs / 1000) : null;
+  const results: EnhancedTransactionCandidate[] = [];
+  let paginationToken: string | null = null;
+  for (let page = 0; page < maxPages; page += 1) {
+    const filters: Record<string, unknown> = {
+      status: 'succeeded',
+      tokenAccounts: 'balanceChanged',
+    };
+    if (startTimeSec != null || endTimeSec != null) {
+      filters.blockTime = {
+        ...(startTimeSec != null ? { gte: startTimeSec } : {}),
+        ...(endTimeSec != null ? { lte: endTimeSec } : {}),
+      };
+    }
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getTransactionsForAddress',
+        params: [
+          address,
+          {
+            transactionDetails: 'full',
+            sortOrder: 'desc',
+            limit: pageSize,
+            commitment: 'confirmed',
+            encoding: 'jsonParsed',
+            maxSupportedTransactionVersion: 0,
+            ...(paginationToken ? { paginationToken } : {}),
+            filters,
+          },
+        ],
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Alchemy getTransactionsForAddress request failed: ${response.status}`);
+    }
+
+    const payload = await response.json<{
+      result?: AlchemyTransactionsForAddressResult;
+      error?: { message?: string };
+    }>();
+    if (payload.error) {
+      throw new Error(payload.error.message ?? 'Alchemy getTransactionsForAddress returned an error');
+    }
+    const batch = payload.result?.data ?? [];
+    for (const transaction of batch) {
+      if (!transaction.signature || !rpcMetaContainsTrackedToken(transaction.meta, trackedContractAddress)) {
+        continue;
+      }
+      const blockTimeMs = signatureBlockTimeToMs(transaction.blockTime);
+      if (options?.startTimeMs != null && blockTimeMs != null && blockTimeMs < options.startTimeMs) {
+        continue;
+      }
+      if (options?.endTimeMs != null && blockTimeMs != null && blockTimeMs > options.endTimeMs) {
+        continue;
+      }
+      results.push({
+        txSignature: transaction.signature,
+        scannedAddress: address,
+        blockTimeMs,
+        transaction: null,
+        rpcMeta: transaction.meta ?? {
+          err: transaction.err,
+        },
+      });
+    }
+
+    paginationToken = payload.result?.paginationToken ?? null;
+    if (!paginationToken || batch.length === 0) {
+      break;
+    }
+  }
+
+  return results;
+}
+
+function resolveHeliusEnhancedTransactionsUrl(rpcUrls: string | string[]): string | null {
+  const apiKey = (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls])
+    .map((rpcUrl) => extractHeliusApiKeyFromRpcUrl(rpcUrl))
+    .find((value): value is string => !!value);
+  return apiKey
+    ? `https://api.helius.xyz/v0/transactions/?api-key=${encodeURIComponent(apiKey)}`
+    : null;
+}
+
+function resolveHeliusEnhancedAddressTransactionsUrl(
+  rpcUrls: string | string[],
+  address: string,
+): string | null {
+  const apiKey = (Array.isArray(rpcUrls) ? rpcUrls : [rpcUrls])
+    .map((rpcUrl) => extractHeliusApiKeyFromRpcUrl(rpcUrl))
+    .find((value): value is string => !!value);
+  return apiKey
+    ? `https://api.helius.xyz/v0/addresses/${encodeURIComponent(address)}/transactions?api-key=${encodeURIComponent(apiKey)}`
+    : null;
+}
+
+function heliusTransactionContainsTrackedToken(
+  transaction: HeliusEnhancedTransaction,
+  trackedContractAddress: string,
+): boolean {
+  return (transaction.tokenTransfers ?? []).some(
+    (transfer) => tryNormalizeSolanaPubkey(transfer.mint) === trackedContractAddress,
+  );
+}
+
+async function fetchHeliusEnhancedTransactionsForAddressInWindow(
+  rpcUrls: string | string[],
+  address: string,
+  trackedContractAddress: string,
+  options?: {
+    pageSize?: number;
+    maxPages?: number;
+    startTimeMs?: number | null;
+    endTimeMs?: number | null;
+  },
+): Promise<EnhancedTransactionCandidate[] | null> {
+  const endpoint = resolveHeliusEnhancedAddressTransactionsUrl(rpcUrls, address);
+  if (!endpoint) {
+    return null;
+  }
+
+  const pageSize = Math.min(Math.max(options?.pageSize ?? 100, 1), 100);
+  const maxPages = options?.maxPages ?? 10;
+  const startTimeSec = options?.startTimeMs != null ? Math.floor(options.startTimeMs / 1000) : null;
+  const endTimeSec = options?.endTimeMs != null ? Math.ceil(options.endTimeMs / 1000) : null;
+  const results: EnhancedTransactionCandidate[] = [];
+  let beforeSignature: string | null = null;
+  for (let page = 0; page < maxPages; page += 1) {
+    const url = new URL(endpoint);
+    url.searchParams.set('limit', String(pageSize));
+    url.searchParams.set('commitment', 'confirmed');
+    url.searchParams.set('token-accounts', 'balanceChanged');
+    url.searchParams.set('sort-order', 'desc');
+    if (beforeSignature) {
+      url.searchParams.set('before-signature', beforeSignature);
+    }
+    if (startTimeSec != null) {
+      url.searchParams.set('gte-time', String(startTimeSec));
+    }
+    if (endTimeSec != null) {
+      url.searchParams.set('lte-time', String(endTimeSec));
+    }
+
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      throw new Error(`Helius enhanced address transaction request failed: ${response.status}`);
+    }
+    const batch = await response.json<unknown>();
+    if (!Array.isArray(batch) || batch.length === 0) {
+      break;
+    }
+
+    for (const item of batch) {
+      if (item == null || typeof item !== 'object' || Array.isArray(item)) {
+        continue;
+      }
+      const transaction = item as HeliusEnhancedTransaction;
+      if (!transaction.signature || !heliusTransactionContainsTrackedToken(transaction, trackedContractAddress)) {
+        continue;
+      }
+      const blockTimeMs = signatureBlockTimeToMs(transaction.timestamp);
+      if (options?.startTimeMs != null && blockTimeMs != null && blockTimeMs < options.startTimeMs) {
+        continue;
+      }
+      if (options?.endTimeMs != null && blockTimeMs != null && blockTimeMs > options.endTimeMs) {
+        continue;
+      }
+      results.push({
+        txSignature: transaction.signature,
+        scannedAddress: address,
+        blockTimeMs,
+        transaction,
+      });
+    }
+
+    const lastTransaction = batch[batch.length - 1] as HeliusEnhancedTransaction | undefined;
+    beforeSignature = typeof lastTransaction?.signature === 'string'
+      ? lastTransaction.signature
+      : null;
+    if (!beforeSignature) {
+      break;
+    }
+  }
+
+  return results;
+}
+
+async function fetchHeliusEnhancedTransaction(
+  rpcUrls: string | string[],
+  txSignature: string,
+): Promise<HeliusEnhancedTransaction | null> {
+  const endpoint = resolveHeliusEnhancedTransactionsUrl(rpcUrls);
+  if (!endpoint) {
+    return null;
+  }
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transactions: [txSignature] }),
+  });
+  if (!response.ok) {
+    throw new Error(`Helius enhanced transaction request failed: ${response.status}`);
+  }
+
+  const result = await response.json<unknown>();
+  if (!Array.isArray(result)) {
+    return null;
+  }
+  const transaction = result.find((item): item is HeliusEnhancedTransaction => {
+    if (item == null || typeof item !== 'object' || Array.isArray(item)) {
+      return false;
+    }
+    const candidate = item as HeliusEnhancedTransaction;
+    return !candidate.signature || candidate.signature === txSignature;
+  });
+  return transaction ?? null;
+}
+
+function buildHeliusSignalDetailsFromEnhancedTransaction(
+  transaction: HeliusEnhancedTransaction,
+  trackedContractAddress: string,
+  payloadDetails: Partial<StoredSignalTransactionDetails>,
+  solPriceUsd: number | null,
+): Partial<StoredSignalTransactionDetails> {
+  const deltaByOwner = new Map<string, { tracked: number; usdc: number }>();
+  for (const transfer of transaction.tokenTransfers ?? []) {
+    const mint = tryNormalizeSolanaPubkey(transfer.mint);
+    const amount = readHeliusTokenTransferAmount(transfer);
+    if (!mint || amount == null || amount <= 0) {
+      continue;
+    }
+
+    const fromOwner = tryNormalizeSolanaPubkey(transfer.fromUserAccount) ??
+      tryNormalizeSolanaPubkey(transfer.fromTokenAccount);
+    const toOwner = tryNormalizeSolanaPubkey(transfer.toUserAccount) ??
+      tryNormalizeSolanaPubkey(transfer.toTokenAccount);
+    const trackedDelta = mint === trackedContractAddress ? amount : 0;
+    const usdcDelta = mint === SOLANA_USDC_MINT ? amount : 0;
+    if (trackedDelta === 0 && usdcDelta === 0) {
+      continue;
+    }
+    if (fromOwner) {
+      const current = deltaByOwner.get(fromOwner) ?? { tracked: 0, usdc: 0 };
+      current.tracked -= trackedDelta;
+      current.usdc -= usdcDelta;
+      deltaByOwner.set(fromOwner, current);
+    }
+    if (toOwner) {
+      const current = deltaByOwner.get(toOwner) ?? { tracked: 0, usdc: 0 };
+      current.tracked += trackedDelta;
+      current.usdc += usdcDelta;
+      deltaByOwner.set(toOwner, current);
+    }
+  }
+
+  const payloadPrimaryWalletAddress = tryNormalizeSolanaPubkey(payloadDetails.primaryWalletAddress);
+  const payloadFromWalletAddress = tryNormalizeSolanaPubkey(payloadDetails.fromWalletAddress);
+  const payloadToWalletAddress = tryNormalizeSolanaPubkey(payloadDetails.toWalletAddress);
+  const traderCandidates = uniqueSolanaPubkeys([
+    payloadPrimaryWalletAddress,
+    payloadToWalletAddress,
+    payloadFromWalletAddress,
+  ]);
+  let focusWallet: string | null = null;
+  let focusDelta: { tracked: number; usdc: number } | null = null;
+  for (const wallet of traderCandidates) {
+    const delta = deltaByOwner.get(wallet);
+    if (delta && delta.tracked !== 0) {
+      focusWallet = wallet;
+      focusDelta = delta;
+      break;
+    }
+  }
+  if (!focusWallet) {
+    const swapParties = [...deltaByOwner.entries()].filter(
+      ([, delta]) =>
+        delta.tracked !== 0 &&
+        ((delta.tracked > 0 && delta.usdc < 0) ||
+          (delta.tracked < 0 && delta.usdc > 0)),
+    );
+    if (swapParties.length === 1) {
+      focusWallet = swapParties[0][0];
+      focusDelta = swapParties[0][1];
+    }
+  }
+
+  const trackedPositiveEntries = [...deltaByOwner.entries()].filter(([, delta]) => delta.tracked > 0);
+  const trackedNegativeEntries = [...deltaByOwner.entries()].filter(([, delta]) => delta.tracked < 0);
+  const inferredFromWalletAddress = trackedNegativeEntries[0]?.[0] ?? null;
+  const inferredToWalletAddress = trackedPositiveEntries[0]?.[0] ?? null;
+  const inferredTrackedTransferAmount = focusDelta && focusDelta.tracked !== 0
+    ? Math.abs(focusDelta.tracked)
+    : trackedPositiveEntries.length === 1 && trackedNegativeEntries.length === 1
+      ? Math.max(
+          Math.abs(trackedPositiveEntries[0][1].tracked),
+          Math.abs(trackedNegativeEntries[0][1].tracked),
+        )
+      : null;
+  const action: 'BUY' | 'SELL' | 'TRANSFER' | null = focusDelta && focusDelta.tracked > 0
+    ? 'BUY'
+    : focusDelta && focusDelta.tracked < 0
+      ? 'SELL'
+      : inferredTrackedTransferAmount != null && inferredFromWalletAddress && inferredToWalletAddress
+        ? 'TRANSFER'
+        : null;
+
+  return {
+    tokenContractAddress: trackedContractAddress,
+    fromWalletAddress:
+      (action === 'SELL' ? focusWallet : null) ?? inferredFromWalletAddress ?? payloadFromWalletAddress ?? null,
+    toWalletAddress:
+      (action === 'BUY' ? focusWallet : null) ?? inferredToWalletAddress ?? payloadToWalletAddress ?? null,
+    primaryWalletAddress:
+      focusWallet ?? payloadPrimaryWalletAddress ?? inferredFromWalletAddress ?? inferredToWalletAddress ?? null,
+    action,
+    usdcAmount: focusDelta && focusDelta.usdc !== 0 ? Math.abs(focusDelta.usdc) : null,
+    tokenAmount: inferredTrackedTransferAmount,
+    source: resolveEnrichedSignalSource(payloadDetails),
+    transactionStatus: transaction.transactionError ? 'FAILED' : 'CONFIRMED',
+    detailSource: 'rpc',
+    feeAmountUsd:
+      typeof transaction.fee === 'number' && solPriceUsd != null
+        ? (transaction.fee / 1_000_000_000) * solPriceUsd
+        : null,
+  };
+}
+
 export function buildRpcSignalDetailsFromTransactionMeta(
   meta: RpcTransactionMeta | null | undefined,
   trackedContractAddress: string,
@@ -655,7 +1088,7 @@ export function buildRpcSignalDetailsFromTransactionMeta(
     action,
     usdcAmount: focusDelta && focusDelta.usdc !== 0 ? Math.abs(focusDelta.usdc) : null,
     tokenAmount: inferredTrackedTransferAmount,
-    source: 'rpc_reconcile',
+    source: resolveEnrichedSignalSource(payloadDetails),
     transactionStatus: meta?.err ? 'FAILED' : 'CONFIRMED',
     detailSource: 'rpc',
     feeAmountUsd:
@@ -882,6 +1315,7 @@ export async function reconcileWebhookTransactionDetailsInWindow(
   expectedTransactions: number;
   completeTransactionsBefore: number;
   enrichedTransactions: number;
+  holderDeltasApplied: number;
   completeTransactionsAfter: number;
 }> {
   const tokenId = await dbResolveTradableTokenId(db, contractAddress);
@@ -899,6 +1333,7 @@ export async function reconcileWebhookTransactionDetailsInWindow(
     ? await loadSignalSolPriceUsd()
     : null;
   let enrichedTransactions = 0;
+  let holderDeltasApplied = 0;
   for (const group of groupsToReconcile) {
     const rpcResult = await fetchSolanaWebhookTransactionDetailsFromRpc(
       rpcUrls,
@@ -956,6 +1391,21 @@ export async function reconcileWebhookTransactionDetailsInWindow(
         chainTimeMs,
       },
     });
+    if (tokenId) {
+      const deltaApplied = await dbApplyTokenHolderTransactionDelta(
+        db,
+        userId,
+        tokenId,
+        group.txSignature!,
+        correctedDetails,
+      ).catch((err) => {
+        console.warn(`Failed to apply token holder delta for reconciled transaction ${group.txSignature}:`, err);
+        return false;
+      });
+      if (deltaApplied) {
+        holderDeltasApplied += 1;
+      }
+    }
     const detailsChanged =
       JSON.stringify(group.mergedDetails) !== JSON.stringify(correctedDetails) ||
       preferredWalletAddress !== (group.rows[0]?.wallet_address ?? null);
@@ -974,6 +1424,7 @@ export async function reconcileWebhookTransactionDetailsInWindow(
     expectedTransactions: groups.length,
     completeTransactionsBefore: groups.filter((group) => isWebhookTransactionDetailsComplete(group.mergedDetails)).length,
     enrichedTransactions,
+    holderDeltasApplied,
     completeTransactionsAfter: finalGroups.filter((group) => isWebhookTransactionDetailsComplete(group.mergedDetails)).length,
   };
 }
@@ -1038,6 +1489,7 @@ async function fetchSolanaSignaturesForAddressInWindow(
   }
   return results;
 }
+
 function signatureBlockTimeToMs(blockTime: number | null | undefined): number | null {
   if (typeof blockTime !== 'number' || !Number.isFinite(blockTime) || blockTime <= 0) {
     return null;
@@ -1139,6 +1591,52 @@ export async function backfillTradeLogChainTimes(
     unresolvedLogs,
   };
 }
+
+export async function dbGetLatestBaseTokenTransactionTimeMs(
+  db: D1Database,
+  userId: number,
+  contractAddress: string,
+): Promise<number | null> {
+  const row = await db
+    .prepare(
+      `SELECT MAX(timestamp_ms) AS latest_transaction_time_ms
+       FROM (
+         SELECT CASE
+                  WHEN chain_time_ms IS NOT NULL THEN chain_time_ms
+                  WHEN created_at >= 1000000000000 THEN created_at
+                  ELSE created_at * 1000
+                END AS timestamp_ms
+         FROM webhook_transaction_logs
+         WHERE user_id = ?1
+           AND token_contract_address = ?2
+           AND tx_signature IS NOT NULL
+           AND TRIM(tx_signature) <> ''
+           AND status = 'CONFIRMED'
+         UNION ALL
+         SELECT CASE
+                  WHEN tl.chain_time_ms IS NOT NULL THEN tl.chain_time_ms
+                  WHEN tl.created_at >= 1000000000000 THEN tl.created_at
+                  ELSE tl.created_at * 1000
+                END AS timestamp_ms
+         FROM trade_logs tl
+         INNER JOIN tradable_tokens tt ON tt.id = tl.token_id
+         INNER JOIN accounts a
+           ON a.user_id = ?1
+          AND a.wallet_address = tl.wallet_address
+         WHERE tt.base_token_address = ?2
+           AND tl.tx_signature IS NOT NULL
+           AND TRIM(tl.tx_signature) <> ''
+           AND tl.status = 'SUCCESS'
+       )`,
+    )
+    .bind(userId, contractAddress)
+    .first<{ latest_transaction_time_ms: number | null }>();
+  const timestamp = row?.latest_transaction_time_ms;
+  return typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0
+    ? timestamp
+    : null;
+}
+
 export async function reconcileTokenTransactionsFromRpc(
   db: D1Database,
   userId: number,
@@ -1153,6 +1651,7 @@ export async function reconcileTokenTransactionsFromRpc(
 ): Promise<{
   scannedSignatures: number;
   insertedSignals: number;
+  holderDeltasApplied: number;
   duplicates: number;
   skippedIrrelevant: number;
 }> {
@@ -1165,15 +1664,18 @@ export async function reconcileTokenTransactionsFromRpc(
     return {
       scannedSignatures: 0,
       insertedSignals: 0,
+      holderDeltasApplied: 0,
       duplicates: 0,
       skippedIrrelevant: 0,
     };
   }
 
-  const signaturePool = new Map<string, { address: string; blockTimeMs: number | null }>();
+  const transactionPool = new Map<string, EnhancedTransactionCandidate>();
+  let usedProviderDiscovery = false;
   try {
-    const signatures = await fetchSolanaSignaturesForAddressInWindow(
+    const alchemyTransactions = await fetchAlchemyTransactionsForAddressInWindow(
       rpcUrls,
+      contractAddress,
       contractAddress,
       {
         pageSize: perAddressLimit,
@@ -1182,35 +1684,89 @@ export async function reconcileTokenTransactionsFromRpc(
         endTimeMs: options?.endTimeMs,
       },
     );
-    for (const entry of signatures) {
-      if (!entry.signature || signaturePool.has(entry.signature)) continue;
-      signaturePool.set(entry.signature, {
-        address: contractAddress,
-        blockTimeMs: signatureBlockTimeToMs(entry.blockTime),
-      });
+    if (alchemyTransactions) {
+      usedProviderDiscovery = true;
+      for (const transaction of alchemyTransactions) {
+        if (!transactionPool.has(transaction.txSignature)) {
+          transactionPool.set(transaction.txSignature, transaction);
+        }
+      }
     }
   } catch (err: unknown) {
-    console.warn(`Failed to fetch signatures for ${contractAddress}:`, err);
+    console.warn(`Failed to fetch Alchemy transactions for mint ${contractAddress}:`, err);
+  }
+
+  try {
+    if (!usedProviderDiscovery) {
+      const enhancedTransactions = await fetchHeliusEnhancedTransactionsForAddressInWindow(
+        rpcUrls,
+        contractAddress,
+        contractAddress,
+        {
+          pageSize: perAddressLimit,
+          maxPages: perAddressMaxPages,
+          startTimeMs: options?.startTimeMs,
+          endTimeMs: options?.endTimeMs,
+        },
+      );
+      if (enhancedTransactions) {
+        usedProviderDiscovery = true;
+        for (const transaction of enhancedTransactions) {
+          if (!transactionPool.has(transaction.txSignature)) {
+            transactionPool.set(transaction.txSignature, transaction);
+          }
+        }
+      }
+    }
+  } catch (err: unknown) {
+    console.warn(`Failed to fetch Helius enhanced transactions for mint ${contractAddress}:`, err);
+  }
+
+  if (!usedProviderDiscovery) {
+    try {
+      const signatures = await fetchSolanaSignaturesForAddressInWindow(
+        rpcUrls,
+        contractAddress,
+        {
+          pageSize: perAddressLimit,
+          maxPages: perAddressMaxPages,
+          startTimeMs: options?.startTimeMs,
+          endTimeMs: options?.endTimeMs,
+        },
+      );
+      for (const entry of signatures) {
+        if (!entry.signature || transactionPool.has(entry.signature)) continue;
+        transactionPool.set(entry.signature, {
+          txSignature: entry.signature,
+          scannedAddress: contractAddress,
+          blockTimeMs: signatureBlockTimeToMs(entry.blockTime),
+          transaction: null,
+        });
+      }
+    } catch (err: unknown) {
+      console.warn(`Failed to fetch signatures for mint ${contractAddress}:`, err);
+    }
   }
   let insertedSignals = 0;
+  let holderDeltasApplied = 0;
   let duplicates = 0;
   let skippedIrrelevant = 0;
-  const solPriceUsd = signaturePool.size > 0
+  const solPriceUsd = transactionPool.size > 0
     ? await loadSignalSolPriceUsd()
     : null;
-  for (const [txSignature, signatureMeta] of signaturePool.entries()) {
+  for (const [txSignature, transactionCandidate] of transactionPool.entries()) {
     if (
-      signatureMeta.blockTimeMs != null &&
+      transactionCandidate.blockTimeMs != null &&
       options?.startTimeMs != null &&
-      signatureMeta.blockTimeMs < options.startTimeMs
+      transactionCandidate.blockTimeMs < options.startTimeMs
     ) {
       skippedIrrelevant += 1;
       continue;
     }
     if (
-      signatureMeta.blockTimeMs != null &&
+      transactionCandidate.blockTimeMs != null &&
       options?.endTimeMs != null &&
-      signatureMeta.blockTimeMs > options.endTimeMs
+      transactionCandidate.blockTimeMs > options.endTimeMs
     ) {
       skippedIrrelevant += 1;
       continue;
@@ -1219,19 +1775,46 @@ export async function reconcileTokenTransactionsFromRpc(
       duplicates += 1;
       continue;
     }
-    const scannedWalletAddress = signatureMeta.address !== contractAddress
-      ? signatureMeta.address
+    const scannedWalletAddress = transactionCandidate.scannedAddress !== contractAddress
+      ? transactionCandidate.scannedAddress
       : null;
-    const rpcResult = await fetchSolanaWebhookTransactionDetailsFromRpc(
-      rpcUrls,
-      txSignature,
-      contractAddress,
-      {
-        primaryWalletAddress: scannedWalletAddress,
-      },
-      solPriceUsd,
-    );
-    const chainTimeMs = rpcResult.chainTimeMs ?? signatureMeta.blockTimeMs ?? null;
+    const rpcResult = transactionCandidate.transaction
+      ? {
+          chainTimeMs: transactionCandidate.blockTimeMs,
+          details: buildHeliusSignalDetailsFromEnhancedTransaction(
+            transactionCandidate.transaction,
+            contractAddress,
+            {
+              primaryWalletAddress: scannedWalletAddress,
+              source: 'rpc_reconcile',
+            },
+            solPriceUsd,
+          ),
+        }
+      : transactionCandidate.rpcMeta
+        ? {
+            chainTimeMs: transactionCandidate.blockTimeMs,
+            details: buildRpcSignalDetailsFromTransactionMeta(
+              transactionCandidate.rpcMeta,
+              contractAddress,
+              {
+                primaryWalletAddress: scannedWalletAddress,
+                source: 'rpc_reconcile',
+              },
+              solPriceUsd,
+            ),
+          }
+      : await fetchSolanaWebhookTransactionDetailsFromRpc(
+          rpcUrls,
+          txSignature,
+          contractAddress,
+          {
+            primaryWalletAddress: scannedWalletAddress,
+            source: 'rpc_reconcile',
+          },
+          solPriceUsd,
+        );
+    const chainTimeMs = rpcResult.chainTimeMs ?? transactionCandidate.blockTimeMs ?? null;
     const mergedDetails = applyAmmPoolDirectionCorrection(
       mergeStoredSignalTransactionDetails(
         {
@@ -1277,8 +1860,13 @@ export async function reconcileTokenTransactionsFromRpc(
         txSignature,
         contractAddress,
         walletAddress: scannedWalletAddress,
-        scannedAddress: signatureMeta.address,
-        blockTimeMs: signatureMeta.blockTimeMs,
+        scannedAddress: transactionCandidate.scannedAddress,
+        blockTimeMs: transactionCandidate.blockTimeMs,
+        discoverySource: transactionCandidate.rpcMeta
+          ? 'alchemy_get_transactions_for_address'
+          : transactionCandidate.transaction
+            ? 'helius_enhanced'
+            : 'solana_rpc',
       }),
       detailsJson: JSON.stringify(mergedDetails),
     });
@@ -1299,15 +1887,36 @@ export async function reconcileTokenTransactionsFromRpc(
       createdAt: createdSignal.signal.createdAt,
       metadata: {
         updateReason: 'rpc_reconcile_insert',
-        scannedAddress: signatureMeta.address,
+        scannedAddress: transactionCandidate.scannedAddress,
+        discoverySource: transactionCandidate.rpcMeta
+          ? 'alchemy_get_transactions_for_address'
+          : transactionCandidate.transaction
+            ? 'helius_enhanced'
+            : 'solana_rpc',
         blockTimeMs: chainTimeMs,
       },
     });
+    if (tokenId) {
+      const deltaApplied = await dbApplyTokenHolderTransactionDelta(
+        db,
+        userId,
+        tokenId,
+        txSignature,
+        mergedDetails,
+      ).catch((err) => {
+        console.warn(`Failed to apply token holder delta for RPC transaction ${txSignature}:`, err);
+        return false;
+      });
+      if (deltaApplied) {
+        holderDeltasApplied += 1;
+      }
+    }
     insertedSignals += 1;
   }
   return {
-    scannedSignatures: signaturePool.size,
+    scannedSignatures: transactionPool.size,
     insertedSignals,
+    holderDeltasApplied,
     duplicates,
     skippedIrrelevant,
   };
@@ -1610,6 +2219,34 @@ export async function fetchSolanaWebhookTransactionDetailsFromRpc(
     const resolvedSolPriceUsd = solPriceUsd === undefined
       ? await loadSignalSolPriceUsd()
       : solPriceUsd;
+    const heliusTransaction = await fetchHeliusEnhancedTransaction(
+      rpcUrls,
+      txSignature,
+    ).catch((err: unknown) => {
+      console.warn(`Failed to enrich webhook transaction ${txSignature} from Helius enhanced API:`, err);
+      return null;
+    });
+    if (heliusTransaction) {
+      const heliusDetails = buildHeliusSignalDetailsFromEnhancedTransaction(
+        heliusTransaction,
+        trackedContractAddress,
+        payloadDetails,
+        resolvedSolPriceUsd,
+      );
+      const hasTrackedTokenDetails =
+        heliusDetails.action != null ||
+        heliusDetails.tokenAmount != null ||
+        heliusDetails.usdcAmount != null;
+      if (!hasTrackedTokenDetails) {
+        console.warn(`Helius enhanced transaction ${txSignature} did not include tracked token details; falling back to Solana RPC.`);
+      } else {
+        return {
+          chainTimeMs: signatureBlockTimeToMs(heliusTransaction.timestamp),
+          details: heliusDetails,
+        };
+      }
+    }
+
     const transaction = await solanaRpc<{
       meta?: RpcTransactionMeta;
       blockTime?: number | null;
@@ -1633,7 +2270,7 @@ export async function fetchSolanaWebhookTransactionDetailsFromRpc(
       details: {
         tokenContractAddress: trackedContractAddress,
         feeAmountUsd: null,
-        source: 'rpc_reconcile',
+        source: resolveEnrichedSignalSource(payloadDetails),
         transactionStatus: 'PENDING',
         detailSource: 'unknown',
       },

@@ -64,10 +64,14 @@ export type TradeLog = {
   tokenContractAddress: string | null;
   tokenSymbol: string | null;
   walletAddress: string;
+  fromWalletAddress: string | null;
+  toWalletAddress: string | null;
   action: 'BUY' | 'SELL';
   requestedAmount: number;
   executedAmount: number | null;
   executedPrice: number | null;
+  tokenAmount: number | null;
+  usdcAmount: number | null;
   txSignature: string | null;
   chainTimeMs: number | null;
   executionTraceJson?: string | null;

@@ -170,6 +170,7 @@ export default function App() {
   const marketRefreshPollInFlightRef = React.useRef(false);
   const marketSnapshotHistoryRequestRef = React.useRef(0);
   const profitPollInFlightRef = React.useRef(false);
+  const transactionLogRefreshPollTimeoutsRef = React.useRef<number[]>([]);
   const outsideHolderPageRef = React.useRef(outsideHolderPage);
   const outsideHolderQueryMetaRef = React.useRef<{
     signature: string;
@@ -480,6 +481,13 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => () => {
+    for (const timeoutId of transactionLogRefreshPollTimeoutsRef.current) {
+      window.clearTimeout(timeoutId);
+    }
+    transactionLogRefreshPollTimeoutsRef.current = [];
+  }, []);
 
   useEffect(() => {
     if (!auth?.authenticated || activeTab !== 'dashboard' || marketRefreshRunning) {
@@ -837,14 +845,11 @@ export default function App() {
         return;
       }
 
-      const refreshQuery = dateFilterReady
-        ? `?startTime=${toRangeStartMs(dateRange.from)}&endTime=${toRangeEndMs(dateRange.to)}`
-        : '';
       const result = await api<{
         ok: boolean;
         accepted: boolean;
         contractAddress: string;
-      }>(`/api/transaction-logs/refresh${refreshQuery}`, {
+      }>('/api/transaction-logs/refresh', {
         method: 'POST',
       });
 
@@ -853,6 +858,20 @@ export default function App() {
           ? 'Transaction log refresh started. New records will appear automatically as reconciliation completes.'
           : 'Transaction log refresh could not be started.',
       );
+      if (result.accepted) {
+        for (const timeoutId of transactionLogRefreshPollTimeoutsRef.current) {
+          window.clearTimeout(timeoutId);
+        }
+        transactionLogRefreshPollTimeoutsRef.current = [];
+        await loadState();
+        transactionLogRefreshPollTimeoutsRef.current = [3000, 7000, 12000].map((delayMs) =>
+          window.setTimeout(() => {
+            void loadState().catch((err: unknown) => {
+              console.warn('Failed to reload transaction logs after refresh:', err);
+            });
+          }, delayMs),
+        );
+      }
     });
 
   useEffect(() => {

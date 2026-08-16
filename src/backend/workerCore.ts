@@ -1165,6 +1165,44 @@ function readTokenTransferWalletAddress(
         null;
 }
 
+function readTokenBalanceChangeWalletAddress(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  return tryNormalizeSolanaPubkey(value.userAccount) ??
+    tryNormalizeSolanaPubkey(value.owner) ??
+    tryNormalizeSolanaPubkey(value.account) ??
+    tryNormalizeSolanaPubkey(value.tokenAccount) ??
+    null;
+}
+
+function readTokenBalanceChangeAmount(value: unknown): number | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const directAmount = toFiniteNumber(value.amount) ?? toFiniteNumber(value.tokenAmount);
+  if (directAmount != null) {
+    return directAmount;
+  }
+  const rawTokenAmount = isRecord(value.rawTokenAmount) ? value.rawTokenAmount : null;
+  const rawAmount = toFiniteNumber(rawTokenAmount?.tokenAmount);
+  const decimals = toFiniteNumber(rawTokenAmount?.decimals);
+  if (rawAmount == null || decimals == null) {
+    return null;
+  }
+  return rawAmount / 10 ** decimals;
+}
+
+function readTokenBalanceChangeContractAddress(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  return tryNormalizeSolanaPubkey(value.mint) ??
+    tryNormalizeSolanaPubkey(value.tokenAddress) ??
+    tryNormalizeSolanaPubkey(value.contractAddress) ??
+    null;
+}
+
 export function extractStoredSignalContractAddresses(payloadText: string): string[] {
   let payload: unknown;
   try {
@@ -1444,6 +1482,26 @@ export function extractWebhookTransactionDetailsFromPayload(
   const activityTokenTransfers = Array.isArray(activity?.tokenTransfers)
     ? activity.tokenTransfers.filter((item): item is Record<string, unknown> => isRecord(item))
     : [];
+  const activityAccountData = Array.isArray(activity?.accountData)
+    ? activity.accountData.filter((item): item is Record<string, unknown> => isRecord(item))
+    : [];
+  const trackedTokenBalanceChanges = activityAccountData
+    .flatMap((account) => Array.isArray(account.tokenBalanceChanges)
+      ? account.tokenBalanceChanges.filter((item): item is Record<string, unknown> => isRecord(item))
+      : [])
+    .filter((change) => readTokenBalanceChangeContractAddress(change) === trackedContractAddress);
+  const negativeTrackedBalanceChange = trackedTokenBalanceChanges.find(
+    (change) => {
+      const amount = readTokenBalanceChangeAmount(change);
+      return amount != null && amount < 0;
+    },
+  ) ?? null;
+  const positiveTrackedBalanceChange = trackedTokenBalanceChanges.find(
+    (change) => {
+      const amount = readTokenBalanceChangeAmount(change);
+      return amount != null && amount > 0;
+    },
+  ) ?? null;
   const trackedTokenTransfer =
     activityTokenTransfers.find(
       (transfer) => readTokenTransferContractAddress(transfer) === trackedContractAddress,
@@ -1459,11 +1517,13 @@ export function extractWebhookTransactionDetailsFromPayload(
 
   const fromWalletAddress =
     readTokenTransferWalletAddress(trackedTokenTransfer, 'from') ??
+    readTokenBalanceChangeWalletAddress(negativeTrackedBalanceChange) ??
     tryNormalizeSolanaPubkey(activity?.fromAddress) ??
     tryNormalizeSolanaPubkey(from?.address) ??
     null;
   const toWalletAddress =
     readTokenTransferWalletAddress(trackedTokenTransfer, 'to') ??
+    readTokenBalanceChangeWalletAddress(positiveTrackedBalanceChange) ??
     tryNormalizeSolanaPubkey(activity?.toAddress) ??
     tryNormalizeSolanaPubkey(to?.address) ??
     null;
@@ -1488,6 +1548,7 @@ export function extractWebhookTransactionDetailsFromPayload(
   const isTrackedTokenActivity =
     activityContractAddress === trackedContractAddress ||
     logContractAddress === trackedContractAddress ||
+    trackedTokenBalanceChanges.length > 0 ||
     activityTokenTransfers.some(
       (transfer) => readTokenTransferContractAddress(transfer) === trackedContractAddress,
     );
@@ -1496,7 +1557,10 @@ export function extractWebhookTransactionDetailsFromPayload(
     trackedTokenTransfer != null
       ? toFiniteNumber(trackedTokenTransfer.tokenAmount) ??
         toFiniteNumber(trackedTokenTransfer.amount)
-      : null;
+      : Math.max(
+          Math.abs(readTokenBalanceChangeAmount(negativeTrackedBalanceChange) ?? 0),
+          Math.abs(readTokenBalanceChangeAmount(positiveTrackedBalanceChange) ?? 0),
+        ) || null;
 
   const amountCandidate =
     toFiniteNumber(activity?.amount) ??

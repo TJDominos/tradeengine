@@ -33,6 +33,7 @@ import { dbComputeManagedProfitUsdc, dbListHistoricalSetups } from '../services/
 import { dbGetMarketRefreshState } from '../services/marketRefreshStateService';
 import {
   backfillTradeLogChainTimes,
+  dbGetLatestBaseTokenTransactionTimeMs,
   reconcileTokenTransactionsFromRpc,
   reconcileWebhookTransactionDetailsInWindow,
 } from '../services/signalStore';
@@ -43,6 +44,7 @@ import {
 
 const strategyAutomationService = new StrategyAutomationService();
 const DEFAULT_TRANSACTION_LOG_REFRESH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const TRANSACTION_LOG_REFRESH_CURSOR_OVERLAP_MS = 5_000;
 const TRANSACTION_LOG_REFRESH_PRIMARY_MAX_PAGES = 5;
 
 type TransactionLogRecord =
@@ -91,26 +93,20 @@ type StrategyDebugSimulateRequest = {
   clearPendingTasks?: boolean;
 };
 
-function parseOptionalTimestampMs(rawValue: string | null): number | null {
-  const parsed = Number.parseInt(rawValue ?? '', 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return null;
-  }
-  return parsed >= 1_000_000_000_000 ? parsed : parsed * 1000;
-}
-
-function resolveTransactionLogRefreshWindow(url: URL): {
+export function resolveTransactionLogRefreshWindow(
+  latestTransactionTimeMs: number | null,
+  endTimeMs = Date.now(),
+): {
   startTimeMs: number;
   endTimeMs: number;
 } {
-  const requestedStartTimeMs = parseOptionalTimestampMs(url.searchParams.get('startTime'));
-  const requestedEndTimeMs = parseOptionalTimestampMs(url.searchParams.get('endTime'));
-  const endTimeMs = requestedEndTimeMs ?? Date.now();
-  const startTimeMs = requestedStartTimeMs ?? Math.max(0, endTimeMs - DEFAULT_TRANSACTION_LOG_REFRESH_WINDOW_MS);
-
-  if (startTimeMs > endTimeMs) {
-    throw new ApiError(400, 'startTime must be less than or equal to endTime');
-  }
+  const fallbackStartTimeMs = Math.max(0, endTimeMs - DEFAULT_TRANSACTION_LOG_REFRESH_WINDOW_MS);
+  const startTimeMs = latestTransactionTimeMs == null
+    ? fallbackStartTimeMs
+    : Math.max(
+        0,
+        Math.min(endTimeMs, latestTransactionTimeMs) - TRANSACTION_LOG_REFRESH_CURSOR_OVERLAP_MS,
+      );
 
   return {
     startTimeMs,
@@ -413,7 +409,14 @@ export async function handleStateRoutes(
       );
     }
 
-    const { startTimeMs, endTimeMs } = resolveTransactionLogRefreshWindow(url);
+    const latestTransactionTimeMs = await dbGetLatestBaseTokenTransactionTimeMs(
+      env.TRADINGBOT_DB,
+      user.id,
+      contractAddress,
+    );
+    const { startTimeMs, endTimeMs } = resolveTransactionLogRefreshWindow(
+      latestTransactionTimeMs,
+    );
 
     const rpcUrls = await dbResolveSolanaRpcUrls(
       env.TRADINGBOT_DB,
@@ -430,7 +433,7 @@ export async function handleStateRoutes(
             contractAddress,
             rpcUrls,
             {
-          perAddressMaxPages: TRANSACTION_LOG_REFRESH_PRIMARY_MAX_PAGES,
+              perAddressMaxPages: TRANSACTION_LOG_REFRESH_PRIMARY_MAX_PAGES,
               startTimeMs,
               endTimeMs,
             },
@@ -464,6 +467,9 @@ export async function handleStateRoutes(
       ok: true,
       accepted: true,
       contractAddress,
+      latestTransactionTimeMs,
+      startTimeMs,
+      endTimeMs,
     }, 202);
   }
 

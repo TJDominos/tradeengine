@@ -220,17 +220,11 @@ export default function TransactionLogsCard({
               const tokenAmount =
                 log.kind === 'webhook'
                   ? log.tokenAmount
-                  : log.action === 'BUY'
-                    ? log.executedAmount
-                    : log.requestedAmount;
+                  : log.tokenAmount;
               const usdcAmount =
                 log.kind === 'webhook'
                   ? log.usdcAmount
-                  : log.action === 'BUY'
-                    ? log.requestedAmount
-                    : log.executedAmount != null && log.executedPrice != null
-                      ? log.executedAmount * log.executedPrice
-                      : null;
+                  : log.usdcAmount;
               const estimatedUsdcAmount =
                 usdcAmount == null && log.kind === 'webhook' && tokenAmount != null && activeTokenPriceUsd != null
                   ? tokenAmount * activeTokenPriceUsd
@@ -264,23 +258,34 @@ export default function TransactionLogsCard({
                   </td>
                   <td className="px-4 py-1.5">
                     <div className="space-y-1 text-slate-500">
-                      {renderAddress(log.kind === 'webhook' ? log.fromWalletAddress : log.walletAddress, 'from')}
+                      {renderAddress(log.fromWalletAddress, 'from')}
                       {renderOwnershipMeta(
                         log.kind === 'webhook'
                           ? (webhookFromOwnership ?? walletOwnershipMeta)
-                          : walletOwnershipMeta,
+                          : resolveWalletOwnershipMeta(
+                              log.fromWalletAddress,
+                              walletOwnershipLookup,
+                              log.action === 'BUY' ? 'lp' : 'internal',
+                            ),
                       )}
                     </div>
                   </td>
                   <td className="px-4 py-1.5">
                     <div className="space-y-1 text-slate-500">
-                      {renderAddress(log.kind === 'webhook' ? log.toWalletAddress : null, 'to')}
+                      {renderAddress(log.toWalletAddress, 'to')}
                       {log.kind === 'webhook'
                         ? renderOwnershipMeta(
                             webhookToOwnership ?? { ownership: 'system', accountLabel: null },
                             { showSourceLabel: sourceLabel },
                           )
-                        : renderOwnershipMeta({ ownership: 'system', accountLabel: null }, { showSourceLabel: sourceLabel })}
+                        : renderOwnershipMeta(
+                            resolveWalletOwnershipMeta(
+                              log.toWalletAddress,
+                              walletOwnershipLookup,
+                              log.action === 'SELL' ? 'lp' : 'internal',
+                            ),
+                            { showSourceLabel: sourceLabel },
+                          )}
                     </div>
                   </td>
                   <td className={`px-4 py-1.5 text-xs font-bold ${actionClass}`}>{actionLabel}</td>
