@@ -32,6 +32,7 @@ import type {
 import type { ExternalTradeEvent } from './triggers';
 import { executeSwap, type JupiterSwapExecutionResult } from '../services/jupiterSwapService';
 import { getActiveAccounts } from '../services/accountPoolService';
+import { fetchSolanaTransactionChainTimeMs } from '../services/signalStore';
 import { analyzeTradeDirection } from '../services/webhookParser';
 import {
   listManagedAccountsWithStoredBalances,
@@ -1234,15 +1235,21 @@ export class StrategyEngineDurableObject {
     const executedAmount = task.side === 'buy'
       ? baseAmount
       : swap.executedVolumeUsd;
+    const rpcUrls = await dbResolveSolanaRpcUrls(
+      this.env.TRADINGBOT_DB,
+      config.userId,
+      this.env.SOLANA_RPC_URL,
+    );
+    const chainTimeMs = await fetchSolanaTransactionChainTimeMs(rpcUrls, swap.txid);
     const timestamp = Date.now();
 
     await this.env.TRADINGBOT_DB
       .prepare(
         `INSERT INTO trade_logs (
            strategy_run_id, token_id, wallet_address, action,
-           requested_amount, executed_amount, executed_price, tx_signature,
+           requested_amount, executed_amount, executed_price, tx_signature, chain_time_ms,
            execution_trace_json, status, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'SUCCESS', ?10, ?10)`,
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'SUCCESS', ?11, ?11)`,
       )
       .bind(
         config.runId,
@@ -1253,6 +1260,7 @@ export class StrategyEngineDurableObject {
         executedAmount,
         executedPrice,
         swap.txid,
+        chainTimeMs,
         JSON.stringify({
           runId: config.runId,
           strategyVersionId: config.versionId,

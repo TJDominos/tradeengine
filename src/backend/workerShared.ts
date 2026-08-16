@@ -399,6 +399,7 @@ export interface TradeLogCreateRequest {
   executedAmount?: number | null;
   executedPrice?: number | null;
   txSignature?: string | null;
+  chainTimeMs?: number | null;
   status: 'PENDING' | 'SUCCESS' | 'FAILED';
   errorMessage?: string | null;
 }

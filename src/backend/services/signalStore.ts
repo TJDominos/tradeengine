@@ -2077,11 +2077,12 @@ export async function dbCreateTradeLog(
         executed_amount,
         executed_price,
         tx_signature,
+        chain_time_ms,
         status,
         error_message,
         created_at,
         updated_at
-      ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+      ) VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`,
     )
     .bind(
       input.tokenId,
@@ -2092,6 +2093,7 @@ export async function dbCreateTradeLog(
       input.executedAmount ?? null,
       input.executedPrice ?? null,
       input.txSignature ?? null,
+      input.chainTimeMs ?? null,
       input.status,
       input.errorMessage ?? null,
       timestamp,

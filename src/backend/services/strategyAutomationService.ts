@@ -46,6 +46,7 @@ import {
 } from '../workerCore';
 import { SOLANA_USDC_MINT } from '../workerShared';
 import { dbComputeManagedTradeLogProfit, dbGetLatestHistoricalSetupId } from './historyMetricsService';
+import { fetchSolanaTransactionChainTimeMs } from './signalStore';
 import { sendSolanaTransaction, signSolanaTransaction } from './solanaTradeService';
 import {
   addStrategy,
@@ -944,6 +945,8 @@ async function executeManagedTradeTask(
   };
 
   let tradeLogId: number | null = null;
+  let submittedTxSignature: string | null = null;
+  let submittedChainTimeMs: number | null = null;
   if (tokenId) {
     const logRow = await env.TRADINGBOT_DB
       .prepare(
@@ -993,8 +996,12 @@ async function executeManagedTradeTask(
       userId,
       env.SOLANA_RPC_URL,
     );
-    const txSignature = await sendSolanaTransaction(rpcUrls, signedTxBytes);
-    executionTrace.txSignature = txSignature;
+    submittedTxSignature = await sendSolanaTransaction(rpcUrls, signedTxBytes);
+    executionTrace.txSignature = submittedTxSignature;
+    submittedChainTimeMs = await fetchSolanaTransactionChainTimeMs(
+      rpcUrls,
+      submittedTxSignature,
+    );
 
     const executedAmountRaw = Number(action === 'BUY' ? quote.outAmount : quote.inAmount);
     const executedDecimals = action === 'BUY' ? baseTokenDecimals : quoteTokenDecimals;
@@ -1004,13 +1011,14 @@ async function executeManagedTradeTask(
       await env.TRADINGBOT_DB
         .prepare(
           `UPDATE trade_logs
-           SET status = 'PENDING', tx_signature = ?2, executed_amount = ?3, execution_trace_json = ?4, updated_at = ?5
+           SET status = 'PENDING', tx_signature = ?2, executed_amount = ?3, chain_time_ms = ?4, execution_trace_json = ?5, updated_at = ?6
            WHERE id = ?1`,
         )
         .bind(
           tradeLogId,
-          txSignature,
+          submittedTxSignature,
           executedAmount,
+          submittedChainTimeMs,
           JSON.stringify(executionTrace),
           nowTs(),
         )
@@ -1021,12 +1029,12 @@ async function executeManagedTradeTask(
       env.TRADINGBOT_DB,
       userId,
       'trade.submitted',
-      txSignature,
-      `${action} ${task.requestedAmount} (${action === 'BUY' ? `${pair.quoteMint} → ${targetMint}` : `${targetMint} → ${pair.quoteMint}`}) via Jupiter. Tx: ${txSignature}`,
+      submittedTxSignature,
+      `${action} ${task.requestedAmount} (${action === 'BUY' ? `${pair.quoteMint} → ${targetMint}` : `${targetMint} → ${pair.quoteMint}`}) via Jupiter. Tx: ${submittedTxSignature}`,
     );
 
     return {
-      txSignature,
+      txSignature: submittedTxSignature,
       accountId: resolvedAccountId,
       walletAddress: resolvedSignerAddress,
       action,
@@ -1044,11 +1052,18 @@ async function executeManagedTradeTask(
       await env.TRADINGBOT_DB
         .prepare(
           `UPDATE trade_logs
-           SET status = 'FAILED', error_message = ?2, execution_trace_json = ?3, updated_at = ?4
+           SET status = 'FAILED',
+               tx_signature = COALESCE(?2, tx_signature),
+               chain_time_ms = COALESCE(?3, chain_time_ms),
+               error_message = ?4,
+               execution_trace_json = ?5,
+               updated_at = ?6
            WHERE id = ?1`,
         )
         .bind(
           tradeLogId,
+          submittedTxSignature,
+          submittedChainTimeMs,
           errorMessage,
           JSON.stringify(executionTrace),
           nowTs(),

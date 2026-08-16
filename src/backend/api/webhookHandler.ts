@@ -38,6 +38,8 @@ import {
   dbMarkSignalFailed,
   dbMarkSignalProcessed,
   dbResolvePreferredSignalWalletAddress,
+  fetchSolanaTransactionChainTimeMs,
+  fetchSolanaWebhookTransactionDetailsFromRpc,
   dbUpsertWebhookTransactionLog,
   dbUpdateSignalTransactionDetails,
 } from '../services/signalStore';
@@ -100,6 +102,61 @@ async function resolveSignalStorageTarget(
     signal: created.signal,
     inserted: created.inserted,
     reusedByTxSignature: false,
+  };
+}
+
+type WebhookSignalDetails = ReturnType<typeof mergeStoredSignalTransactionDetails>;
+type WebhookPayloadDetails = ReturnType<typeof extractWebhookTransactionDetailsFromPayload>;
+
+function shouldEnrichWebhookSignalDetails(details: WebhookSignalDetails): boolean {
+  return (
+    details.action == null ||
+    details.fromWalletAddress == null ||
+    details.toWalletAddress == null ||
+    (details.tokenAmount == null && details.usdcAmount == null)
+  );
+}
+
+async function enrichWebhookSignalDetails(
+  rpcUrls: string | string[],
+  txSignature: string | null,
+  contractAddress: string,
+  details: WebhookSignalDetails,
+  payloadDetails: WebhookPayloadDetails,
+  ammPoolAddress?: string | null,
+): Promise<{
+  chainTimeMs: number | null;
+  details: WebhookSignalDetails;
+}> {
+  if (!txSignature) {
+    return {
+      chainTimeMs: null,
+      details,
+    };
+  }
+
+  const chainTimeMs = await fetchSolanaTransactionChainTimeMs(rpcUrls, txSignature);
+  if (!shouldEnrichWebhookSignalDetails(details)) {
+    return {
+      chainTimeMs,
+      details,
+    };
+  }
+
+  const rpcResult = await fetchSolanaWebhookTransactionDetailsFromRpc(
+    rpcUrls,
+    txSignature,
+    contractAddress,
+    details,
+  );
+
+  return {
+    chainTimeMs: rpcResult.chainTimeMs ?? chainTimeMs,
+    details: applyAmmPoolDirectionCorrection(
+      mergeStoredSignalTransactionDetails(details, rpcResult.details),
+      ammPoolAddress,
+      payloadDetails,
+    ),
   };
 }
 
@@ -262,6 +319,14 @@ async function handleRustNodeWebhook(
           env.TRADINGBOT_DB,
           payload.contractAddress,
         );
+        const trackedToken = tokenId != null
+          ? await dbFindTradableTokenById(env.TRADINGBOT_DB, tokenId)
+          : null;
+        const rpcUrls = await dbResolveSolanaRpcUrls(
+          env.TRADINGBOT_DB,
+          activeTarget.record.config.userId,
+          env.SOLANA_RPC_URL,
+        );
         const payloadDetails = extractWebhookTransactionDetailsFromPayload(
           payload.payloadJson ?? JSON.stringify(payload),
           payload.contractAddress,
@@ -270,25 +335,38 @@ async function handleRustNodeWebhook(
           initialDetails,
           payloadDetails,
         );
+        const enriched = await enrichWebhookSignalDetails(
+          rpcUrls,
+          payload.txHash,
+          payload.contractAddress,
+          applyAmmPoolDirectionCorrection(
+            mergedDetails,
+            trackedToken?.ammPoolAddress,
+            payloadDetails,
+          ),
+          payloadDetails,
+          trackedToken?.ammPoolAddress,
+        );
+        latestChainTimeMs = enriched.chainTimeMs;
         const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
           env.TRADINGBOT_DB,
           activeTarget.record.config.userId,
           [
-            mergedDetails.primaryWalletAddress,
-            mergedDetails.fromWalletAddress,
-            mergedDetails.toWalletAddress,
+            enriched.details.primaryWalletAddress,
+            enriched.details.fromWalletAddress,
+            enriched.details.toWalletAddress,
           ],
           payload.wallet_address,
         );
-        mergedDetails.primaryWalletAddress = preferredWalletAddress;
-        latestDetails = mergedDetails;
+        enriched.details.primaryWalletAddress = preferredWalletAddress;
+        latestDetails = enriched.details;
         latestWalletAddress = preferredWalletAddress ?? payload.wallet_address;
         await dbUpdateSignalTransactionDetails(
           env.TRADINGBOT_DB,
           targetSource,
           targetExternalId,
           preferredWalletAddress,
-          mergedDetails,
+          enriched.details,
         );
         if (tokenId && payload.txHash) {
           await dbApplyTokenHolderTransactionDelta(
@@ -296,7 +374,7 @@ async function handleRustNodeWebhook(
             activeTarget.record.config.userId,
             tokenId,
             payload.txHash,
-            mergedDetails,
+            enriched.details,
           ).catch((err) => {
             console.warn(`Failed to apply token holder delta for ${payload.txHash}:`, err);
           });
@@ -968,25 +1046,34 @@ async function processTokenActivitySignal(
       trackedToken?.ammPoolAddress,
       payloadDetails,
     );
+    const enriched = await enrichWebhookSignalDetails(
+      rpcUrls,
+      input.txSignature,
+      normalizedContractAddress,
+      correctedDetails,
+      payloadDetails,
+      trackedToken?.ammPoolAddress,
+    );
+    latestChainTimeMs = enriched.chainTimeMs;
     const preferredWalletAddress = await dbResolvePreferredSignalWalletAddress(
       env.TRADINGBOT_DB,
       input.userId,
       [
-        correctedDetails.primaryWalletAddress,
-        correctedDetails.fromWalletAddress,
-        correctedDetails.toWalletAddress,
+        enriched.details.primaryWalletAddress,
+        enriched.details.fromWalletAddress,
+        enriched.details.toWalletAddress,
       ],
       input.walletAddress,
     );
-    correctedDetails.primaryWalletAddress = preferredWalletAddress;
-    latestDetails = correctedDetails;
+    enriched.details.primaryWalletAddress = preferredWalletAddress;
+    latestDetails = enriched.details;
     latestWalletAddress = preferredWalletAddress ?? input.walletAddress;
     await dbUpdateSignalTransactionDetails(
       env.TRADINGBOT_DB,
       targetSource,
       targetExternalId,
       preferredWalletAddress,
-      correctedDetails,
+      enriched.details,
     );
     if (tokenId && input.txSignature) {
       await dbApplyTokenHolderTransactionDelta(
@@ -994,7 +1081,7 @@ async function processTokenActivitySignal(
         input.userId,
         tokenId,
         input.txSignature,
-        correctedDetails,
+        enriched.details,
       ).catch((err) => {
         console.warn(`Failed to apply token holder delta for ${input.txSignature}:`, err);
       });
