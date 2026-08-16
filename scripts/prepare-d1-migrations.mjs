@@ -51,6 +51,7 @@ const requiredColumns = {
   token_holder_sync_stage: ['token_id', 'run_id', 'shard_index', 'wallet_address'],
   rpc_endpoints: ['id', 'user_id', 'network', 'url', 'is_active'],
   market_refresh_states: ['user_id', 'contract_address', 'status', 'updated_at'],
+  transaction_log_refresh_states: ['user_id', 'contract_address', 'status', 'updated_at'],
 };
 
 function executeJson(sql) {
