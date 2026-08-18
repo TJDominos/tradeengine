@@ -132,6 +132,7 @@ export interface StrategyExecutionTaskPayload {
   action: 'BUY' | 'SELL';
   accountId: number | null;
   walletAddress: string | null;
+  accountAddress?: string | null;
   baseTokenAddress: string | null;
   baseMint?: string | null;
   quoteMint?: string | null;
@@ -236,6 +237,9 @@ export interface StrategyExecutionTaskSnapshot {
   supersededAt?: number | null;
   planRevision?: number;
   triggerTxHash?: string | null;
+  accountAddress?: string | null;
+  walletAddress?: string | null;
+  accountId?: number | null;
 }
 
 export interface ExecutionReport {

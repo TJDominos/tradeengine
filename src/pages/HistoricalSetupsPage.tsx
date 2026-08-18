@@ -80,6 +80,9 @@ type QueueTask = {
   supersededAt?: number | null;
   planRevision?: number;
   triggerTxHash?: string | null;
+  accountAddress?: string | null;
+  walletAddress?: string | null;
+  accountId?: number | null;
 };
 
 type QueueSnapshotResponse = {
@@ -369,10 +372,11 @@ export default function HistoricalSetupsPage() {
               </div>
             ) : (
               <div className="mt-5 overflow-x-auto rounded-xl border border-slate-700">
-                <table className="min-w-[900px] w-full text-left text-sm">
+                <table className="min-w-[1000px] w-full text-left text-sm">
                   <thead className="bg-slate-900 text-slate-400">
                     <tr>
                       <th className="px-4 py-3 font-medium">Task</th>
+                      <th className="px-4 py-3 font-medium">Account</th>
                       <th className="px-4 py-3 font-medium">Plan</th>
                       <th className="px-4 py-3 font-medium">Side</th>
                       <th className="px-4 py-3 font-medium">Volume</th>
@@ -383,28 +387,40 @@ export default function HistoricalSetupsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800 bg-slate-900/70">
-                    {orderedTasks.map((task) => (
-                      <tr key={task.id}>
-                        <td className="max-w-52 px-4 py-3">
-                          <p className="truncate font-medium text-slate-200" title={task.id}>{task.id}</p>
-                          {task.lastError ? <p className="mt-1 line-clamp-2 text-xs text-rose-300" title={task.lastError}>{task.lastError}</p> : null}
-                        </td>
-                        <td className="px-4 py-3 text-slate-400">
-                          <p>Revision {task.planRevision ?? 0}</p>
-                          {task.triggerTxHash ? <p className="mt-1 font-mono text-xs" title={task.triggerTxHash}>{compactAddress(task.triggerTxHash)}</p> : null}
-                        </td>
-                        <td className={`px-4 py-3 font-semibold uppercase ${task.side === 'buy' ? 'text-emerald-300' : 'text-rose-300'}`}>{task.side}</td>
-                        <td className="px-4 py-3 text-slate-300">{formatUSD(task.amountUsd)}</td>
-                        <td className="px-4 py-3 text-slate-400">{formatDate(task.scheduledAt)}</td>
-                        <td className="px-4 py-3 text-slate-400">{task.nextExecutionTime ? formatDate(task.nextExecutionTime) : '—'}</td>
-                        <td className="px-4 py-3 text-slate-300">{task.attemptCount}</td>
-                        <td className="px-4 py-3">
-                          <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold uppercase ${task.status === 'done' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : task.status === 'failed' ? 'border-rose-500/30 bg-rose-500/10 text-rose-300' : task.status === 'superseded' ? 'border-amber-500/30 bg-amber-500/10 text-amber-300' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>
-                            {task.status === 'failed' && task.nextExecutionTime != null ? 'retrying' : task.status}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
+                    {orderedTasks.map((task) => {
+                      const accountAddress = task.accountAddress || task.walletAddress;
+                      return (
+                        <tr key={task.id}>
+                          <td className="max-w-52 px-4 py-3">
+                            <p className="truncate font-medium text-slate-200" title={task.id}>{task.id}</p>
+                            {task.lastError ? <p className="mt-1 line-clamp-2 text-xs text-rose-300" title={task.lastError}>{task.lastError}</p> : null}
+                          </td>
+                          <td className="px-4 py-3 text-slate-300">
+                            {accountAddress ? (
+                              <p className="font-mono text-xs text-slate-300" title={accountAddress}>
+                                {compactAddress(accountAddress)}
+                              </p>
+                            ) : (
+                              <span className="text-xs text-slate-500">—</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-slate-400">
+                            <p>Revision {task.planRevision ?? 0}</p>
+                            {task.triggerTxHash ? <p className="mt-1 font-mono text-xs" title={task.triggerTxHash}>{compactAddress(task.triggerTxHash)}</p> : null}
+                          </td>
+                          <td className={`px-4 py-3 font-semibold uppercase ${task.side === 'buy' ? 'text-emerald-300' : 'text-rose-300'}`}>{task.side}</td>
+                          <td className="px-4 py-3 text-slate-300">{formatUSD(task.amountUsd)}</td>
+                          <td className="px-4 py-3 text-slate-400">{formatDate(task.scheduledAt)}</td>
+                          <td className="px-4 py-3 text-slate-400">{task.nextExecutionTime ? formatDate(task.nextExecutionTime) : '—'}</td>
+                          <td className="px-4 py-3 text-slate-300">{task.attemptCount}</td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold uppercase ${task.status === 'done' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : task.status === 'failed' ? 'border-rose-500/30 bg-rose-500/10 text-rose-300' : task.status === 'superseded' ? 'border-amber-500/30 bg-amber-500/10 text-amber-300' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>
+                              {task.status === 'failed' && task.nextExecutionTime != null ? 'retrying' : task.status}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -576,10 +592,11 @@ export default function HistoricalSetupsPage() {
                                   </div>
                                   {record.report?.tasks?.length ? (
                                     <div className="mt-3 overflow-x-auto rounded-xl border border-slate-700">
-                                      <table className="min-w-[900px] w-full text-left text-sm">
+                                      <table className="min-w-[1000px] w-full text-left text-sm">
                                         <thead className="bg-slate-900 text-slate-400">
                                           <tr>
                                             <th className="px-4 py-3 font-medium">Task</th>
+                                            <th className="px-4 py-3 font-medium">Account</th>
                                             <th className="px-4 py-3 font-medium">Plan</th>
                                             <th className="px-4 py-3 font-medium">Side</th>
                                             <th className="px-4 py-3 font-medium">Volume</th>
@@ -590,21 +607,33 @@ export default function HistoricalSetupsPage() {
                                           </tr>
                                         </thead>
                                         <tbody className="divide-y divide-slate-800 bg-slate-900/70">
-                                          {record.report.tasks.map((task) => (
-                                            <tr key={task.id}>
-                                              <td className="max-w-52 px-4 py-3">
-                                                <p className="truncate font-medium text-slate-200" title={task.id}>{task.id}</p>
-                                                {task.lastError ? <p className="mt-1 line-clamp-2 text-xs text-rose-300" title={task.lastError}>{task.lastError}</p> : null}
-                                              </td>
-                                              <td className="px-4 py-3 text-slate-400">Revision {task.planRevision ?? 0}</td>
-                                              <td className={`px-4 py-3 font-semibold uppercase ${task.side === 'buy' ? 'text-emerald-300' : 'text-rose-300'}`}>{task.side}</td>
-                                              <td className="px-4 py-3 text-slate-300">{formatUSD(task.amountUsd)}</td>
-                                              <td className="px-4 py-3 text-slate-400">{formatDate(task.scheduledAt)}</td>
-                                              <td className="px-4 py-3 text-slate-400">{task.completedAt ? formatDate(task.completedAt) : 'Unavailable'}</td>
-                                              <td className="px-4 py-3 text-slate-300">{task.attemptCount}</td>
-                                              <td className="px-4 py-3 text-slate-300">{titleCase(task.status)}</td>
-                                            </tr>
-                                          ))}
+                                          {record.report.tasks.map((task) => {
+                                            const accountAddress = task.accountAddress || task.walletAddress;
+                                            return (
+                                              <tr key={task.id}>
+                                                <td className="max-w-52 px-4 py-3">
+                                                  <p className="truncate font-medium text-slate-200" title={task.id}>{task.id}</p>
+                                                  {task.lastError ? <p className="mt-1 line-clamp-2 text-xs text-rose-300" title={task.lastError}>{task.lastError}</p> : null}
+                                                </td>
+                                                <td className="px-4 py-3 text-slate-300">
+                                                  {accountAddress ? (
+                                                    <p className="font-mono text-xs text-slate-300" title={accountAddress}>
+                                                      {compactAddress(accountAddress)}
+                                                    </p>
+                                                  ) : (
+                                                    <span className="text-xs text-slate-500">—</span>
+                                                  )}
+                                                </td>
+                                                <td className="px-4 py-3 text-slate-400">Revision {task.planRevision ?? 0}</td>
+                                                <td className={`px-4 py-3 font-semibold uppercase ${task.side === 'buy' ? 'text-emerald-300' : 'text-rose-300'}`}>{task.side}</td>
+                                                <td className="px-4 py-3 text-slate-300">{formatUSD(task.amountUsd)}</td>
+                                                <td className="px-4 py-3 text-slate-400">{formatDate(task.scheduledAt)}</td>
+                                                <td className="px-4 py-3 text-slate-400">{task.completedAt ? formatDate(task.completedAt) : 'Unavailable'}</td>
+                                                <td className="px-4 py-3 text-slate-300">{task.attemptCount}</td>
+                                                <td className="px-4 py-3 text-slate-300">{titleCase(task.status)}</td>
+                                              </tr>
+                                            );
+                                          })}
                                         </tbody>
                                       </table>
                                     </div>

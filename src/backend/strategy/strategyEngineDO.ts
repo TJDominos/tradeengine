@@ -1114,6 +1114,14 @@ export class StrategyEngineDurableObject {
       activeAccounts.map((account) => [account.publicKey, account]),
     );
     const taskAllocations = await this.resolveTaskAllocations(task);
+    const primaryAllocation = taskAllocations[0];
+    if (primaryAllocation) {
+      this.updateTaskSnapshot(task.id, {
+        accountAddress: primaryAllocation.walletAddress,
+        walletAddress: primaryAllocation.walletAddress,
+        accountId: primaryAllocation.accountId,
+      });
+    }
     const executableAccounts = taskAllocations.flatMap((allocation) => {
       const signingAccount = activeAccountsByAddress.get(allocation.walletAddress);
       return signingAccount ? [{ allocation, signingAccount }] : [];
@@ -1414,6 +1422,9 @@ export class StrategyEngineDurableObject {
     const snapshot = this.persistedState.taskSnapshots.find(
       (candidate) => candidate.id === task.id,
     );
+    const primaryAllocation = task.allocations?.[0];
+    const accountAddress = primaryAllocation?.walletAddress ?? snapshot?.accountAddress ?? snapshot?.walletAddress ?? null;
+    const accountId = primaryAllocation?.accountId ?? snapshot?.accountId ?? null;
     const attemptCount = (snapshot?.attemptCount ?? 0) + 1;
     const nextScheduledTask = this.persistedState.pendingTasks[0] ?? null;
     const transition = resolveStrategyTaskFailureTransition(
@@ -1428,8 +1439,24 @@ export class StrategyEngineDurableObject {
         nextExecutionTime: null,
         lastFailedAt: now,
         lastError: error,
+        accountAddress,
+        walletAddress: accountAddress,
+        accountId,
       });
-      this.persistedState.pausedTask = task;
+      this.persistedState.pausedTask = {
+        ...task,
+        allocations: task.allocations ?? (accountAddress ? [{
+          accountId: accountId ?? 0,
+          label: accountAddress,
+          walletAddress: accountAddress,
+          plannedVolumeUsd: task.amountUsd,
+          quoteAvailableAmount: 0,
+          baseTokenAmount: 0,
+          solBalance: 0,
+          accountBuyOverAllocated: false,
+          accountBuyOverAllocationUsd: 0,
+        }] : undefined),
+      };
       this.persistedState.status = 'paused';
       await this.ctx.storage.deleteAlarm();
       await this.persistState({ scheduleAlarm: false });
@@ -1439,7 +1466,17 @@ export class StrategyEngineDurableObject {
     const retryAt = transition.retryAt ?? now + FIRST_TASK_RETRY_DELAY_MS;
     this.enqueueTask({
       ...task,
-      allocations: undefined,
+      allocations: task.allocations ?? (accountAddress ? [{
+        accountId: accountId ?? 0,
+        label: accountAddress,
+        walletAddress: accountAddress,
+        plannedVolumeUsd: task.amountUsd,
+        quoteAvailableAmount: 0,
+        baseTokenAmount: 0,
+        solBalance: 0,
+        accountBuyOverAllocated: false,
+        accountBuyOverAllocationUsd: 0,
+      }] : undefined),
       scheduledAt: retryAt,
       metadata: {
         ...task.metadata,
@@ -1453,6 +1490,9 @@ export class StrategyEngineDurableObject {
       nextExecutionTime: retryAt,
       lastFailedAt: now,
       lastError: error,
+      accountAddress,
+      walletAddress: accountAddress,
+      accountId,
     });
   }
 
@@ -1500,6 +1540,9 @@ export class StrategyEngineDurableObject {
       allocations: task.allocations,
       metadata: task.metadata,
     });
+    const primaryAllocation = task.allocations?.[0];
+    const accountAddress = primaryAllocation?.walletAddress ?? null;
+    const accountId = primaryAllocation?.accountId ?? null;
     const existingSnapshot = this.persistedState.taskSnapshots.find(
       (snapshot) => snapshot.id === taskId,
     );
@@ -1526,7 +1569,16 @@ export class StrategyEngineDurableObject {
           typeof task.metadata?.txHash === 'string'
             ? task.metadata.txHash
             : null,
+        accountAddress,
+        walletAddress: accountAddress,
+        accountId,
       });
+    } else if (accountAddress && !existingSnapshot.accountAddress) {
+      existingSnapshot.accountAddress = accountAddress;
+      existingSnapshot.walletAddress = accountAddress;
+      if (accountId != null) {
+        existingSnapshot.accountId = accountId;
+      }
     }
     this.persistedState.pendingTasks.sort(
       (left, right) =>
@@ -1645,6 +1697,9 @@ export class StrategyEngineDurableObject {
       const scheduledAt = pendingTask?.scheduledAt ?? (
         startTime + INITIAL_EXECUTION_DELAY_MS + Math.max(0, task.scheduledAt - plan.generatedAt)
       );
+      const primaryAllocation = task.allocations?.[0];
+      const accountAddress = primaryAllocation?.walletAddress ?? null;
+      const accountId = primaryAllocation?.accountId ?? null;
       state.taskSnapshots.push({
         id,
         side: task.side,
@@ -1661,6 +1716,9 @@ export class StrategyEngineDurableObject {
         supersededAt: pendingTask ? null : latestTrigger?.occurredAt ?? Date.now(),
         planRevision: 0,
         triggerTxHash: pendingTask ? null : latestTrigger?.id ?? null,
+        accountAddress,
+        walletAddress: accountAddress,
+        accountId,
       });
       existingIds.add(id);
     }
