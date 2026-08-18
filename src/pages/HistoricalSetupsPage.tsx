@@ -2,6 +2,7 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  Copy,
   FileText,
   LoaderCircle,
   Pause,
@@ -121,6 +122,38 @@ function resolveDisplayStatus(record: QueueStrategyRecord): string {
   return titleCase(record.status);
 }
 
+function AccountAddressCell({
+  address,
+  copiedAddress,
+  onCopy,
+}: {
+  address: string | null | undefined;
+  copiedAddress: string | null;
+  onCopy: (address: string) => void;
+}) {
+  if (!address) {
+    return <span className="text-xs text-slate-500">—</span>;
+  }
+
+  const copied = copiedAddress === address;
+  return (
+    <div className="flex min-w-56 items-start gap-2">
+      <p className="min-w-0 break-all font-mono text-xs leading-relaxed text-slate-300" title={address}>
+        {address}
+      </p>
+      <button
+        type="button"
+        onClick={() => onCopy(address)}
+        title={copied ? 'Address copied' : 'Copy full address'}
+        aria-label={copied ? 'Address copied' : 'Copy full address'}
+        className="shrink-0 rounded-md p-1 text-slate-400 transition hover:bg-slate-700 hover:text-white"
+      >
+        {copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+      </button>
+    </div>
+  );
+}
+
 function ProjectedPriceCurveSnapshot({ record }: { record: QueueStrategyRecord }) {
   const review = record.config.reviewedPlan?.volatilityReview;
   const generatedAt = record.config.reviewedPlan?.generatedAt;
@@ -154,6 +187,16 @@ export default function HistoricalSetupsPage() {
   const [error, setError] = React.useState('');
   const [expandedReportId, setExpandedReportId] = React.useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = React.useState<string>('');
+  const [copiedAddress, setCopiedAddress] = React.useState<string | null>(null);
+
+  const copyAddress = React.useCallback(async (address: string) => {
+    try {
+      await navigator.clipboard.writeText(address);
+      setCopiedAddress(address);
+    } catch {
+      setError('Failed to copy account address');
+    }
+  }, []);
 
   const loadQueueState = React.useCallback(async (options?: { silent?: boolean }) => {
     if (!options?.silent) {
@@ -396,13 +439,7 @@ export default function HistoricalSetupsPage() {
                             {task.lastError ? <p className="mt-1 line-clamp-2 text-xs text-rose-300" title={task.lastError}>{task.lastError}</p> : null}
                           </td>
                           <td className="px-4 py-3 text-slate-300">
-                            {accountAddress ? (
-                              <p className="font-mono text-xs text-slate-300" title={accountAddress}>
-                                {compactAddress(accountAddress)}
-                              </p>
-                            ) : (
-                              <span className="text-xs text-slate-500">—</span>
-                            )}
+                            <AccountAddressCell address={accountAddress} copiedAddress={copiedAddress} onCopy={copyAddress} />
                           </td>
                           <td className="px-4 py-3 text-slate-400">
                             <p>Revision {task.planRevision ?? 0}</p>
@@ -616,13 +653,7 @@ export default function HistoricalSetupsPage() {
                                                   {task.lastError ? <p className="mt-1 line-clamp-2 text-xs text-rose-300" title={task.lastError}>{task.lastError}</p> : null}
                                                 </td>
                                                 <td className="px-4 py-3 text-slate-300">
-                                                  {accountAddress ? (
-                                                    <p className="font-mono text-xs text-slate-300" title={accountAddress}>
-                                                      {compactAddress(accountAddress)}
-                                                    </p>
-                                                  ) : (
-                                                    <span className="text-xs text-slate-500">—</span>
-                                                  )}
+                                                  <AccountAddressCell address={accountAddress} copiedAddress={copiedAddress} onCopy={copyAddress} />
                                                 </td>
                                                 <td className="px-4 py-3 text-slate-400">Revision {task.planRevision ?? 0}</td>
                                                 <td className={`px-4 py-3 font-semibold uppercase ${task.side === 'buy' ? 'text-emerald-300' : 'text-rose-300'}`}>{task.side}</td>
