@@ -89,6 +89,7 @@ type StrategyPlanPreviewResponse = {
   };
   macroObjective: 'shakeout' | 'distribution' | 'accumulation';
   accountCyclingEnabled: boolean;
+  minimumQuoteReserveUsd: number;
   quoteLabel: string;
   requiredBuyAmount: number;
   availableBuyAmount: number;
@@ -186,6 +187,11 @@ function validateReviewedPlan(input: {
   let buyVolumeUsd = 0;
   let sellVolumeUsd = 0;
   let previousScheduledAt = generatedAt;
+  const minimumQuoteReserveUsd = Math.max(
+    0,
+    input.document.execution.minimumQuoteReserveUsd,
+  );
+  const touchedAccountIds = new Set<number>();
 
   for (const [index, rawTask] of rawTasks.entries()) {
     if (!rawTask || typeof rawTask !== 'object' || Array.isArray(rawTask)) {
@@ -224,7 +230,14 @@ function validateReviewedPlan(input: {
       if (quoteAvailable < totalVolumeUsd) {
         throw new ApiError(409, `Reviewed task ${index + 1} no longer has enough quote balance`);
       }
-      quoteByAccountId.set(accountId, quoteAvailable - totalVolumeUsd);
+      const remainingQuote = quoteAvailable - totalVolumeUsd;
+      if (
+        minimumQuoteReserveUsd > 0 &&
+        remainingQuote + 0.000001 < minimumQuoteReserveUsd
+      ) {
+        throw new ApiError(409, `Reviewed task ${index + 1} would spend below the quote reserve`);
+      }
+      quoteByAccountId.set(accountId, remainingQuote);
       baseUsdByAccountId.set(accountId, (baseUsdByAccountId.get(accountId) ?? 0) + totalVolumeUsd);
       buyVolumeUsd += totalVolumeUsd;
     } else {
@@ -236,6 +249,7 @@ function validateReviewedPlan(input: {
       quoteByAccountId.set(accountId, (quoteByAccountId.get(accountId) ?? 0) + totalVolumeUsd);
       sellVolumeUsd += totalVolumeUsd;
     }
+    touchedAccountIds.add(accountId);
     previousScheduledAt = scheduledAt;
     tasks.push({
       taskId: typeof task.taskId === 'string' ? task.taskId : `reviewed-${index + 1}`,
@@ -276,6 +290,13 @@ function validateReviewedPlan(input: {
     Number(sellVolumeUsd.toFixed(6)) !== Number(expectedSellVolumeUsd.toFixed(6))
   ) {
     throw new ApiError(409, 'Reviewed plan volume or net buy-in no longer matches the strategy');
+  }
+  if (minimumQuoteReserveUsd > 0) {
+    for (const accountId of touchedAccountIds) {
+      if ((quoteByAccountId.get(accountId) ?? 0) + 0.000001 < minimumQuoteReserveUsd) {
+        throw new ApiError(409, 'Reviewed plan no longer satisfies the quote reserve guardrail');
+      }
+    }
   }
   return {
     generatedAt,
@@ -336,6 +357,7 @@ function buildStrategyPlanPreview(
     },
     macroObjective: config.macroObjective,
     accountCyclingEnabled: document.execution.accountCyclingEnabled,
+    minimumQuoteReserveUsd: document.execution.minimumQuoteReserveUsd,
     quoteLabel,
     requiredBuyAmount: effectiveRequiredBuyAmount,
     availableBuyAmount: planning.availableBuyAmount,

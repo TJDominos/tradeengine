@@ -292,6 +292,7 @@ export type StrategyPlanPreview = {
   };
   macroObjective: 'shakeout' | 'distribution' | 'accumulation';
   accountCyclingEnabled: boolean;
+  minimumQuoteReserveUsd: number;
   quoteLabel: string;
   requiredBuyAmount: number;
   availableBuyAmount: number;

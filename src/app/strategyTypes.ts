@@ -96,6 +96,7 @@ export interface StrategyExecutionConfig {
   volumeJitterRatio: number;
   accountCyclingEnabled: boolean;
   accountDispersionStrength: number;
+  minimumQuoteReserveUsd: number;
   macroObjective: StrategyMacroObjective;
   tactics: StrategyExecutionTactics;
 }
@@ -203,6 +204,7 @@ export type StrategyFieldPath =
   | 'execution.volumeJitterRatio'
   | 'execution.accountCyclingEnabled'
   | 'execution.accountDispersionStrength'
+  | 'execution.minimumQuoteReserveUsd'
   | 'execution.macroObjective'
   | 'execution.tactics.dumpRatio'
   | 'execution.tactics.followSellRatio'

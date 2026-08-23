@@ -1027,6 +1027,26 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
+            <FieldShell label="Minimum Quote Reserve (USD)" helper="Preserve this much quote liquidity per planned account when the account pool has enough balance. Use 10 to keep roughly $10 USDC after sell/buy cycling.">
+              <Controller
+                control={control}
+                name="execution.minimumQuoteReserveUsd"
+                render={({ field }) => (
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={formatNumberInputValue(field.value)}
+                    onChange={(event) => {
+                      const parsed = parseBlankableNumber(event.target.value);
+                      field.onChange(parsed == null ? null : Math.max(0, parsed));
+                    }}
+                    className={textInputClassName()}
+                  />
+                )}
+              />
+            </FieldShell>
+
             <FieldShell label="Max Position (USD)" helper="Optional hard ceiling for future position sizing logic.">
               <Controller
                 control={control}
@@ -1197,6 +1217,7 @@ export default function StrategySchemaForm({
             <p className="mt-3 text-sm text-slate-300">Max concurrency: {formatNumber(formData.riskControls?.maxConcurrentOrders)}</p>
             <p className="mt-1 text-sm text-slate-300">Max slippage: {formatPercentFromBps(formData.parameters?.maxSlippageBps)}</p>
             <p className="mt-1 text-sm text-slate-300">Account dispersion: {formatNumberInputValue(formData.execution?.accountDispersionStrength ?? 0.5) || '0'}</p>
+            <p className="mt-1 text-sm text-slate-300">Quote reserve: {formatCurrency(formData.execution?.minimumQuoteReserveUsd ?? 0)}</p>
           </div>
 
           <div className="mt-6 rounded-2xl border border-slate-700 bg-slate-900/70 p-4">
@@ -1280,6 +1301,7 @@ export default function StrategySchemaForm({
                   <p className="mt-2">Pair: {contractPreview(planPreview.pair.baseTokenAddress)} / {contractPreview(planPreview.pair.quoteTokenAddress)}</p>
                   <p className="mt-1">Objective: {titleCase(planPreview.macroObjective)}</p>
                   <p className="mt-1">Account cycling: {planPreview.accountCyclingEnabled ? 'Enabled' : 'Disabled'}</p>
+                  <p className="mt-1">Quote reserve: {formatCurrency(planPreview.minimumQuoteReserveUsd)}</p>
                   <p className="mt-1">Generated: {formatPlannerTime(planPreview.generatedAt)}</p>
                 </div>
 

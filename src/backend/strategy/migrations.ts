@@ -44,6 +44,11 @@ function normalizeDispersionStrength(value: unknown, fallback: number): number {
   return clampNumber(parsed, 0, 3);
 }
 
+function normalizeUsdFloor(value: unknown, fallback: number): number {
+  const parsed = readNumber(value, fallback);
+  return Math.max(0, parsed);
+}
+
 function readRecord(value: unknown): Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -185,6 +190,10 @@ function normalizeExecution(value: unknown): StrategyExecutionConfig {
     accountDispersionStrength: normalizeDispersionStrength(
       raw.accountDispersionStrength,
       DEFAULT_EXECUTION_CONFIG.accountDispersionStrength,
+    ),
+    minimumQuoteReserveUsd: normalizeUsdFloor(
+      raw.minimumQuoteReserveUsd,
+      DEFAULT_EXECUTION_CONFIG.minimumQuoteReserveUsd,
     ),
     macroObjective:
       raw.macroObjective === 'shakeout' ||

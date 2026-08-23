@@ -141,6 +141,32 @@ function positiveNumber(value: number | null | undefined): number {
   return value;
 }
 
+function resolveMinimumQuoteReserveUsd(execution: StrategyExecutionConfig): number {
+  return positiveNumber(execution.minimumQuoteReserveUsd);
+}
+
+function calculateQuoteReserveDeficitUsd(
+  account: MutablePlannerAccount,
+  minimumQuoteReserveUsd: number,
+): number {
+  return roundToSixDecimals(
+    Math.max(0, minimumQuoteReserveUsd - account.buyRemainingQuoteUsd),
+  );
+}
+
+function calculateSpendableQuoteUsd(
+  account: MutablePlannerAccount,
+  minimumQuoteReserveUsd: number,
+  plannedQuoteCreditUsd = 0,
+): number {
+  return roundToSixDecimals(
+    Math.max(
+      0,
+      account.buyRemainingQuoteUsd + plannedQuoteCreditUsd - minimumQuoteReserveUsd,
+    ),
+  );
+}
+
 function splitAccountAmountIntoOrders(
   account: MutablePlannerAccount,
   amountUsd: number,
@@ -194,48 +220,77 @@ function allocateAccountOrders(
   capacityUsd: (account: MutablePlannerAccount) => number,
   random: () => number,
   selectionMode: 'capacity' | 'random' = 'capacity',
+  priorityUsd: (account: MutablePlannerAccount) => number = () => 0,
+  minimumAmountUsd: (account: MutablePlannerAccount) => number = () => minOrderUsd,
 ): PlannedAccountOrder[] | null {
   if (targetUsd <= MIN_VOLUME_EPSILON) {
     return orderCount === 0 ? [] : null;
   }
   const maximumAccountCount = Math.min(orderCount, Math.floor(targetUsd / minOrderUsd));
   const candidates = accounts
-    .map((account) => ({ account, capacity: Math.max(0, capacityUsd(account)), tie: random() }))
+    .map((account) => ({
+      account,
+      capacity: Math.max(0, capacityUsd(account)),
+      priority: Math.max(0, priorityUsd(account)),
+      tie: random(),
+    }))
     .filter(({ account, capacity }) => account.pairCompatible && capacity >= minOrderUsd)
     .sort((left, right) =>
       selectionMode === 'random'
-        ? left.tie - right.tie || right.capacity - left.capacity
-        : right.capacity - left.capacity || left.tie - right.tie,
+        ? right.priority - left.priority || left.tie - right.tie || right.capacity - left.capacity
+        : right.priority - left.priority || right.capacity - left.capacity || left.tie - right.tie,
     );
-  const selectedAccounts: Array<{ account: MutablePlannerAccount; capacity: number }> = [];
+  const selectedAccounts: Array<{
+    account: MutablePlannerAccount;
+    capacity: number;
+    minimumAmountUsd: number;
+  }> = [];
   let selectedCapacity = 0;
+  let selectedMinimum = 0;
   for (const candidate of candidates) {
     if (selectedAccounts.length >= maximumAccountCount) {
       break;
     }
-    selectedAccounts.push(candidate);
+    const candidateMinimum = roundToSixDecimals(
+      clamp(minimumAmountUsd(candidate.account), minOrderUsd, candidate.capacity),
+    );
+    if (selectedMinimum + candidateMinimum > targetUsd + MIN_VOLUME_EPSILON) {
+      continue;
+    }
+    selectedAccounts.push({
+      account: candidate.account,
+      capacity: candidate.capacity,
+      minimumAmountUsd: candidateMinimum,
+    });
     selectedCapacity += candidate.capacity;
+    selectedMinimum = roundToSixDecimals(selectedMinimum + candidateMinimum);
   }
   if (selectedCapacity + MIN_VOLUME_EPSILON < targetUsd) {
     return null;
   }
 
   const accountAmounts = new Map<number, number>();
+  for (const { account, minimumAmountUsd: accountMinimumAmountUsd } of selectedAccounts) {
+    accountAmounts.set(account.accountId, accountMinimumAmountUsd);
+  }
+  const selectedMinimumTotal = roundToSixDecimals(
+    [...accountAmounts.values()].reduce((sum, amount) => sum + amount, 0),
+  );
+  if (selectedMinimumTotal > targetUsd + MIN_VOLUME_EPSILON) {
+    return null;
+  }
   if (selectionMode === 'random') {
     let remainingRandomVolume = roundToSixDecimals(
-      targetUsd - selectedAccounts.length * minOrderUsd,
+      targetUsd - selectedMinimumTotal,
     );
     if (remainingRandomVolume < -MIN_VOLUME_EPSILON) {
       return null;
-    }
-    for (const { account } of selectedAccounts) {
-      accountAmounts.set(account.accountId, minOrderUsd);
     }
 
     let randomActiveAccounts = selectedAccounts
       .map((candidate) => ({
         ...candidate,
-        remainingCapacity: roundToSixDecimals(candidate.capacity - minOrderUsd),
+        remainingCapacity: roundToSixDecimals(candidate.capacity - candidate.minimumAmountUsd),
       }))
       .filter((candidate) => candidate.remainingCapacity > MIN_VOLUME_EPSILON);
     while (remainingRandomVolume > MIN_VOLUME_EPSILON && randomActiveAccounts.length > 0) {
@@ -283,7 +338,7 @@ function allocateAccountOrders(
       );
     }
   } else {
-  let remaining = roundToSixDecimals(targetUsd);
+  let remaining = roundToSixDecimals(targetUsd - selectedMinimumTotal);
   let activeAccounts = [...selectedAccounts];
 
   while (remaining > MIN_VOLUME_EPSILON && activeAccounts.length > 0) {
@@ -434,6 +489,7 @@ function buildShakeoutCurveManagedTasks(input: {
 
   const minOrderUsd = input.config.minOrderUsd;
   const maxOrderUsd = input.config.maxOrderUsd;
+  const minimumQuoteReserveUsd = resolveMinimumQuoteReserveUsd(input.config.execution);
   const sellerCandidates = input.accounts
     .filter(
       (account) =>
@@ -492,6 +548,11 @@ function buildShakeoutCurveManagedTasks(input: {
           `${input.seedBase}:shakeout:sell-amounts:${candidateSellCount}`,
         ),
         'random',
+        (account) => calculateQuoteReserveDeficitUsd(account, minimumQuoteReserveUsd),
+        (account) => Math.max(
+          minOrderUsd,
+          calculateQuoteReserveDeficitUsd(account, minimumQuoteReserveUsd),
+        ),
       );
       if (!candidateSellOrders) {
         continue;
@@ -505,17 +566,22 @@ function buildShakeoutCurveManagedTasks(input: {
         );
       }
       const initiallyFundedBuyCandidates = input.accounts.filter((account) =>
-        account.pairCompatible && account.buyRemainingQuoteUsd >= minOrderUsd,
+        account.pairCompatible &&
+          calculateSpendableQuoteUsd(account, minimumQuoteReserveUsd) >= minOrderUsd,
       );
       const initialBuyCapacityUsd = initiallyFundedBuyCandidates.reduce(
-        (sum, account) => sum + account.buyRemainingQuoteUsd,
+        (sum, account) => sum + calculateSpendableQuoteUsd(account, minimumQuoteReserveUsd),
         0,
       );
       const buyCandidates = initialBuyCapacityUsd + MIN_VOLUME_EPSILON >= buySpec.totalVolumeUsd
         ? initiallyFundedBuyCandidates
         : input.accounts.filter((account) =>
             account.pairCompatible &&
-            account.buyRemainingQuoteUsd + (soldByAccountId.get(account.accountId) ?? 0) >= minOrderUsd,
+            calculateSpendableQuoteUsd(
+              account,
+              minimumQuoteReserveUsd,
+              soldByAccountId.get(account.accountId) ?? 0,
+            ) >= minOrderUsd,
           );
       const candidateBuyOrders = allocateAccountOrders(
         buyCandidates,
@@ -524,7 +590,11 @@ function buildShakeoutCurveManagedTasks(input: {
         minOrderUsd,
         maxOrderUsd,
         input.config.execution,
-        (account) => account.buyRemainingQuoteUsd + (soldByAccountId.get(account.accountId) ?? 0),
+        (account) => calculateSpendableQuoteUsd(
+          account,
+          minimumQuoteReserveUsd,
+          soldByAccountId.get(account.accountId) ?? 0,
+        ),
         createDeterministicRandom(
           `${input.seedBase}:shakeout:buy-amounts:${candidateBuyCount}`,
         ),
@@ -625,6 +695,7 @@ function buildAccountAwareSelfCyclingTasks(input: {
 
   const minOrderUsd = input.config.minOrderUsd;
   const maxOrderUsd = input.config.maxOrderUsd;
+  const minimumQuoteReserveUsd = resolveMinimumQuoteReserveUsd(input.config.execution);
   if (input.config.macroObjective === 'shakeout') {
     return buildShakeoutCurveManagedTasks(input);
   }
@@ -682,6 +753,11 @@ function buildAccountAwareSelfCyclingTasks(input: {
           `${input.seedBase}:self-cycling:sell-amounts:${candidateSellCount}`,
         ),
         'random',
+        (account) => calculateQuoteReserveDeficitUsd(account, minimumQuoteReserveUsd),
+        (account) => Math.max(
+          minOrderUsd,
+          calculateQuoteReserveDeficitUsd(account, minimumQuoteReserveUsd),
+        ),
       );
       if (!candidateSellOrders) {
         continue;
@@ -695,7 +771,11 @@ function buildAccountAwareSelfCyclingTasks(input: {
       }
       const buyCandidates = input.accounts.filter((account) =>
         account.pairCompatible &&
-        account.buyRemainingQuoteUsd + (soldByAccountId.get(account.accountId) ?? 0) >= minOrderUsd,
+        calculateSpendableQuoteUsd(
+          account,
+          minimumQuoteReserveUsd,
+          soldByAccountId.get(account.accountId) ?? 0,
+        ) >= minOrderUsd,
       );
       const candidateBuyOrders = allocateAccountOrders(
         buyCandidates,
@@ -704,7 +784,11 @@ function buildAccountAwareSelfCyclingTasks(input: {
         minOrderUsd,
         maxOrderUsd,
         input.config.execution,
-        (account) => account.buyRemainingQuoteUsd + (soldByAccountId.get(account.accountId) ?? 0),
+        (account) => calculateSpendableQuoteUsd(
+          account,
+          minimumQuoteReserveUsd,
+          soldByAccountId.get(account.accountId) ?? 0,
+        ),
         createDeterministicRandom(
           `${input.seedBase}:self-cycling:buy-amounts:${candidateBuyCount}`,
         ),
@@ -1004,6 +1088,7 @@ function toMutablePlannerAccount(
   baseTokenPriceUsd: number | null,
   existingVolumes: PlanningVolumeMaps,
   minOrderUsd: number,
+  minimumQuoteReserveUsd: number,
 ): MutablePlannerAccount {
   const solBalance = Number.parseFloat(account.walletBalance.sol) || 0;
   const storedSellCapacityUsd = buildSellCapacityUsd(account, baseTokenPriceUsd);
@@ -1016,6 +1101,9 @@ function toMutablePlannerAccount(
   const buyRemainingQuoteUsd = Math.max(
     0,
     account.quoteAvailableAmount - existingPlannedBuyVolumeUsd + existingPlannedSellVolumeUsd,
+  );
+  const initialSpendableQuoteUsd = roundToSixDecimals(
+    Math.max(0, buyRemainingQuoteUsd - minimumQuoteReserveUsd),
   );
   return {
     accountId: account.id,
@@ -1030,7 +1118,7 @@ function toMutablePlannerAccount(
     buyRemainingQuoteUsd,
     isBuyOverAllocated: false,
     pairCompatible: account.pairCompatible,
-    eligibleForBuy: account.pairCompatible && buyRemainingQuoteUsd >= minOrderUsd,
+    eligibleForBuy: account.pairCompatible && initialSpendableQuoteUsd >= minOrderUsd,
     eligibleForSell: account.pairCompatible && sellCapacityUsd >= minOrderUsd,
     existingPlannedBuyVolumeUsd,
     existingPlannedSellVolumeUsd,
@@ -1118,6 +1206,7 @@ export function buildStrategyPlanningResult(input: {
         input.baseTokenPriceUsd,
         input.existingPlannedVolumes ?? createEmptyPlanningVolumeMaps(),
         input.config.minOrderUsd,
+        resolveMinimumQuoteReserveUsd(input.config.execution),
       ),
     ]),
   );
@@ -1166,7 +1255,11 @@ export function buildStrategyPlanningResult(input: {
     for (const slice of plan.slices) {
       const eligibleAccounts = [...accountSummaries.values()].filter((account) =>
         spec.side === 'buy'
-          ? account.pairCompatible && account.buyRemainingQuoteUsd > MIN_VOLUME_EPSILON
+          ? account.pairCompatible &&
+            calculateSpendableQuoteUsd(
+              account,
+              resolveMinimumQuoteReserveUsd(input.config.execution),
+            ) > MIN_VOLUME_EPSILON
           : account.eligibleForSell,
       );
       const eligibleAccountsById = new Map(
@@ -1184,7 +1277,10 @@ export function buildStrategyPlanningResult(input: {
             ? account.existingPlannedBuyVolumeUsd + account.plannedBuyVolumeUsd
             : account.existingPlannedSellVolumeUsd + account.plannedSellVolumeUsd;
           const maxVolumeUsd = spec.side === 'buy'
-            ? account.buyRemainingQuoteUsd
+            ? calculateSpendableQuoteUsd(
+                account,
+                resolveMinimumQuoteReserveUsd(input.config.execution),
+              )
             : Math.max(0, account.sellCapacityUsd - existingPlannedVolumeUsd);
           return {
             accountId: account.accountId,
@@ -1308,7 +1404,13 @@ export function buildStrategyPlanningResult(input: {
     unallocatedVolumeUsd,
     isExecutable,
     availableBuyAmount: roundToSixDecimals(
-      eligibleBuyAccounts.reduce((sum, account) => sum + account.quoteAvailableAmount, 0),
+      eligibleBuyAccounts.reduce(
+        (sum, account) => sum + calculateSpendableQuoteUsd(
+          account,
+          resolveMinimumQuoteReserveUsd(input.config.execution),
+        ),
+        0,
+      ),
     ),
     eligibleTradingAccountCount: eligibleAssetAccounts.length,
     eligibleBuyAccountCount: eligibleBuyAccounts.length,

@@ -118,6 +118,9 @@ export function buildStrategyDocumentFromSettings(
       accountDispersionStrength:
         settings.accountDispersionStrength ??
         DEFAULT_EXECUTION_CONFIG.accountDispersionStrength,
+      minimumQuoteReserveUsd:
+        settings.minimumQuoteReserveUsd ??
+        DEFAULT_EXECUTION_CONFIG.minimumQuoteReserveUsd,
       macroObjective:
         settings.macroObjective ?? DEFAULT_EXECUTION_CONFIG.macroObjective,
       tactics: {
@@ -154,6 +157,9 @@ export function buildStrategyDocumentFromSettings(
         accountDispersionStrength:
           settings.accountDispersionStrength ??
           DEFAULT_EXECUTION_CONFIG.accountDispersionStrength,
+        minimumQuoteReserveUsd:
+          settings.minimumQuoteReserveUsd ??
+          DEFAULT_EXECUTION_CONFIG.minimumQuoteReserveUsd,
         onExternalBuy:
           settings.onExternalBuy ?? DEFAULT_TRIGGER_CONFIG.onExternalBuy,
         onExternalSell:

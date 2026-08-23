@@ -57,6 +57,7 @@ export interface StrategySettingsInput {
   macroObjective?: StrategyMacroObjective;
   accountCyclingEnabled?: boolean;
   accountDispersionStrength?: number;
+  minimumQuoteReserveUsd?: number;
   tactics?: Partial<StrategyExecutionTactics>;
 }
 
@@ -106,6 +107,7 @@ export interface StrategyExecutionConfig {
   volumeJitterRatio: number;
   accountCyclingEnabled: boolean;
   accountDispersionStrength: number;
+  minimumQuoteReserveUsd: number;
   macroObjective: StrategyMacroObjective;
   tactics: StrategyExecutionTactics;
 }

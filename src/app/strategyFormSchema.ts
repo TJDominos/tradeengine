@@ -402,6 +402,16 @@ export const STRATEGY_FIELD_SCHEMAS: StrategyFieldSchema[] = [
     capability: 'supported',
     editable: true,
   },
+  {
+    id: 'minimumQuoteReserveUsd',
+    path: 'execution.minimumQuoteReserveUsd',
+    section: 'execution',
+    label: 'Minimum Quote Reserve (USD)',
+    description: 'Keeps this much quote liquidity available on each planned account when enough balance exists.',
+    fieldType: 'number',
+    capability: 'supported',
+    editable: true,
+  },
 ];
 
 export function createStrategyDraftFromSettings(
@@ -455,6 +465,7 @@ export function createStrategyDraftFromSettings(
       volumeJitterRatio: 0.15,
       accountCyclingEnabled: true,
       accountDispersionStrength: 0.5,
+      minimumQuoteReserveUsd: 0,
       macroObjective: 'accumulation',
       tactics: {
         dumpRatio: 1.2,

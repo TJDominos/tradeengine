@@ -749,6 +749,76 @@ assert.ok(
   'all randomized counts must stay within configured and mathematical bounds',
 );
 
+const quoteReserveDocument = buildStrategyDocumentFromSettings({
+  baseTokenAddress,
+  quoteTokenAddress,
+  minTransactions: 22,
+  volatilityTarget: 0,
+  pullbackTarget: 0,
+  volumeTarget: 220,
+  netBuyinTarget: 100,
+  timeRangeTarget: '24h',
+  maxTransactions: 50,
+  maxSlippage: 1,
+  strategyNotes: 'quote reserve dispersion regression',
+  macroObjective: 'accumulation',
+});
+quoteReserveDocument.parameters.minOrderUsd = 5;
+quoteReserveDocument.parameters.maxOrderUsd = 30;
+quoteReserveDocument.execution.minimumQuoteReserveUsd = 10;
+quoteReserveDocument.execution.accountDispersionStrength = 3;
+const quoteReserveConfig = {
+  ...config,
+  baseOrderCount: resolveBasePlannedTransactionCount(quoteReserveDocument),
+  baseTotalVolumeUsd: quoteReserveDocument.targets.volumeUsdMin,
+  minOrderUsd: quoteReserveDocument.parameters.minOrderUsd,
+  maxOrderUsd: quoteReserveDocument.parameters.maxOrderUsd,
+  execution: quoteReserveDocument.execution,
+};
+const quoteReserveAccounts = [
+  ...Array.from({ length: 3 }, (_, index) => buildAccount(index + 1, 70, 0)),
+  ...Array.from({ length: 6 }, (_, index) => buildAccount(index + 4, 0.75, 20)),
+];
+const quoteReservePlan = buildStrategyPlanningResult({
+  document: quoteReserveDocument,
+  config: quoteReserveConfig,
+  accounts: quoteReserveAccounts,
+  taskSpecs: buildStrategyPlanTaskSpecs(quoteReserveConfig, 100),
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'quote-reserve-dispersion',
+});
+assert.equal(quoteReservePlan.isExecutable, true);
+const finalQuoteByAccountId = new Map(
+  quoteReserveAccounts.map((account) => [account.id, account.quoteAvailableAmount]),
+);
+const finalBaseUsdByAccountId = new Map(
+  quoteReserveAccounts.map((account) => [account.id, account.baseTokenAmount]),
+);
+for (const task of quoteReservePlan.tasks) {
+  const allocation = task.allocations[0]!;
+  finalQuoteByAccountId.set(
+    allocation.accountId,
+    (finalQuoteByAccountId.get(allocation.accountId) ?? 0) +
+      (task.side === 'sell' ? task.totalVolumeUsd : -task.totalVolumeUsd),
+  );
+  finalBaseUsdByAccountId.set(
+    allocation.accountId,
+    (finalBaseUsdByAccountId.get(allocation.accountId) ?? 0) +
+      (task.side === 'buy' ? task.totalVolumeUsd : -task.totalVolumeUsd),
+  );
+}
+for (let accountId = 4; accountId <= 9; accountId += 1) {
+  assert.ok(
+    (finalQuoteByAccountId.get(accountId) ?? 0) >= 10,
+    'quote reserve should leave underfunded base holders with at least 10 USDC',
+  );
+  assert.ok(
+    (finalBaseUsdByAccountId.get(accountId) ?? 0) > 0,
+    'quote reserve funding should not fully drain base-token accounts',
+  );
+}
+
 const impossibleMinimumCounts = calculateFeasibleTradeCounts(20, 50, 80, 5, 5, 30);
 assert.equal(
   impossibleMinimumCounts,
