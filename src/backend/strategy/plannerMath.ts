@@ -99,6 +99,34 @@ export function calculateSelfCyclingTradeTotals(
   };
 }
 
+export function calculateDistributionTradeTotals(
+  targetGrossVolumeUsd: number,
+  requiredNetSellVolumeUsd: number,
+  minimumBuyVolumeUsd = 0,
+): TradeTotals {
+  const normalizedGross = Math.max(0, targetGrossVolumeUsd);
+  const netSellVolumeUsd = Math.min(
+    normalizedGross,
+    Math.max(0, requiredNetSellVolumeUsd),
+  );
+  const rawTargetBuyVolumeUsd = (normalizedGross - netSellVolumeUsd) / 2;
+  const targetBuyVolumeUsd = rawTargetBuyVolumeUsd > MIN_VOLUME_EPSILON
+    ? Math.max(rawTargetBuyVolumeUsd, minimumBuyVolumeUsd)
+    : 0;
+  const buyVolumeUsd = roundToSixDecimals(targetBuyVolumeUsd);
+  const sellVolumeUsd = roundToSixDecimals(
+    buyVolumeUsd > 0
+      ? netSellVolumeUsd + buyVolumeUsd
+      : normalizedGross,
+  );
+  return {
+    buyVolumeUsd,
+    sellVolumeUsd,
+    grossVolumeUsd: roundToSixDecimals(buyVolumeUsd + sellVolumeUsd),
+    netBuyVolumeUsd: roundToSixDecimals(buyVolumeUsd - sellVolumeUsd),
+  };
+}
+
 function deriveOrderCountBounds(
   volumeUsd: number,
   minOrderUsd: number,

@@ -4,10 +4,10 @@ import type { ManagedAccountBalanceRecord } from '../userStore';
 import { buildRandomizedTwapPlan } from './engine';
 import {
   allocateBoundedOrderVolume,
+  calculateDistributionTradeTotals,
   calculateFeasibleTradeCounts,
   calculateSelfCyclingTradeTotals,
 } from './plannerMath';
-import { splitBasePlannedTransactionCount } from './plannedTransactions';
 import type {
   StrategyExecutionConfig,
   StrategyMacroObjective,
@@ -616,7 +616,6 @@ function buildAccountAwareSelfCyclingTasks(input: {
   seedBase: string;
 }): StrategyPlannerTask[] | null {
   if (
-    input.config.macroObjective === 'distribution' ||
     input.taskSpecs.length !== 2 ||
     input.taskSpecs[0]?.side !== 'sell' ||
     input.taskSpecs[1]?.side !== 'buy'
@@ -878,32 +877,48 @@ export function buildStrategyPlanTaskSpecs(
 ): StrategyPlannerTaskSpec[] {
   const plannerOrderCount = normalizePlannerTaskOrderCount(config.baseOrderCount);
   const totalVolumeUsd = positiveNumber(config.baseTotalVolumeUsd);
-  const staggeredPulseOffsetMs = Math.min(750, config.baseDurationMs);
 
   switch (config.macroObjective) {
     case 'distribution': {
-      const { buyCount, sellCount } = splitBasePlannedTransactionCount(
-        config.macroObjective,
-        plannerOrderCount,
+      const { buyVolumeUsd, sellVolumeUsd } = calculateDistributionTradeTotals(
+        totalVolumeUsd,
+        positiveNumber(requiredNetBuyAmount),
       );
-      return [
+      const feasibleCounts = calculateFeasibleTradeCounts(
+        plannerOrderCount,
+        config.maxOrderCount,
+        buyVolumeUsd,
+        sellVolumeUsd,
+        config.minOrderUsd,
+        config.maxOrderUsd,
+      );
+      const fallbackSellCount = Math.max(1, Math.round(
+        plannerOrderCount * sellVolumeUsd / Math.max(MIN_VOLUME_EPSILON, totalVolumeUsd),
+      ));
+      const sellCount = feasibleCounts?.sellCount ?? fallbackSellCount;
+      const buyCount = feasibleCounts?.buyCount ?? Math.max(0, plannerOrderCount - sellCount);
+
+      const specs: StrategyPlannerTaskSpec[] = [
         {
-          side: 'buy',
-          pulse: 'wash_buy',
-          totalVolumeUsd: totalVolumeUsd / 2,
-          orderCount: buyCount,
+          side: 'sell',
+          pulse: 'distribution_sell',
+          totalVolumeUsd: sellVolumeUsd,
+          orderCount: sellCount,
           durationMs: config.baseDurationMs,
           scheduledOffsetMs: 0,
         },
-        {
-          side: 'sell',
-          pulse: 'wash_sell',
-          totalVolumeUsd: totalVolumeUsd / 2,
-          orderCount: sellCount,
-          durationMs: Math.max(0, config.baseDurationMs - staggeredPulseOffsetMs),
-          scheduledOffsetMs: staggeredPulseOffsetMs,
-        },
       ];
+      if (buyVolumeUsd > MIN_VOLUME_EPSILON && buyCount > 0) {
+        specs.push({
+          side: 'buy',
+          pulse: 'support_buy',
+          totalVolumeUsd: buyVolumeUsd,
+          orderCount: buyCount,
+          durationMs: config.baseDurationMs,
+          scheduledOffsetMs: 0,
+        });
+      }
+      return specs;
     }
     case 'accumulation':
     case 'shakeout': {

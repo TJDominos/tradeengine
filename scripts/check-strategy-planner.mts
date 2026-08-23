@@ -9,6 +9,7 @@ import {
 import { buildStrategyPriceCurveReview } from '../src/backend/strategy/priceCurve';
 import {
   allocateBoundedOrderVolume,
+  calculateDistributionTradeTotals,
   calculateFeasibleTradeCounts,
   calculateRemainingPlanVolumes,
   calculateSelfCyclingTradeTotals,
@@ -753,6 +754,127 @@ assert.equal(
   impossibleMinimumCounts,
   null,
   'a mathematically impossible minimum must be rejected instead of silently reduced to 17',
+);
+
+const distributionTotals = calculateDistributionTradeTotals(150, 100, 0);
+assert.deepEqual(distributionTotals, {
+  buyVolumeUsd: 25,
+  sellVolumeUsd: 125,
+  grossVolumeUsd: 150,
+  netBuyVolumeUsd: -100,
+});
+
+const pureSellDistributionTotals = calculateDistributionTradeTotals(100, 100, 0);
+assert.deepEqual(pureSellDistributionTotals, {
+  buyVolumeUsd: 0,
+  sellVolumeUsd: 100,
+  grossVolumeUsd: 100,
+  netBuyVolumeUsd: -100,
+});
+
+const distributionDocument = buildStrategyDocumentFromSettings({
+  baseTokenAddress,
+  quoteTokenAddress,
+  minTransactions: 20,
+  volatilityTarget: 0,
+  pullbackTarget: 0,
+  volumeTarget: 150,
+  netBuyinTarget: 100,
+  timeRangeTarget: '24h',
+  maxTransactions: 50,
+  maxSlippage: 1,
+  strategyNotes: 'distribution selling regression',
+  macroObjective: 'distribution',
+});
+distributionDocument.parameters.minOrderUsd = 5;
+distributionDocument.parameters.maxOrderUsd = 30;
+
+const distributionConfig = {
+  macroObjective: distributionDocument.execution.macroObjective,
+  baseOrderCount: resolveBasePlannedTransactionCount(distributionDocument),
+  maxOrderCount: distributionDocument.parameters.maxTransactions,
+  baseTotalVolumeUsd: 150,
+  baseDurationMs: 24 * 60 * 60 * 1000,
+  targetPullbackPct: 0,
+  targetVolatilityPct: 0,
+  minOrderUsd: 5,
+  maxOrderUsd: 30,
+  execution: distributionDocument.execution,
+  baseTokenAddress,
+  quoteTokenAddress,
+};
+
+const distributionTaskSpecs = buildStrategyPlanTaskSpecs(distributionConfig, 100);
+assert.equal(
+  distributionTaskSpecs.reduce((sum, spec) => sum + (spec.side === 'sell' ? spec.totalVolumeUsd : 0), 0),
+  125,
+  'distribution task specs should generate 125 USD sell volume for a 150 gross / 100 net sell plan',
+);
+assert.equal(
+  distributionTaskSpecs.reduce((sum, spec) => sum + (spec.side === 'buy' ? spec.totalVolumeUsd : 0), 0),
+  25,
+  'distribution task specs should generate 25 USD support buy volume',
+);
+
+const distributionAccounts = [
+  ...Array.from({ length: 25 }, (_, index) => buildAccount(index + 1, 0, 10)),
+  buildAccount(26, 30, 0),
+];
+const distributionPlanning = buildStrategyPlanningResult({
+  document: distributionDocument,
+  config: distributionConfig,
+  accounts: distributionAccounts,
+  taskSpecs: distributionTaskSpecs,
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'distribution-regression',
+});
+assert.equal(distributionPlanning.isExecutable, true);
+assert.equal(
+  Number(distributionPlanning.tasks.reduce(
+    (sum, task) => sum + (task.side === 'sell' ? task.totalVolumeUsd : -task.totalVolumeUsd),
+    0,
+  ).toFixed(6)),
+  100,
+  'planned net sell should equal 100 USD (net inflow of USDC from selling)',
+);
+assert.ok(
+  distributionPlanning.tasks.some((task) => task.side === 'sell'),
+  'distribution plan must include sell orders',
+);
+
+// 100% pure sell distribution test (no quote balance required)
+const pureSellDocument = {
+  ...distributionDocument,
+  targets: {
+    ...distributionDocument.targets,
+    volumeUsdMin: 100,
+    netBuyinUsdMin: 100,
+  },
+};
+const pureSellConfig = {
+  ...distributionConfig,
+  baseTotalVolumeUsd: 100,
+};
+const pureSellSpecs = buildStrategyPlanTaskSpecs(pureSellConfig, 100);
+assert.equal(pureSellSpecs.length, 1);
+assert.equal(pureSellSpecs[0]!.side, 'sell');
+assert.equal(pureSellSpecs[0]!.totalVolumeUsd, 100);
+
+const pureSellPlanning = buildStrategyPlanningResult({
+  document: pureSellDocument,
+  config: pureSellConfig,
+  accounts: Array.from({ length: 20 }, (_, index) => buildAccount(index + 1, 0, 10)),
+  taskSpecs: pureSellSpecs,
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'pure-sell-distribution',
+});
+assert.equal(pureSellPlanning.isExecutable, true);
+assert.ok(pureSellPlanning.tasks.every((task) => task.side === 'sell'), 'pure sell plan should only contain sell tasks');
+assert.equal(
+  pureSellPlanning.tasks.reduce((sum, task) => sum + task.totalVolumeUsd, 0),
+  100,
 );
 
 console.log('Strategy planner check passed. Eligibility and executable transaction count are correct.');

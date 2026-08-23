@@ -20,7 +20,7 @@ export class DistributionStrategy extends BaseTradingStrategy {
 
   public async onInit(): Promise<void> {
     this.context.setState('DISTRIBUTING');
-    await this.generateWashTrades();
+    await this.generateDistributionTrades();
   }
 
   public async onExternalWhaleBuy(amountUsd: number): Promise<void> {
@@ -48,6 +48,7 @@ export class DistributionStrategy extends BaseTradingStrategy {
         },
       });
     }
+    await this.generateDistributionTrades();
   }
 
   public async onExternalWhaleSell(_amountUsd: number): Promise<void> {
@@ -58,7 +59,7 @@ export class DistributionStrategy extends BaseTradingStrategy {
     return;
   }
 
-  private async generateWashTrades(): Promise<void> {
+  private async generateDistributionTrades(): Promise<void> {
     if (this.context.hasNormalWorkQueued()) {
       return;
     }
@@ -67,28 +68,36 @@ export class DistributionStrategy extends BaseTradingStrategy {
       this.context.macroObjective,
       this.context.getBaseOrderCount(),
     );
-    const perSideVolumeUsd = this.context.getBaseTotalVolumeUsd() / 2;
+    const totalVolumeUsd = this.context.getBaseTotalVolumeUsd();
+    const totalOrders = Math.max(1, buyCount + sellCount);
 
-    await this.context.enqueuePulsePlan({
-      side: 'buy',
-      totalVolumeUsd: perSideVolumeUsd,
-      orderCount: buyCount,
-      durationMs: this.context.getBaseDurationMs(),
-      enqueue: 'normal',
-      metadata: {
-        basePulse: 'wash_buy',
-      },
-    });
-    await this.context.enqueuePulsePlan({
-      side: 'sell',
-      totalVolumeUsd: perSideVolumeUsd,
-      orderCount: sellCount,
-      durationMs: this.context.getBaseDurationMs(),
-      enqueue: 'normal',
-      scheduledOffsetMs: 750,
-      metadata: {
-        basePulse: 'wash_sell',
-      },
-    });
+    if (sellCount > 0) {
+      const sellVolumeUsd = (totalVolumeUsd * sellCount) / totalOrders;
+      await this.context.enqueuePulsePlan({
+        side: 'sell',
+        totalVolumeUsd: sellVolumeUsd,
+        orderCount: sellCount,
+        durationMs: this.context.getBaseDurationMs(),
+        enqueue: 'normal',
+        metadata: {
+          basePulse: 'distribution_sell',
+        },
+      });
+    }
+
+    if (buyCount > 0) {
+      const buyVolumeUsd = (totalVolumeUsd * buyCount) / totalOrders;
+      await this.context.enqueuePulsePlan({
+        side: 'buy',
+        totalVolumeUsd: buyVolumeUsd,
+        orderCount: buyCount,
+        durationMs: this.context.getBaseDurationMs(),
+        enqueue: 'normal',
+        scheduledOffsetMs: 750,
+        metadata: {
+          basePulse: 'support_buy',
+        },
+      });
+    }
   }
 }

@@ -295,11 +295,19 @@ function buildStrategyPlanPreview(
 ): StrategyPlanPreviewResponse {
   const generatedAt = Date.now();
   const quoteLabel = formatQuoteLabel(config.quoteTokenAddress);
+  const taskSpecs = buildStrategyPlanTaskSpecs(config, requiredBuyAmount);
+  const plannedBuyVolumeUsd = taskSpecs.reduce(
+    (sum, spec) => sum + (spec.side === 'buy' ? spec.totalVolumeUsd : 0),
+    0,
+  );
+  const effectiveRequiredBuyAmount = config.macroObjective === 'distribution'
+    ? plannedBuyVolumeUsd
+    : requiredBuyAmount;
   const planning = buildStrategyPlanningResult({
     document,
     config,
     accounts,
-    taskSpecs: buildStrategyPlanTaskSpecs(config, requiredBuyAmount),
+    taskSpecs,
     startTime: generatedAt + 1_000,
     baseTokenPriceUsd: marketSnapshot?.priceUsd ?? null,
     seedContext: `preview:${crypto.randomUUID()}`,
@@ -315,7 +323,7 @@ function buildStrategyPlanPreview(
     macroObjective: config.macroObjective,
     accountCyclingEnabled: document.execution.accountCyclingEnabled,
     quoteLabel,
-    requiredBuyAmount,
+    requiredBuyAmount: effectiveRequiredBuyAmount,
     availableBuyAmount: planning.availableBuyAmount,
     enabledAccountCount: planning.accounts.length,
     eligibleTradingAccountCount: planning.eligibleTradingAccountCount,
@@ -323,7 +331,7 @@ function buildStrategyPlanPreview(
     skippedForCapabilityCount: planning.skippedForCapabilityCount,
     skippedForNoPairAssetCount: planning.skippedForNoPairAssetCount,
     skippedForSolReserveCount: planning.lowSolWarningCount,
-    sufficientBuyCapacity: planning.availableBuyAmount >= requiredBuyAmount,
+    sufficientBuyCapacity: planning.availableBuyAmount >= effectiveRequiredBuyAmount,
     requestedTaskCount: planning.requestedTaskCount,
     plannedTaskCount: planning.plannedTaskCount,
     unallocatedVolumeUsd: planning.unallocatedVolumeUsd,

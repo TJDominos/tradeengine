@@ -834,7 +834,14 @@ export default function StrategySchemaForm({
               />
             </FieldShell>
 
-            <FieldShell label="Net Buy-In Target (USD)" helper="Optional qualification target for future signal enrichment.">
+            <FieldShell
+              label={objective === 'distribution' ? 'Net Sell Target (USD)' : 'Net Buy-In Target (USD)'}
+              helper={
+                objective === 'distribution'
+                  ? 'Target net sell volume to distribute out of inventory during execution.'
+                  : 'Optional qualification target for future signal enrichment.'
+              }
+            >
               <Controller
                 control={control}
                 name="targets.netBuyinUsdMin"

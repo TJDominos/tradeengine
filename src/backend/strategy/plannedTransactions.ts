@@ -92,11 +92,13 @@ export function splitBasePlannedTransactionCount(
   );
 
   switch (macroObjective) {
-    case 'distribution':
+    case 'distribution': {
+      const buyCount = Math.floor(normalizedTotalTransactions / 3);
       return {
-        buyCount: Math.ceil(normalizedTotalTransactions / 2),
-        sellCount: Math.floor(normalizedTotalTransactions / 2),
+        buyCount,
+        sellCount: Math.max(1, normalizedTotalTransactions - buyCount),
       };
+    }
     case 'accumulation':
     case 'shakeout':
     default:
