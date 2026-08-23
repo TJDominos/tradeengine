@@ -124,6 +124,20 @@ function deriveRequiredStrategyBuyAmount(document: StrategyVersionDocument): num
   );
 }
 
+function deriveRequiredImmediateBuyAmount(
+  document: StrategyVersionDocument,
+  config: StrategyRecordConfig,
+): number {
+  const configuredNetTargetAmount = deriveRequiredStrategyBuyAmount(document);
+  if (config.macroObjective !== 'distribution') {
+    return configuredNetTargetAmount;
+  }
+  return buildStrategyPlanTaskSpecs(config, configuredNetTargetAmount).reduce(
+    (sum, spec) => sum + (spec.side === 'buy' ? spec.totalVolumeUsd : 0),
+    0,
+  );
+}
+
 function validateReviewedPlan(input: {
   rawPlan: unknown;
   document: StrategyVersionDocument;
@@ -580,7 +594,14 @@ export async function handleStrategyRoutes(
       },
     });
 
-    const requiredBuyAmount = deriveRequiredStrategyBuyAmount(normalizedDocument);
+    const strategyConfig = buildStrategyRecordConfigFromDocument(
+      normalizedDocument,
+      user.id,
+    );
+    const requiredBuyAmount = deriveRequiredImmediateBuyAmount(
+      normalizedDocument,
+      strategyConfig,
+    );
     const [planningAccounts, deploymentMarketSnapshot] = await Promise.all([
       listManagedAccountsWithStoredBalances(env.TRADINGBOT_DB, user.id, {
         pair: {
@@ -630,7 +651,7 @@ export async function handleStrategyRoutes(
     const reviewedPlan = validateReviewedPlan({
       rawPlan: deploymentRequest.reviewedPlan,
       document: normalizedDocument,
-      config: buildStrategyRecordConfigFromDocument(normalizedDocument, user.id),
+      config: strategyConfig,
       accounts: planningAccounts,
       baseTokenPriceUsd: deploymentMarketSnapshot?.priceUsd ?? null,
       liquidityUsd: deploymentMarketSnapshot?.liquidityUsd ?? null,

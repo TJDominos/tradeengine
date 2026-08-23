@@ -562,7 +562,18 @@ export default function StrategySchemaForm({
                 control={control}
                 name="execution.macroObjective"
                 render={({ field }) => (
-                  <select {...field} className={textInputClassName()}>
+                  <select
+                    {...field}
+                    onChange={(event) => {
+                      const nextObjective = event.target.value as StrategyMacroObjective;
+                      field.onChange(nextObjective);
+                      const currentNetTarget = getValues('targets.netBuyinUsdMin');
+                      if (nextObjective === 'distribution' && (currentNetTarget == null || currentNetTarget <= 0)) {
+                        setValue('targets.netBuyinUsdMin', formData.targets?.volumeUsdMin ?? 0, { shouldDirty: true });
+                      }
+                    }}
+                    className={textInputClassName()}
+                  >
                     {macroObjectiveOptions.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
