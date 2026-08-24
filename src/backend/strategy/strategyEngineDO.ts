@@ -75,6 +75,38 @@ export function resolveStrategyTaskFailureTransition(
   };
 }
 
+function readRetryExcludedAccountIds(metadata: Record<string, unknown> | undefined): number[] {
+  const rawValue = metadata?.retryExcludedAccountIds;
+  if (!Array.isArray(rawValue)) {
+    return [];
+  }
+  return [...new Set(
+    rawValue.filter(
+      (value): value is number => Number.isInteger(value) && value > 0,
+    ),
+  )].sort((left, right) => left - right);
+}
+
+function appendRetryExcludedAccountIds(
+  metadata: Record<string, unknown> | undefined,
+  accountIds: Array<number | null | undefined>,
+): number[] {
+  const excludedAccountIds = new Set(readRetryExcludedAccountIds(metadata));
+  for (const accountId of accountIds) {
+    if (typeof accountId === 'number' && Number.isInteger(accountId) && accountId > 0) {
+      excludedAccountIds.add(accountId);
+    }
+  }
+  return [...excludedAccountIds].sort((left, right) => left - right);
+}
+
+function readRetryAttempt(metadata: Record<string, unknown> | undefined): number {
+  const rawValue = metadata?.retryAttempt;
+  return typeof rawValue === 'number' && Number.isInteger(rawValue) && rawValue >= 0
+    ? rawValue
+    : 0;
+}
+
 export interface StrategyEngineDurableObjectMetrics {
   actualTotalVolumeUsd: number;
   actualNetInflowUsd: number;
@@ -390,6 +422,7 @@ export class StrategyEngineDurableObject {
           },
           now,
           execution.lastError ?? 'Task volume could not be fully executed',
+          execution.failedAccountIds,
         );
         if (this.persistedState.status === 'paused') {
           return;
@@ -488,6 +521,16 @@ export class StrategyEngineDurableObject {
     const pausedTask = this.persistedState.pausedTask;
     this.persistedState.pausedTask = null;
     if (pausedTask) {
+      const pausedTaskSnapshot = this.persistedState.taskSnapshots.find(
+        (candidate) => candidate.id === pausedTask.id,
+      );
+      const retryExcludedAccountIds = appendRetryExcludedAccountIds(
+        pausedTask.metadata,
+        [
+          pausedTaskSnapshot?.accountId,
+          ...(pausedTask.allocations?.map((allocation) => allocation.accountId) ?? []),
+        ],
+      );
       this.enqueueTask({
         ...pausedTask,
         allocations: undefined,
@@ -495,11 +538,16 @@ export class StrategyEngineDurableObject {
         metadata: {
           ...pausedTask.metadata,
           retryPriority: true,
+          retryAttempt: readRetryAttempt(pausedTask.metadata) + 1,
+          retryExcludedAccountIds,
         },
       });
       this.updateTaskSnapshot(pausedTask.id, {
         status: 'pending',
         nextExecutionTime: Date.now(),
+        accountAddress: null,
+        walletAddress: null,
+        accountId: null,
       });
     }
     await this.persistState();
@@ -1065,10 +1113,15 @@ export class StrategyEngineDurableObject {
     }
 
     const { accounts, baseTokenPriceUsd } = await this.loadPlanningInputs();
+    const retryExcludedAccountIds = readRetryExcludedAccountIds(task.metadata);
+    const retryExcludedAccountIdSet = new Set(retryExcludedAccountIds);
+    const planningAccounts = retryExcludedAccountIdSet.size > 0
+      ? accounts.filter((account) => !retryExcludedAccountIdSet.has(account.id))
+      : accounts;
     const planning = buildStrategyPlanningResult({
       document: config.strategyDocument,
       config: this.buildPlannerConfig(),
-      accounts,
+      accounts: planningAccounts,
       taskSpecs: [
         {
           side: task.side,
@@ -1083,7 +1136,7 @@ export class StrategyEngineDurableObject {
       startTime: task.scheduledAt,
       baseTokenPriceUsd,
       existingPlannedVolumes: this.buildExistingPlannedVolumes(),
-      seedContext: `retry:${task.id}`,
+      seedContext: `retry:${task.id}:${readRetryAttempt(task.metadata)}:${retryExcludedAccountIds.join(',')}`,
     });
     return planning.tasks[0]?.allocations ?? [];
   }
@@ -1095,6 +1148,7 @@ export class StrategyEngineDurableObject {
     retryVolumeUsd: number;
     fills: Array<{ accountId: number; executedVolumeUsd: number }>;
     lastError: string | null;
+    failedAccountIds: number[];
   }> {
     const config = this.persistedState.config;
     if (!config) {
@@ -1135,6 +1189,7 @@ export class StrategyEngineDurableObject {
     }
     let executedVolumeUsd = 0;
     const fills: Array<{ accountId: number; executedVolumeUsd: number }> = [];
+    const failedAccountIds = new Set<number>();
     const executablePlannedVolumeUsd = executableAccounts.reduce(
       (sum, executableAccount) => sum + executableAccount.allocation.plannedVolumeUsd,
       0,
@@ -1190,6 +1245,7 @@ export class StrategyEngineDurableObject {
       } catch (error: unknown) {
         retryVolumeUsd += sliceVolumeUsd;
         lastError = error instanceof Error ? error.message : String(error);
+        failedAccountIds.add(executableAccount.allocation.accountId);
         await this.persistFailedTradeLog(
           task,
           executableAccount.allocation,
@@ -1207,6 +1263,7 @@ export class StrategyEngineDurableObject {
       retryVolumeUsd: Number(retryVolumeUsd.toFixed(6)),
       fills,
       lastError,
+      failedAccountIds: [...failedAccountIds],
     };
   }
 
@@ -1419,6 +1476,7 @@ export class StrategyEngineDurableObject {
     task: StrategyEngineDurableObjectTask,
     now: number,
     error: string,
+    failedAccountIds: number[] = [],
   ): Promise<void> {
     const snapshot = this.persistedState.taskSnapshots.find(
       (candidate) => candidate.id === task.id,
@@ -1432,6 +1490,15 @@ export class StrategyEngineDurableObject {
       attemptCount,
       now,
       nextScheduledTask?.scheduledAt ?? null,
+    );
+    const retryExcludedAccountIds = appendRetryExcludedAccountIds(
+      task.metadata,
+      failedAccountIds.length > 0
+        ? failedAccountIds
+        : [
+            accountId,
+            ...(task.allocations?.map((allocation) => allocation.accountId) ?? []),
+          ],
     );
     if (transition.pause) {
       this.updateTaskSnapshot(task.id, {
@@ -1447,6 +1514,11 @@ export class StrategyEngineDurableObject {
       this.persistedState.pausedTask = {
         ...task,
         allocations: undefined,
+        metadata: {
+          ...task.metadata,
+          retryAttempt: attemptCount,
+          retryExcludedAccountIds,
+        },
       };
       this.persistedState.status = 'paused';
       await this.ctx.storage.deleteAlarm();
@@ -1463,6 +1535,8 @@ export class StrategyEngineDurableObject {
         ...task.metadata,
         retryPriority: attemptCount === 2,
         lastRetryAt: now,
+        retryAttempt: attemptCount,
+        retryExcludedAccountIds,
       },
     });
     this.updateTaskSnapshot(task.id, {
