@@ -490,6 +490,7 @@ export class StrategyEngineDurableObject {
     if (pausedTask) {
       this.enqueueTask({
         ...pausedTask,
+        allocations: undefined,
         scheduledAt: Date.now(),
         metadata: {
           ...pausedTask.metadata,
@@ -1445,17 +1446,7 @@ export class StrategyEngineDurableObject {
       });
       this.persistedState.pausedTask = {
         ...task,
-        allocations: task.allocations ?? (accountAddress ? [{
-          accountId: accountId ?? 0,
-          label: accountAddress,
-          walletAddress: accountAddress,
-          plannedVolumeUsd: task.amountUsd,
-          quoteAvailableAmount: 0,
-          baseTokenAmount: 0,
-          solBalance: 0,
-          accountBuyOverAllocated: false,
-          accountBuyOverAllocationUsd: 0,
-        }] : undefined),
+        allocations: undefined,
       };
       this.persistedState.status = 'paused';
       await this.ctx.storage.deleteAlarm();
@@ -1466,17 +1457,7 @@ export class StrategyEngineDurableObject {
     const retryAt = transition.retryAt ?? now + FIRST_TASK_RETRY_DELAY_MS;
     this.enqueueTask({
       ...task,
-      allocations: task.allocations ?? (accountAddress ? [{
-        accountId: accountId ?? 0,
-        label: accountAddress,
-        walletAddress: accountAddress,
-        plannedVolumeUsd: task.amountUsd,
-        quoteAvailableAmount: 0,
-        baseTokenAmount: 0,
-        solBalance: 0,
-        accountBuyOverAllocated: false,
-        accountBuyOverAllocationUsd: 0,
-      }] : undefined),
+      allocations: undefined,
       scheduledAt: retryAt,
       metadata: {
         ...task.metadata,
