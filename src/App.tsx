@@ -28,6 +28,7 @@ import type {
   TokenMarketFdvRange,
   TokenMarketSnapshot,
   TransactionLogRefreshStatus,
+  TransactionLogOwnershipFilter,
   TradableToken,
   WalletBalance,
 } from './app/types';
@@ -36,6 +37,8 @@ import {
   buildWalletOwnershipLookup,
   createDefaultDateRange,
   formatDate,
+  getTransactionLogActionEventLabel,
+  getTransactionLogOwnershipCategory,
   mergeTradableToken,
   normalizeTimestampMs,
   resolveWalletOwnershipMeta,
@@ -78,6 +81,9 @@ export default function App() {
   const [outsiderPage, setOutsiderPage] = React.useState(1);
   const [dashboardLogTab, setDashboardLogTab] = React.useState<DashboardLogTab>('transaction');
   const [transactionLogSearchTerm, setTransactionLogSearchTerm] = React.useState('');
+  const [transactionLogActionEventFilters, setTransactionLogActionEventFilters] = React.useState<string[]>([]);
+  const [transactionLogOwnershipFilter, setTransactionLogOwnershipFilter] =
+    React.useState<TransactionLogOwnershipFilter>('all');
   const [activityLogSearchTerm, setActivityLogSearchTerm] = React.useState('');
   const [transactionLogCurrentPage, setTransactionLogCurrentPage] = React.useState(1);
   const [activityLogCurrentPage, setActivityLogCurrentPage] = React.useState(1);
@@ -1659,6 +1665,9 @@ export default function App() {
   const walletOwnershipLookup = buildWalletOwnershipLookup(engineState);
 
   const combinedTransactionLogs = engineState.transactionLogs;
+  const transactionLogActionEventOptions = Array.from(
+    new Set(combinedTransactionLogs.map((log) => getTransactionLogActionEventLabel(log, walletOwnershipLookup))),
+  ).sort();
 
   const rangeTransactionLogs = combinedTransactionLogs.filter((log) =>
     isInSelectedRange(resolveTransactionLogTimestamp(log)),
@@ -1680,6 +1689,18 @@ export default function App() {
   const filteredTransactionLogs = combinedTransactionLogs.filter((log) => {
     const term = transactionLogSearchTerm.toLowerCase();
     if (!isInSelectedRange(resolveTransactionLogTimestamp(log))) {
+      return false;
+    }
+    if (
+      transactionLogOwnershipFilter !== 'all' &&
+      getTransactionLogOwnershipCategory(log, walletOwnershipLookup) !== transactionLogOwnershipFilter
+    ) {
+      return false;
+    }
+    if (
+      transactionLogActionEventFilters.length > 0 &&
+      !transactionLogActionEventFilters.includes(getTransactionLogActionEventLabel(log, walletOwnershipLookup))
+    ) {
       return false;
     }
     if (!term) {
@@ -1854,6 +1875,17 @@ export default function App() {
       transactionLogSearchTerm={transactionLogSearchTerm}
       onTransactionLogSearchTermChange={(value) => {
         setTransactionLogSearchTerm(value);
+        setTransactionLogCurrentPage(1);
+      }}
+      transactionLogActionEventOptions={transactionLogActionEventOptions}
+      transactionLogActionEventFilters={transactionLogActionEventFilters}
+      onTransactionLogActionEventFiltersChange={(filters) => {
+        setTransactionLogActionEventFilters(filters);
+        setTransactionLogCurrentPage(1);
+      }}
+      transactionLogOwnershipFilter={transactionLogOwnershipFilter}
+      onTransactionLogOwnershipFilterChange={(filter) => {
+        setTransactionLogOwnershipFilter(filter);
         setTransactionLogCurrentPage(1);
       }}
       transactionLogCurrentPage={transactionLogPage}

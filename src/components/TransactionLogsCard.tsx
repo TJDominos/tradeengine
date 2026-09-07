@@ -1,12 +1,17 @@
-import { CheckSquare, Copy, FileText, RefreshCw, Search } from 'lucide-react';
+import { CheckSquare, Copy, FileText, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
 
-import type { DashboardTransactionLog, WalletOwnershipMeta } from '../app/types';
+import type {
+  DashboardTransactionLog,
+  TransactionLogOwnershipFilter,
+  WalletOwnershipMeta,
+} from '../app/types';
 import {
   compactAddress,
   formatDate,
   formatUSD,
   formatNum,
   formatWebhookEventLabel,
+  getTransactionLogEndpointOwnership,
   resolveWalletOwnershipMeta,
 } from '../app/utils';
 import Pagination from './Pagination';
@@ -20,6 +25,11 @@ type TransactionLogsCardProps = {
   filteredTransactionLogsCount: number;
   transactionLogSearchTerm: string;
   onTransactionLogSearchTermChange: (value: string) => void;
+  transactionLogActionEventOptions: string[];
+  transactionLogActionEventFilters: string[];
+  onTransactionLogActionEventFiltersChange: (filters: string[]) => void;
+  transactionLogOwnershipFilter: TransactionLogOwnershipFilter;
+  onTransactionLogOwnershipFilterChange: (filter: TransactionLogOwnershipFilter) => void;
   transactionLogCurrentPage: number;
   onTransactionLogPageChange: (page: number) => void;
   transactionLogDateFilterActive: boolean;
@@ -38,6 +48,11 @@ export default function TransactionLogsCard({
   filteredTransactionLogsCount,
   transactionLogSearchTerm,
   onTransactionLogSearchTermChange,
+  transactionLogActionEventOptions,
+  transactionLogActionEventFilters,
+  onTransactionLogActionEventFiltersChange,
+  transactionLogOwnershipFilter,
+  onTransactionLogOwnershipFilterChange,
   transactionLogCurrentPage,
   onTransactionLogPageChange,
   transactionLogDateFilterActive,
@@ -47,12 +62,15 @@ export default function TransactionLogsCard({
   walletOwnershipLookup,
 }: TransactionLogsCardProps) {
   const hasSearchFilter = transactionLogSearchTerm.trim().length > 0;
+  const hasActionEventFilter = transactionLogActionEventFilters.length > 0;
+  const hasOwnershipFilter = transactionLogOwnershipFilter !== 'all';
+  const hasTransactionLogFilter = hasSearchFilter || hasActionEventFilter || hasOwnershipFilter;
   const emptyStateMessage = totalTransactionLogsCount === 0
     ? 'No trade or webhook records yet.'
-    : filteredTransactionLogsCount === 0 && hasSearchFilter && transactionLogDateFilterActive
-      ? 'No transaction logs match the current search in the selected date range.'
-      : filteredTransactionLogsCount === 0 && hasSearchFilter
-        ? 'No transaction logs match the current search.'
+    : filteredTransactionLogsCount === 0 && hasTransactionLogFilter && transactionLogDateFilterActive
+      ? 'No transaction logs match the selected filters in the selected date range.'
+      : filteredTransactionLogsCount === 0 && hasTransactionLogFilter
+        ? 'No transaction logs match the selected filters.'
         : filteredTransactionLogsCount === 0 && transactionLogDateFilterActive
           ? 'No transaction logs fall within the selected date range.'
           : 'No trade or webhook records yet.';
@@ -122,14 +140,76 @@ export default function TransactionLogsCard({
 
   return (
     <div className="flex flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-sm">
-      <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/80 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-slate-900/80 p-4">
         <h3 className="flex items-center gap-2 text-lg font-semibold">
           <FileText size={18} /> Transaction Log
           <span className="ml-4 flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] text-emerald-400">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"></span> LIVE
           </span>
         </h3>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <details className="relative">
+            <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-3 text-sm text-slate-200 transition hover:bg-slate-700 [&::-webkit-details-marker]:hidden">
+              <SlidersHorizontal size={14} />
+              Action / Event
+              <span className="text-xs text-slate-400">
+                {transactionLogActionEventFilters.length === 0
+                  ? 'All'
+                  : `${transactionLogActionEventFilters.length} selected`}
+              </span>
+            </summary>
+            <div className="absolute right-0 top-full z-20 mt-2 w-64 rounded-md border border-slate-700 bg-slate-900 p-3 shadow-xl">
+              <div className="mb-2 flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-400">
+                <span>Action / Event</span>
+                {transactionLogActionEventFilters.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => onTransactionLogActionEventFiltersChange([])}
+                    className="text-blue-300 transition hover:text-blue-200"
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
+              <div className="max-h-56 space-y-1 overflow-y-auto">
+                {transactionLogActionEventOptions.length > 0 ? transactionLogActionEventOptions.map((option) => (
+                  <label key={option} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm text-slate-200 hover:bg-slate-800">
+                    <input
+                      type="checkbox"
+                      checked={transactionLogActionEventFilters.includes(option)}
+                      onChange={() => {
+                        const nextFilters = transactionLogActionEventFilters.includes(option)
+                          ? transactionLogActionEventFilters.filter((filter) => filter !== option)
+                          : [...transactionLogActionEventFilters, option];
+                        onTransactionLogActionEventFiltersChange(nextFilters);
+                      }}
+                      className="accent-blue-500"
+                    />
+                    {option}
+                  </label>
+                )) : (
+                  <span className="px-2 py-1.5 text-sm text-slate-500">No actions or events</span>
+                )}
+              </div>
+            </div>
+          </details>
+          <div className="flex h-9 items-center rounded-md border border-slate-700 bg-slate-950 p-0.5" role="group" aria-label="Transaction log ownership filter">
+            {(['external', 'all', 'internal'] as const).map((filter) => (
+              <button
+                key={filter}
+                type="button"
+                aria-pressed={transactionLogOwnershipFilter === filter}
+                onClick={() => onTransactionLogOwnershipFilterChange(filter)}
+                className={`h-8 rounded px-2.5 text-xs font-semibold uppercase tracking-wider transition ${
+                  transactionLogOwnershipFilter === filter
+                    ? 'bg-blue-500/20 text-blue-300'
+                    : 'text-slate-500 hover:text-slate-200'
+                }`}
+              >
+                {filter}
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             onClick={onRefreshTransactionLogs}
@@ -175,22 +255,9 @@ export default function TransactionLogsCard({
                 walletOwnershipLookup,
                 'external',
               );
-              const webhookFromOwnership =
-                log.kind === 'webhook'
-                  ? resolveWalletOwnershipMeta(
-                      log.fromWalletAddress,
-                      walletOwnershipLookup,
-                      'external',
-                    )
-                  : null;
-              const webhookToOwnership =
-                log.kind === 'webhook'
-                  ? resolveWalletOwnershipMeta(
-                      log.toWalletAddress,
-                      walletOwnershipLookup,
-                      'external',
-                    )
-                  : null;
+              const endpointOwnership = getTransactionLogEndpointOwnership(log, walletOwnershipLookup);
+              const webhookFromOwnership = log.kind === 'webhook' ? endpointOwnership.from : null;
+              const webhookToOwnership = log.kind === 'webhook' ? endpointOwnership.to : null;
               const normalizedWebhookAction =
                 log.kind === 'webhook'
                   ? log.action ?? (

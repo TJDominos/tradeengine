@@ -4,6 +4,7 @@ import type {
   AuditLog,
   DashboardLogTab,
   DashboardTransactionLog,
+  TransactionLogOwnershipFilter,
   WalletOwnershipMeta,
 } from '../app/types';
 import ActivityLogsCard from './ActivityLogsCard';
@@ -21,6 +22,11 @@ type DashboardLogsSectionProps = {
   filteredTransactionLogsCount: number;
   transactionLogSearchTerm: string;
   onTransactionLogSearchTermChange: (value: string) => void;
+  transactionLogActionEventOptions: string[];
+  transactionLogActionEventFilters: string[];
+  onTransactionLogActionEventFiltersChange: (filters: string[]) => void;
+  transactionLogOwnershipFilter: TransactionLogOwnershipFilter;
+  onTransactionLogOwnershipFilterChange: (filter: TransactionLogOwnershipFilter) => void;
   transactionLogCurrentPage: number;
   onTransactionLogPageChange: (page: number) => void;
   transactionLogDateFilterActive: boolean;
@@ -47,6 +53,11 @@ export default function DashboardLogsSection({
   filteredTransactionLogsCount,
   transactionLogSearchTerm,
   onTransactionLogSearchTermChange,
+  transactionLogActionEventOptions,
+  transactionLogActionEventFilters,
+  onTransactionLogActionEventFiltersChange,
+  transactionLogOwnershipFilter,
+  onTransactionLogOwnershipFilterChange,
   transactionLogCurrentPage,
   onTransactionLogPageChange,
   transactionLogDateFilterActive,
@@ -87,6 +98,11 @@ export default function DashboardLogsSection({
           filteredTransactionLogsCount={filteredTransactionLogsCount}
           transactionLogSearchTerm={transactionLogSearchTerm}
           onTransactionLogSearchTermChange={onTransactionLogSearchTermChange}
+          transactionLogActionEventOptions={transactionLogActionEventOptions}
+          transactionLogActionEventFilters={transactionLogActionEventFilters}
+          onTransactionLogActionEventFiltersChange={onTransactionLogActionEventFiltersChange}
+          transactionLogOwnershipFilter={transactionLogOwnershipFilter}
+          onTransactionLogOwnershipFilterChange={onTransactionLogOwnershipFilterChange}
           transactionLogCurrentPage={transactionLogCurrentPage}
           onTransactionLogPageChange={onTransactionLogPageChange}
           transactionLogDateFilterActive={transactionLogDateFilterActive}

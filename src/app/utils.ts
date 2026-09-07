@@ -2,6 +2,7 @@ import type {
   AccountRecord,
   AccountSummary,
   AuditLog,
+  DashboardTransactionLog,
   DateRangeState,
   EngineState,
   HistoricalSetup,
@@ -159,6 +160,61 @@ export function resolveWalletOwnershipMeta(
     ownership: fallbackOwnership,
     accountLabel: null,
   };
+}
+
+export function getTransactionLogEndpointOwnership(
+  log: DashboardTransactionLog,
+  ownershipLookup: Map<string, WalletOwnershipMeta>,
+) {
+  if (log.kind === 'webhook') {
+    return {
+      from: resolveWalletOwnershipMeta(log.fromWalletAddress, ownershipLookup, 'external'),
+      to: resolveWalletOwnershipMeta(log.toWalletAddress, ownershipLookup, 'external'),
+    };
+  }
+
+  return {
+    from: resolveWalletOwnershipMeta(
+      log.fromWalletAddress,
+      ownershipLookup,
+      log.action === 'BUY' ? 'lp' : 'internal',
+    ),
+    to: resolveWalletOwnershipMeta(
+      log.toWalletAddress,
+      ownershipLookup,
+      log.action === 'SELL' ? 'lp' : 'internal',
+    ),
+  };
+}
+
+export function getTransactionLogActionEventLabel(
+  log: DashboardTransactionLog,
+  ownershipLookup: Map<string, WalletOwnershipMeta>,
+) {
+  if (log.kind === 'trade') {
+    return log.action;
+  }
+
+  const { from, to } = getTransactionLogEndpointOwnership(log, ownershipLookup);
+  const normalizedAction = log.action ?? (
+    from.ownership === 'internal' && to.ownership !== 'internal'
+      ? 'SELL'
+      : to.ownership === 'internal' && from.ownership !== 'internal'
+        ? 'BUY'
+        : null
+  );
+
+  return normalizedAction ?? formatWebhookEventLabel(log.eventType);
+}
+
+export function getTransactionLogOwnershipCategory(
+  log: DashboardTransactionLog,
+  ownershipLookup: Map<string, WalletOwnershipMeta>,
+): 'external' | 'internal' {
+  const { from, to } = getTransactionLogEndpointOwnership(log, ownershipLookup);
+  return from.ownership === 'external' || to.ownership === 'external'
+    ? 'external'
+    : 'internal';
 }
 
 export function formatDateInputValue(date: Date) {

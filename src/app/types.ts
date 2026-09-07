@@ -416,6 +416,8 @@ export type AccountSummary = {
 
 export type DashboardLogTab = 'transaction' | 'activity';
 
+export type TransactionLogOwnershipFilter = 'all' | 'external' | 'internal';
+
 export type DashboardTransactionLog =
   | ({ kind: 'trade' } & TradeLog)
   | ({ kind: 'webhook' } & WebhookTransactionLog);
