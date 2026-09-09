@@ -1286,6 +1286,17 @@ export default function StrategySchemaForm({
                   ) : null}
                 </div>
 
+                {planPreview.planningWarnings.length > 0 ? (
+                  <div className={`mt-4 rounded-xl border px-4 py-3 text-sm ${planPreview.isExecutable ? 'border-amber-500/20 bg-amber-500/10 text-amber-100' : 'border-rose-500/20 bg-rose-500/10 text-rose-100'}`}>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] opacity-80">Planning Notes</p>
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-xs opacity-90">
+                      {planPreview.planningWarnings.map((warning) => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
                 <div className={`mt-4 rounded-xl border px-4 py-3 text-sm ${planPreview.sufficientBuyCapacity ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-100' : 'border-rose-500/20 bg-rose-500/10 text-rose-100'}`}>
                   <p className="text-xs font-semibold uppercase tracking-[0.18em] opacity-80">Initial Buy Capacity</p>
                   <p className="mt-2 text-lg font-semibold">

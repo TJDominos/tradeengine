@@ -303,6 +303,7 @@ export type StrategyPlanPreview = {
   skippedForNoPairAssetCount: number;
   skippedForSolReserveCount: number;
   sufficientBuyCapacity: boolean;
+  planningWarnings: string[];
   requestedTaskCount: number;
   plannedTaskCount: number;
   unallocatedVolumeUsd: number;

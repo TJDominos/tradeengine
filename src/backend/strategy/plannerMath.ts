@@ -80,14 +80,15 @@ export function calculateSelfCyclingTradeTotals(
   minimumSellVolumeUsd: number,
 ): TradeTotals {
   const normalizedGross = Math.max(0, targetGrossVolumeUsd);
-  const netBuyVolumeUsd = Math.min(
+  const netBuyVolumeUsd = Math.max(0, requiredNetBuyVolumeUsd);
+  const normalizedMinimumSellVolumeUsd = Math.max(0, minimumSellVolumeUsd);
+  const effectiveGrossVolumeUsd = Math.max(
     normalizedGross,
-    Math.max(0, requiredNetBuyVolumeUsd),
+    netBuyVolumeUsd + 2 * normalizedMinimumSellVolumeUsd,
   );
   const targetSellVolumeUsd = Math.max(
-    0,
-    (normalizedGross - netBuyVolumeUsd) / 2,
-    minimumSellVolumeUsd,
+    normalizedMinimumSellVolumeUsd,
+    (effectiveGrossVolumeUsd - netBuyVolumeUsd) / 2,
   );
   const sellVolumeUsd = roundToSixDecimals(targetSellVolumeUsd);
   const buyVolumeUsd = roundToSixDecimals(netBuyVolumeUsd + sellVolumeUsd);
@@ -105,11 +106,9 @@ export function calculateDistributionTradeTotals(
   minimumBuyVolumeUsd = 0,
 ): TradeTotals {
   const normalizedGross = Math.max(0, targetGrossVolumeUsd);
-  const netSellVolumeUsd = Math.min(
-    normalizedGross,
-    Math.max(0, requiredNetSellVolumeUsd),
-  );
-  const rawTargetBuyVolumeUsd = (normalizedGross - netSellVolumeUsd) / 2;
+  const netSellVolumeUsd = Math.max(0, requiredNetSellVolumeUsd);
+  const effectiveGrossVolumeUsd = Math.max(normalizedGross, netSellVolumeUsd);
+  const rawTargetBuyVolumeUsd = (effectiveGrossVolumeUsd - netSellVolumeUsd) / 2;
   const targetBuyVolumeUsd = rawTargetBuyVolumeUsd > MIN_VOLUME_EPSILON
     ? Math.max(rawTargetBuyVolumeUsd, minimumBuyVolumeUsd)
     : 0;
@@ -117,7 +116,7 @@ export function calculateDistributionTradeTotals(
   const sellVolumeUsd = roundToSixDecimals(
     buyVolumeUsd > 0
       ? netSellVolumeUsd + buyVolumeUsd
-      : normalizedGross,
+      : effectiveGrossVolumeUsd,
   );
   return {
     buyVolumeUsd,

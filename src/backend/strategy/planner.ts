@@ -81,6 +81,10 @@ export type StrategyPlannerResult = {
   lowSolWarningCount: number;
 };
 
+function formatPlannerUsd(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
 export type StrategyPlannerConfig = {
   macroObjective: StrategyMacroObjective;
   baseOrderCount: number;
@@ -934,6 +938,70 @@ function normalizePlannerTaskOrderCount(orderCount: number): number {
   return Math.max(1, Math.floor(orderCount));
 }
 
+function resolveDistributionTotalVolumeUsd(
+  config: StrategyPlannerConfig,
+  requiredNetSellUsd: number,
+  plannerOrderCount: number,
+): number {
+  const configuredVolumeUsd = positiveNumber(config.baseTotalVolumeUsd);
+  const normalizedNetSellUsd = positiveNumber(requiredNetSellUsd);
+  const pureSell = configuredVolumeUsd + MIN_VOLUME_EPSILON < normalizedNetSellUsd;
+  const minOrderUsd = positiveNumber(config.minOrderUsd);
+  const maxOrderUsd = Math.max(minOrderUsd, positiveNumber(config.maxOrderUsd));
+  const minimumVolumeUsd = Math.max(
+    configuredVolumeUsd,
+    normalizedNetSellUsd,
+    plannerOrderCount * minOrderUsd,
+  );
+  if (pureSell) {
+    return roundToSixDecimals(minimumVolumeUsd);
+  }
+
+  const effectiveNetSellUsd = normalizedNetSellUsd;
+
+  for (let buyCount = 0; buyCount <= plannerOrderCount; buyCount += 1) {
+    const sellCount = plannerOrderCount - buyCount;
+    const lowerBounds = [minimumVolumeUsd];
+    const upperBounds = [Number.POSITIVE_INFINITY];
+
+    if (buyCount > 0) {
+      lowerBounds.push(effectiveNetSellUsd + 2 * buyCount * minOrderUsd);
+      upperBounds.push(effectiveNetSellUsd + 2 * buyCount * maxOrderUsd);
+    } else {
+      upperBounds.push(effectiveNetSellUsd);
+    }
+
+    if (sellCount > 0) {
+      lowerBounds.push(2 * sellCount * minOrderUsd - effectiveNetSellUsd);
+      upperBounds.push(2 * sellCount * maxOrderUsd - effectiveNetSellUsd);
+    }
+
+    const candidateVolumeUsd = roundToSixDecimals(Math.max(...lowerBounds));
+    const maximumVolumeUsd = Math.min(...upperBounds);
+    if (candidateVolumeUsd > maximumVolumeUsd + MIN_VOLUME_EPSILON) {
+      continue;
+    }
+
+    const totals = calculateDistributionTradeTotals(
+      candidateVolumeUsd,
+      effectiveNetSellUsd,
+    );
+    const feasibleCounts = calculateFeasibleTradeCounts(
+      plannerOrderCount,
+      config.maxOrderCount,
+      totals.buyVolumeUsd,
+      totals.sellVolumeUsd,
+      minOrderUsd,
+      maxOrderUsd,
+    );
+    if (feasibleCounts) {
+      return candidateVolumeUsd;
+    }
+  }
+
+  return minimumVolumeUsd;
+}
+
 function resolveMinimumSelfCyclingSellVolume(
   config: StrategyPlannerConfig,
 ): number {
@@ -960,13 +1028,21 @@ export function buildStrategyPlanTaskSpecs(
   requiredNetBuyAmount: number,
 ): StrategyPlannerTaskSpec[] {
   const plannerOrderCount = normalizePlannerTaskOrderCount(config.baseOrderCount);
-  const totalVolumeUsd = positiveNumber(config.baseTotalVolumeUsd);
 
   switch (config.macroObjective) {
     case 'distribution': {
+      const totalVolumeUsd = resolveDistributionTotalVolumeUsd(
+        config,
+        requiredNetBuyAmount,
+        plannerOrderCount,
+      );
+      const configuredVolumeUsd = positiveNumber(config.baseTotalVolumeUsd);
+      const effectiveNetSellUsd = configuredVolumeUsd + MIN_VOLUME_EPSILON < positiveNumber(requiredNetBuyAmount)
+        ? totalVolumeUsd
+        : positiveNumber(requiredNetBuyAmount);
       const { buyVolumeUsd, sellVolumeUsd } = calculateDistributionTradeTotals(
         totalVolumeUsd,
-        positiveNumber(requiredNetBuyAmount),
+        effectiveNetSellUsd,
       );
       const feasibleCounts = calculateFeasibleTradeCounts(
         plannerOrderCount,
@@ -1006,6 +1082,7 @@ export function buildStrategyPlanTaskSpecs(
     }
     case 'accumulation':
     case 'shakeout': {
+      const totalVolumeUsd = positiveNumber(config.baseTotalVolumeUsd);
       const { buyVolumeUsd, sellVolumeUsd } = calculateSelfCyclingTradeTotals(
         totalVolumeUsd,
         positiveNumber(requiredNetBuyAmount),
@@ -1048,6 +1125,92 @@ export function buildStrategyPlanTaskSpecs(
       ];
     }
   }
+}
+
+export function buildStrategyPlanningWarnings(input: {
+  config: StrategyPlannerConfig;
+  requiredTargetUsd: number;
+  taskSpecs: StrategyPlannerTaskSpec[];
+  planning: StrategyPlannerResult;
+}): string[] {
+  const warnings: string[] = [];
+  const expectedSellVolumeUsd = input.taskSpecs.reduce(
+    (sum, spec) => sum + (spec.side === 'sell' ? spec.totalVolumeUsd : 0),
+    0,
+  );
+  const expectedBuyVolumeUsd = input.taskSpecs.reduce(
+    (sum, spec) => sum + (spec.side === 'buy' ? spec.totalVolumeUsd : 0),
+    0,
+  );
+  const plannedSellVolumeUsd = input.planning.tasks.reduce(
+    (sum, task) => sum + (task.side === 'sell' ? task.totalVolumeUsd : 0),
+    0,
+  );
+  const plannedBuyVolumeUsd = input.planning.tasks.reduce(
+    (sum, task) => sum + (task.side === 'buy' ? task.totalVolumeUsd : 0),
+    0,
+  );
+  const volumeShortfall = input.planning.unallocatedVolumeUsd > MIN_VOLUME_EPSILON;
+
+  if (input.config.macroObjective === 'distribution') {
+    const configuredVolumeUsd = positiveNumber(input.config.baseTotalVolumeUsd);
+    const requiredNetSellUsd = positiveNumber(input.requiredTargetUsd);
+    if (configuredVolumeUsd + MIN_VOLUME_EPSILON < requiredNetSellUsd) {
+      warnings.push(
+        `Target volume ${formatPlannerUsd(configuredVolumeUsd)} is below the net selling target ${formatPlannerUsd(requiredNetSellUsd)}. Net selling is prioritized and the planner uses pure sell volume.`,
+      );
+    }
+    const minimumTargetVolumeUsd = Math.max(configuredVolumeUsd, requiredNetSellUsd);
+    const plannedGrossVolumeUsd = expectedSellVolumeUsd + expectedBuyVolumeUsd;
+    if (plannedGrossVolumeUsd > minimumTargetVolumeUsd + MIN_VOLUME_EPSILON) {
+      warnings.push(
+        `Minimum order size and transaction count require ${formatPlannerUsd(plannedGrossVolumeUsd)} of planned volume, above the configured target.`,
+      );
+    }
+    if (plannedSellVolumeUsd + MIN_VOLUME_EPSILON < expectedSellVolumeUsd) {
+      warnings.push(
+        `Distribution sell target cannot be fully allocated: ${formatPlannerUsd(plannedSellVolumeUsd)} of ${formatPlannerUsd(expectedSellVolumeUsd)} is currently planned. Add sellable base-token balance or reduce the sell target.`,
+      );
+    }
+    if (plannedBuyVolumeUsd + MIN_VOLUME_EPSILON < expectedBuyVolumeUsd) {
+      warnings.push(
+        `Support buy target cannot be fully allocated: ${formatPlannerUsd(plannedBuyVolumeUsd)} of ${formatPlannerUsd(expectedBuyVolumeUsd)} is currently planned. Add available quote balance or reduce the transaction requirements.`,
+      );
+    }
+  } else {
+    const requiredNetBuyUsd = positiveNumber(input.requiredTargetUsd);
+    const configuredVolumeUsd = positiveNumber(input.config.baseTotalVolumeUsd);
+    const plannedNetBuyUsd = plannedBuyVolumeUsd - plannedSellVolumeUsd;
+    if (configuredVolumeUsd + MIN_VOLUME_EPSILON < requiredNetBuyUsd) {
+      warnings.push(
+        `Target volume ${formatPlannerUsd(configuredVolumeUsd)} is below the net buy-in target ${formatPlannerUsd(requiredNetBuyUsd)}. Net buy-in is prioritized and the planner expands the gross buy/sell volume.`,
+      );
+    }
+    const plannedGrossVolumeUsd = expectedSellVolumeUsd + expectedBuyVolumeUsd;
+    if (plannedGrossVolumeUsd > Math.max(configuredVolumeUsd, requiredNetBuyUsd) + MIN_VOLUME_EPSILON) {
+      warnings.push(
+        `Minimum sell pressure, order size, or transaction count requires ${formatPlannerUsd(plannedGrossVolumeUsd)} of planned volume, above the configured target.`,
+      );
+    }
+    if (plannedNetBuyUsd + MIN_VOLUME_EPSILON < requiredNetBuyUsd) {
+      warnings.push(
+        `Net buy-in target cannot be fully planned: ${formatPlannerUsd(plannedNetBuyUsd)} of ${formatPlannerUsd(requiredNetBuyUsd)} is currently planned. Add available quote balance or sellable base-token balance, or reduce the target.`,
+      );
+    }
+  }
+
+  if (input.planning.plannedTaskCount < input.planning.requestedTaskCount) {
+    warnings.push(
+      `Only ${input.planning.plannedTaskCount} of ${input.planning.requestedTaskCount} required tasks can be allocated with the current account balances.`,
+    );
+  }
+  if (volumeShortfall && !warnings.some((warning) => warning.includes('target cannot be fully allocated'))) {
+    warnings.push(
+      `${formatPlannerUsd(input.planning.unallocatedVolumeUsd)} of planned volume remains unallocated. Check account balances, minimum order size, and transaction count.`,
+    );
+  }
+
+  return warnings;
 }
 
 function buildPlanningSeedBase(

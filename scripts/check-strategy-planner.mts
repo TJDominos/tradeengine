@@ -4,6 +4,7 @@ import type { ManagedAccountBalanceRecord } from '../src/backend/userStore';
 import {
   buildStrategyPlanningResult,
   buildStrategyPlanTaskSpecs,
+  buildStrategyPlanningWarnings,
   deriveRequiredNetBuyAmount,
 } from '../src/backend/strategy/planner';
 import { buildStrategyPriceCurveReview } from '../src/backend/strategy/priceCurve';
@@ -27,6 +28,16 @@ assert.deepEqual(totals, {
   grossVolumeUsd: 150,
   netBuyVolumeUsd: 100,
 });
+assert.deepEqual(
+  calculateSelfCyclingTradeTotals(300, 1_000, 5),
+  {
+    buyVolumeUsd: 1_005,
+    sellVolumeUsd: 5,
+    grossVolumeUsd: 1_010,
+    netBuyVolumeUsd: 1_000,
+  },
+  'net buy-in must remain the priority target when target volume is smaller',
+);
 
 assert.deepEqual(
   calculateRemainingPlanVolumes(125, 25, [
@@ -170,6 +181,40 @@ const config = {
   baseTokenAddress,
   quoteTokenAddress,
 };
+
+const priorityConfig = {
+  ...config,
+  baseOrderCount: 5,
+  maxOrderCount: 10,
+  baseTotalVolumeUsd: 300,
+  minOrderUsd: 100,
+  maxOrderUsd: 300,
+};
+const priorityAccounts = Array.from({ length: 5 }, (_, index) => buildAccount(index + 1, 1_000, 100));
+const priorityTaskSpecs = buildStrategyPlanTaskSpecs(priorityConfig, 1_000);
+const priorityPlanning = buildStrategyPlanningResult({
+  document,
+  config: priorityConfig,
+  accounts: priorityAccounts,
+  taskSpecs: priorityTaskSpecs,
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'net-buy-priority',
+});
+const accumulationWarnings = buildStrategyPlanningWarnings({
+  config: priorityConfig,
+  requiredTargetUsd: 1_000,
+  taskSpecs: priorityTaskSpecs,
+  planning: priorityPlanning,
+});
+assert.ok(
+  accumulationWarnings.some((warning) => warning.includes('below the net buy-in target')),
+  'accumulation preview should explain when target volume is below the net buy-in target',
+);
+assert.ok(
+  accumulationWarnings.some((warning) => warning.includes('above the configured target')),
+  'accumulation preview should explain when constraints increase gross planned volume',
+);
 
 const zeroNetDocument = {
   ...document,
@@ -509,6 +554,34 @@ const shakeoutConfig = {
   maxOrderUsd: 30,
   execution: shakeoutDocument.execution,
 };
+const shakeoutPriorityConfig = {
+  ...shakeoutConfig,
+  baseOrderCount: 5,
+  maxOrderCount: 10,
+  baseTotalVolumeUsd: 300,
+  minOrderUsd: 100,
+  maxOrderUsd: 300,
+};
+const shakeoutPriorityTaskSpecs = buildStrategyPlanTaskSpecs(shakeoutPriorityConfig, 1_000);
+const shakeoutPriorityPlanning = buildStrategyPlanningResult({
+  document: shakeoutDocument,
+  config: shakeoutPriorityConfig,
+  accounts: priorityAccounts,
+  taskSpecs: shakeoutPriorityTaskSpecs,
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'shakeout-net-buy-priority',
+});
+const shakeoutWarnings = buildStrategyPlanningWarnings({
+  config: shakeoutPriorityConfig,
+  requiredTargetUsd: 1_000,
+  taskSpecs: shakeoutPriorityTaskSpecs,
+  planning: shakeoutPriorityPlanning,
+});
+assert.ok(
+  shakeoutWarnings.some((warning) => warning.includes('below the net buy-in target')),
+  'shakeout preview should explain when target volume is below the net buy-in target',
+);
 const shakeoutPlan = buildStrategyPlanningResult({
   document: shakeoutDocument,
   config: shakeoutConfig,
@@ -841,6 +914,13 @@ assert.deepEqual(pureSellDistributionTotals, {
   grossVolumeUsd: 100,
   netBuyVolumeUsd: -100,
 });
+const netSellPriorityTotals = calculateDistributionTradeTotals(300, 1_000, 0);
+assert.deepEqual(netSellPriorityTotals, {
+  buyVolumeUsd: 0,
+  sellVolumeUsd: 1_000,
+  grossVolumeUsd: 1_000,
+  netBuyVolumeUsd: -1_000,
+}, 'net selling must remain the priority target when target volume is smaller');
 
 const distributionDocument = buildStrategyDocumentFromSettings({
   baseTokenAddress,
@@ -884,6 +964,14 @@ assert.equal(
   distributionTaskSpecs.reduce((sum, spec) => sum + (spec.side === 'buy' ? spec.totalVolumeUsd : 0), 0),
   25,
   'distribution task specs should generate 25 USD support buy volume',
+);
+assert.equal(
+  Number(distributionTaskSpecs.reduce(
+    (sum, spec) => sum + (spec.side === 'sell' ? spec.totalVolumeUsd : -spec.totalVolumeUsd),
+    0,
+  ).toFixed(6)),
+  100,
+  'distribution should preserve the requested net sell target when target volume exceeds it',
 );
 
 const distributionAccounts = [
@@ -946,5 +1034,42 @@ assert.equal(
   pureSellPlanning.tasks.reduce((sum, task) => sum + task.totalVolumeUsd, 0),
   100,
 );
+
+const distributionMinimumCountConfig = {
+  ...distributionConfig,
+  baseOrderCount: 15,
+  baseTotalVolumeUsd: 300,
+  minOrderUsd: 100,
+  maxOrderUsd: 300,
+};
+const distributionMinimumCountSpecs = buildStrategyPlanTaskSpecs(
+  distributionMinimumCountConfig,
+  1_000,
+);
+assert.equal(
+  distributionMinimumCountSpecs.reduce((sum, spec) => sum + spec.orderCount, 0),
+  15,
+  'distribution should expand an undersized default volume to honor the minimum task count',
+);
+assert.equal(
+  distributionMinimumCountSpecs.reduce((sum, spec) => sum + spec.totalVolumeUsd, 0),
+  1_500,
+  'distribution should create enough sell volume to honor the minimum task count',
+);
+assert.ok(
+  distributionMinimumCountSpecs.every((spec) => spec.side === 'sell'),
+  'an undersized distribution volume should expand as pure sell volume instead of adding support buys',
+);
+const distributionMinimumCountPlanning = buildStrategyPlanningResult({
+  document: distributionDocument,
+  config: distributionMinimumCountConfig,
+  accounts: Array.from({ length: 20 }, (_, index) => buildAccount(index + 1, 0, 100)),
+  taskSpecs: distributionMinimumCountSpecs,
+  startTime: 1_000,
+  baseTokenPriceUsd: 1,
+  seedContext: 'distribution-minimum-count',
+});
+assert.equal(distributionMinimumCountPlanning.isExecutable, true);
+assert.ok(distributionMinimumCountPlanning.plannedTaskCount >= 15);
 
 console.log('Strategy planner check passed. Eligibility and executable transaction count are correct.');

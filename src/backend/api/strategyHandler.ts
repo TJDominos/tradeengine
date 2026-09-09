@@ -2,6 +2,7 @@ import { ApiError } from '../errors';
 import { normalizeStrategyDocument } from '../strategy/migrations';
 import {
   buildStrategyPlanTaskSpecs,
+  buildStrategyPlanningWarnings,
   buildStrategyPlanningResult,
   deriveRequiredNetBuyAmount,
 } from '../strategy/planner';
@@ -100,6 +101,7 @@ type StrategyPlanPreviewResponse = {
   skippedForNoPairAssetCount: number;
   skippedForSolReserveCount: number;
   sufficientBuyCapacity: boolean;
+  planningWarnings: string[];
   requestedTaskCount: number;
   plannedTaskCount: number;
   unallocatedVolumeUsd: number;
@@ -347,6 +349,12 @@ function buildStrategyPlanPreview(
     baseTokenPriceUsd: marketSnapshot?.priceUsd ?? null,
     seedContext: `preview:${crypto.randomUUID()}`,
   });
+  const planningWarnings = buildStrategyPlanningWarnings({
+    config,
+    requiredTargetUsd: requiredBuyAmount,
+    taskSpecs,
+    planning,
+  });
 
   return {
     generatedAt,
@@ -368,6 +376,7 @@ function buildStrategyPlanPreview(
     skippedForNoPairAssetCount: planning.skippedForNoPairAssetCount,
     skippedForSolReserveCount: planning.lowSolWarningCount,
     sufficientBuyCapacity: planning.availableBuyAmount >= effectiveRequiredBuyAmount,
+    planningWarnings,
     requestedTaskCount: planning.requestedTaskCount,
     plannedTaskCount: planning.plannedTaskCount,
     unallocatedVolumeUsd: planning.unallocatedVolumeUsd,
