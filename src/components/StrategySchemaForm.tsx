@@ -41,14 +41,23 @@ const macroObjectiveOptions: Array<{
   },
 ];
 
-const timeRangeLabels: Record<string, string> = {
-  '1h': '1 hour',
-  '6h': '6 hours',
-  '12h': '12 hours',
-  '24h': '24 hours',
-  '3d': '3 days',
-  '1w': '1 week',
-};
+const timeRangePresetHours = [1, 4, 6, 12, 24, 72, 168];
+
+function parseTimeRangeHours(value: string | null | undefined): number | null {
+  const normalizedValue = value?.trim().toLowerCase() ?? '';
+  const match = normalizedValue.match(/^(\d+(?:\.\d+)?)(h|d|w)$/);
+  if (!match) {
+    return null;
+  }
+  const amount = Number(match[1]);
+  const multiplier = match[2] === 'w' ? 7 * 24 : match[2] === 'd' ? 24 : 1;
+  const hours = amount * multiplier;
+  return Number.isFinite(hours) ? hours : null;
+}
+
+function formatTimeRangeTarget(hours: number): string {
+  return `${Math.min(168, Math.max(1, Math.round(hours)))}h`;
+}
 
 const tacticConfig: Record<
   StrategyMacroObjective,
@@ -522,7 +531,17 @@ export default function StrategySchemaForm({
     },
     {
       label: 'Operating Window',
-      value: timeRangeLabels[formData.parameters?.timeRangeTarget ?? '24h'] ?? formData.parameters?.timeRangeTarget ?? '24 hours',
+      value: (() => {
+        const hours = parseTimeRangeHours(formData.parameters?.timeRangeTarget);
+        if (hours == null) {
+          return '1 day';
+        }
+        return hours === 24
+          ? '1 day'
+          : hours === 168
+            ? '1 week'
+            : `${hours} hours`;
+      })(),
     },
     {
       label: 'Min Planned Trades',
@@ -672,18 +691,49 @@ export default function StrategySchemaForm({
           description="Tune the operating window, target opportunity size, and qualification thresholds that feed the runtime."
         >
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <FieldShell label="Operating Window" helper="Used as the human-facing campaign duration and the base reference for backend scheduling.">
+            <FieldShell label="Operating Window (Hours)" helper="Enter 1-168 hours. Common presets include 4 hours and 1 day. This controls campaign scheduling; live market qualification still uses 24h aggregates.">
               <Controller
                 control={control}
                 name="parameters.timeRangeTarget"
                 render={({ field }) => (
-                  <select {...field} className={textInputClassName()}>
-                    {Object.entries(timeRangeLabels).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
+                  <>
+                    <input
+                      type="number"
+                      min="1"
+                      max="168"
+                      step="1"
+                      list="strategy-operating-window-presets"
+                      value={formatNumberInputValue(parseTimeRangeHours(field.value))}
+                      onChange={(event) => {
+                        if (event.target.value.trim() === '') {
+                          field.onChange('');
+                          return;
+                        }
+                        const parsed = Number(event.target.value);
+                        if (Number.isFinite(parsed)) {
+                          field.onChange(formatTimeRangeTarget(parsed));
+                        }
+                      }}
+                      onBlur={(event) => {
+                        field.onBlur();
+                        const rawValue = event.target.value.trim();
+                        const parsed = rawValue === '' ? null : Number(rawValue);
+                        field.onChange(
+                          parsed != null && Number.isFinite(parsed)
+                            ? formatTimeRangeTarget(parsed)
+                            : '24h',
+                        );
+                      }}
+                      className={textInputClassName()}
+                    />
+                    <datalist id="strategy-operating-window-presets">
+                      {timeRangePresetHours.map((hours) => (
+                        <option key={hours} value={hours}>
+                          {hours === 24 ? '1 day' : hours === 168 ? '1 week' : `${hours} hours`}
+                        </option>
+                      ))}
+                    </datalist>
+                  </>
                 )}
               />
             </FieldShell>

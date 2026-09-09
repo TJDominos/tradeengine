@@ -345,6 +345,19 @@ export interface StrategyMarketSnapshot {
   fetchedAt: number;
 }
 
+export interface StrategyMarketWindowMetrics {
+  windowHours: number;
+  volumeUsd: number | null;
+  transactionCount: number | null;
+  buyVolumeUsd: number | null;
+  sellVolumeUsd: number | null;
+  externalVolumeUsd: number | null;
+  externalTransactionCount: number | null;
+  externalBuyVolumeUsd: number | null;
+  externalSellVolumeUsd: number | null;
+  externalNetBuyinUsd: number | null;
+}
+
 export interface StrategyEvaluationMetric {
   name: string;
   required: boolean;
@@ -360,6 +373,7 @@ export interface StrategyEvaluationInput {
   strategy: StrategyVersionDocument;
   trigger: StrategyTriggerEvent;
   marketSnapshot: StrategyMarketSnapshot | null;
+  marketWindowMetrics: StrategyMarketWindowMetrics | null;
   evaluatedAt: number;
 }
 

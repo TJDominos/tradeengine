@@ -9,7 +9,7 @@ import { ShakeoutStrategy } from './algorithms/shakeout';
 import {
   STRATEGY_SNAPSHOT_MAX_AGE_MS,
   DEFAULT_EXECUTION_CONFIG,
-  supportsTwentyFourHourAggregatesOnly,
+  parseTimeRangeTargetToHours,
 } from './config';
 import {
   StrategyTaskQueue,
@@ -639,7 +639,13 @@ function pushMetric(metrics: StrategyEvaluationMetric[], metric: StrategyEvaluat
 export function evaluateStrategy(
   input: StrategyEvaluationInput,
 ): StrategyEvaluationResult {
-  const { strategy, trigger, marketSnapshot, evaluatedAt } = input;
+  const {
+    strategy,
+    trigger,
+    marketSnapshot,
+    marketWindowMetrics,
+    evaluatedAt,
+  } = input;
   const reasons: string[] = [];
   const metrics: StrategyEvaluationMetric[] = [];
 
@@ -671,74 +677,68 @@ export function evaluateStrategy(
     reasons.push('Market snapshot is stale and cannot drive automated execution');
   }
 
-  const aggregatesSupported = supportsTwentyFourHourAggregatesOnly(
-    strategy.parameters.timeRangeTarget,
-  );
+  const targetWindowHours = parseTimeRangeTargetToHours(strategy.parameters.timeRangeTarget);
+  const windowLabel = targetWindowHours === 24
+    ? '1 day'
+    : `${targetWindowHours} hours`;
+  const windowMetricsAvailable =
+    marketWindowMetrics?.windowHours === targetWindowHours;
 
   const volumeThreshold = strategy.targets.volumeUsdMin;
   if (volumeThreshold > 0) {
-    const available = snapshotPresent && aggregatesSupported && marketSnapshot.volume24h != null;
-    const satisfied = available ? (marketSnapshot.volume24h ?? 0) >= volumeThreshold : null;
+    const available = windowMetricsAvailable && marketWindowMetrics?.volumeUsd != null;
+    const satisfied = available
+      ? (marketWindowMetrics?.volumeUsd ?? 0) >= volumeThreshold
+      : null;
     pushMetric(metrics, {
-      name: 'volume24h',
+      name: `volume${targetWindowHours}h`,
       required: true,
       available,
-      value: available ? marketSnapshot?.volume24h ?? null : null,
+      value: available ? marketWindowMetrics?.volumeUsd ?? null : null,
       threshold: volumeThreshold,
       comparator: 'gte',
       satisfied,
-      note: aggregatesSupported
+      note: available
         ? undefined
-        : `Current engine only supports 24h aggregate volume, not ${strategy.parameters.timeRangeTarget}`,
+        : `No confirmed transaction volume is available for the ${windowLabel} execution window`,
     });
     if (!available && strategy.riskControls.requireCompleteMetrics) {
-      reasons.push(
-        aggregatesSupported
-          ? '24h volume is unavailable for the current market snapshot'
-          : `24h volume cannot satisfy requested time range ${strategy.parameters.timeRangeTarget}`,
-      );
+      reasons.push(`Transaction volume for the ${windowLabel} execution window is unavailable`);
     } else if (satisfied === false) {
-      reasons.push(`24h volume ${marketSnapshot?.volume24h ?? 0} is below target ${volumeThreshold}`);
+      reasons.push(
+        `${windowLabel} volume ${marketWindowMetrics?.volumeUsd ?? 0} is below target ${volumeThreshold}`,
+      );
     }
   }
 
   const maxTransactions = strategy.parameters.maxTransactions;
   if (maxTransactions > 0) {
-    const available =
-      snapshotPresent && aggregatesSupported && marketSnapshot.totalTransactions24h != null;
-    const satisfied =
-      available ? (marketSnapshot.totalTransactions24h ?? 0) <= maxTransactions : null;
+    const available = windowMetricsAvailable && marketWindowMetrics?.transactionCount != null;
+    const satisfied = available
+      ? (marketWindowMetrics?.transactionCount ?? 0) <= maxTransactions
+      : null;
     pushMetric(metrics, {
-      name: 'transactions24h',
+      name: `transactions${targetWindowHours}h`,
       required: true,
       available,
-      value: available ? marketSnapshot?.totalTransactions24h ?? null : null,
+      value: available ? marketWindowMetrics?.transactionCount ?? null : null,
       threshold: maxTransactions,
       comparator: 'lte',
       satisfied,
-      note: aggregatesSupported
+      note: available
         ? undefined
-        : `Current engine only supports 24h aggregate transaction counts, not ${strategy.parameters.timeRangeTarget}`,
+        : `No confirmed transaction count is available for the ${windowLabel} execution window`,
     });
     if (!available && strategy.riskControls.requireCompleteMetrics) {
-      reasons.push(
-        aggregatesSupported
-          ? '24h transaction count is unavailable for the current market snapshot'
-          : `24h transaction count cannot satisfy requested time range ${strategy.parameters.timeRangeTarget}`,
-      );
+      reasons.push(`Transaction count for the ${windowLabel} execution window is unavailable`);
     } else if (satisfied === false) {
       reasons.push(
-        `24h transaction count ${marketSnapshot?.totalTransactions24h ?? 0} exceeds max ${maxTransactions}`,
+        `${windowLabel} transaction count ${marketWindowMetrics?.transactionCount ?? 0} exceeds max ${maxTransactions}`,
       );
     }
   }
 
   const unsupportedTargets = [
-    {
-      name: 'netBuyinUsd',
-      threshold: strategy.targets.netBuyinUsdMin,
-      description: 'Net buyin is not yet derived from the current market snapshot pipeline',
-    },
     {
       name: 'volatilityPct',
       threshold: strategy.targets.volatilityPctMin,
@@ -767,6 +767,33 @@ export function evaluateStrategy(
     });
     if (strategy.riskControls.requireCompleteMetrics) {
       reasons.push(target.description);
+    }
+  }
+
+  const netBuyinThreshold = strategy.targets.netBuyinUsdMin;
+  if (netBuyinThreshold > 0) {
+    const available = windowMetricsAvailable && marketWindowMetrics?.externalNetBuyinUsd != null;
+    const satisfied = available
+      ? (marketWindowMetrics?.externalNetBuyinUsd ?? 0) >= netBuyinThreshold
+      : null;
+    pushMetric(metrics, {
+      name: `externalNetBuyin${targetWindowHours}h`,
+      required: true,
+      available,
+      value: available ? marketWindowMetrics?.externalNetBuyinUsd ?? null : null,
+      threshold: netBuyinThreshold,
+      comparator: 'gte',
+      satisfied,
+      note: available
+        ? undefined
+        : `No confirmed external buy/sell data is available for the ${windowLabel} execution window`,
+    });
+    if (!available && strategy.riskControls.requireCompleteMetrics) {
+      reasons.push(`External net buy-in for the ${windowLabel} execution window is unavailable`);
+    } else if (satisfied === false) {
+      reasons.push(
+        `${windowLabel} external net buy-in ${marketWindowMetrics?.externalNetBuyinUsd ?? 0} is below target ${netBuyinThreshold}`,
+      );
     }
   }
 

@@ -2,6 +2,7 @@ import { ApiError } from '../errors';
 import {
   DEFAULT_STRATEGY_TYPE,
   PRIMARY_STRATEGY_NAME,
+  parseTimeRangeTargetToDurationMs,
 } from '../strategy/config';
 import { normalizeStrategyDocument } from '../strategy/migrations';
 import { resolveBasePlannedTransactionCount } from '../strategy/plannedTransactions';
@@ -24,6 +25,8 @@ import type {
   StrategyVersionRecord,
 } from '../strategy/types';
 import { nowTs } from '../time';
+import { dbResolveTradableTokenId } from '../tokenStore';
+import { dbGetMarketWindowMetrics } from './marketWindowMetricsService';
 import {
   parseJsonText,
   sha256Hex,
@@ -43,24 +46,6 @@ export function createStrategyExecutionRunId(strategyVersionId: number): string 
     return `run-${strategyVersionId}-${crypto.randomUUID()}`;
   }
   return `run-${strategyVersionId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function parseTimeRangeTargetToDurationMs(timeRangeTarget: string): number {
-  switch (timeRangeTarget) {
-    case '1h':
-      return 60 * 60 * 1000;
-    case '6h':
-      return 6 * 60 * 60 * 1000;
-    case '12h':
-      return 12 * 60 * 60 * 1000;
-    case '3d':
-      return 3 * 24 * 60 * 60 * 1000;
-    case '1w':
-      return 7 * 24 * 60 * 60 * 1000;
-    case '24h':
-    default:
-      return 24 * 60 * 60 * 1000;
-  }
 }
 
 function buildQueuedExecutionConfig(
@@ -1282,10 +1267,27 @@ export async function runAndPersistStrategyEvaluation(
   if (!version) {
     return null;
   }
+  const evaluatedAt = Date.now();
+  const tokenId = await dbResolveTradableTokenId(
+    db,
+    version.document.parameters.baseTokenAddress,
+    version.document.parameters.quoteTokenAddress,
+  );
+  const marketWindowMetrics = tokenId
+    ? await dbGetMarketWindowMetrics(
+        db,
+        userId,
+        tokenId,
+        parseTimeRangeTargetToDurationMs(version.document.parameters.timeRangeTarget) / (60 * 60 * 1000),
+        evaluatedAt,
+      )
+    : null;
   const runtime = runStrategyRuntime({
     strategyDocument: version.document,
     trigger,
     marketSnapshot: mapTokenMarketSnapshotToStrategySnapshot(marketSnapshot),
+    marketWindowMetrics,
+    evaluatedAt,
   });
   await dbCreateStrategyEvaluation(db, userId, version.id, trigger, runtime);
   return { version, runtime };

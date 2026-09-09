@@ -5,6 +5,7 @@ import { fetchSolanaMintDecimals, normalizePubkey } from '../workerCore';
 import type { Env } from '../workerShared';
 import type { EngineState, MacroObjective } from './engine';
 import { normalizeStrategyDocument } from './migrations';
+import { parseTimeRangeTargetToDurationMs } from './config';
 import {
   buildPlanningVolumeMapsFromTasks,
   buildStrategyPlanTaskSpecs,
@@ -209,24 +210,6 @@ function buildInitialStateForObjective(objective: MacroObjective): EngineState {
     case 'accumulation':
     default:
       return 'ACCUMULATING';
-  }
-}
-
-function parseTimeRangeTargetToDurationMs(timeRangeTarget: string): number {
-  switch (timeRangeTarget) {
-    case '1h':
-      return 60 * 60 * 1000;
-    case '6h':
-      return 6 * 60 * 60 * 1000;
-    case '12h':
-      return 12 * 60 * 60 * 1000;
-    case '3d':
-      return 3 * 24 * 60 * 60 * 1000;
-    case '1w':
-      return 7 * 24 * 60 * 60 * 1000;
-    case '24h':
-    default:
-      return 24 * 60 * 60 * 1000;
   }
 }
 

@@ -3,6 +3,7 @@ import {
   DEFAULT_RISK_CONTROLS,
   DEFAULT_STRATEGY_TYPE,
   DEFAULT_TRIGGER_CONFIG,
+  normalizeTimeRangeTarget,
   STRATEGY_ENGINE_VERSION,
   STRATEGY_SCHEMA_VERSION,
 } from './config';
@@ -75,7 +76,7 @@ function normalizeParameters(value: unknown, schemaVersion: number): StrategyPar
     baseTokenAddress,
     quoteTokenAddress,
     ammPoolAddress,
-    timeRangeTarget: readString(raw.timeRangeTarget, '24h'),
+    timeRangeTarget: normalizeTimeRangeTarget(readString(raw.timeRangeTarget, '24h')),
     minTransactions: Math.max(1, Math.floor(readNumber(raw.minTransactions, 1))),
     maxTransactions: readNumber(raw.maxTransactions, 100),
     minOrderUsd,

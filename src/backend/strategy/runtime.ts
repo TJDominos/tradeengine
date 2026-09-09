@@ -14,6 +14,7 @@ import type {
   StrategyExecutionPlanningInput,
   StrategyExecutionState,
   StrategyMarketSnapshot,
+  StrategyMarketWindowMetrics,
   StrategyRuntimeResult,
   StrategySettingsInput,
   StrategyTriggerEvent,
@@ -185,6 +186,7 @@ export function runStrategyRuntime(input: {
   strategyDocument: StrategyVersionDocument;
   trigger: StrategyTriggerEvent;
   marketSnapshot: StrategyMarketSnapshot | null;
+  marketWindowMetrics?: StrategyMarketWindowMetrics | null;
   evaluatedAt?: number;
   executionPlanning?: StrategyExecutionPlanningInput;
 }): StrategyRuntimeResult {
@@ -194,6 +196,7 @@ export function runStrategyRuntime(input: {
     strategy,
     trigger: input.trigger,
     marketSnapshot: input.marketSnapshot,
+    marketWindowMetrics: input.marketWindowMetrics ?? null,
     evaluatedAt,
   });
   const executionPlan =
@@ -221,6 +224,7 @@ export function runStrategyRuntime(input: {
       quoteTokenAddress: strategy.parameters.quoteTokenAddress,
       evaluatedAt,
       snapshotFetchedAt: input.marketSnapshot?.fetchedAt ?? null,
+      marketWindowMetrics: input.marketWindowMetrics ?? null,
       qualified: evaluation.qualified,
       shouldExecute: evaluation.shouldExecute,
       reasons: evaluation.reasons,

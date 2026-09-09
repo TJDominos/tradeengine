@@ -13,12 +13,15 @@ export const STRATEGY_SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
 
 export const SUPPORTED_TIME_RANGE_TARGETS = [
   '1h',
+  '4h',
   '6h',
   '12h',
   '24h',
   '3d',
   '1w',
 ] as const;
+export const MIN_TIME_RANGE_HOURS = 1;
+export const MAX_TIME_RANGE_HOURS = 7 * 24;
 
 export const DEFAULT_TRIGGER_CONFIG: StrategyTriggerConfig = {
   sources: ['alchemy_notify', 'manual_refresh'],
@@ -55,9 +58,39 @@ export const DEFAULT_EXECUTION_CONFIG: StrategyExecutionConfig = {
 };
 
 export function isSupportedTimeRangeTarget(value: string): boolean {
-  return (SUPPORTED_TIME_RANGE_TARGETS as readonly string[]).includes(value);
+  const hours = parseTimeRangeTargetToHours(value);
+  return hours >= MIN_TIME_RANGE_HOURS && hours <= MAX_TIME_RANGE_HOURS;
 }
 
 export function supportsTwentyFourHourAggregatesOnly(timeRangeTarget: string): boolean {
-  return timeRangeTarget === '24h';
+  return parseTimeRangeTargetToHours(timeRangeTarget) === 24;
+}
+
+export function parseTimeRangeTargetToHours(value: string): number {
+  const normalizedValue = value.trim().toLowerCase();
+  const match = normalizedValue.match(/^(\d+(?:\.\d+)?)(h|d|w)$/);
+  if (!match) {
+    return 24;
+  }
+
+  const amount = Number(match[1]);
+  const unit = match[2];
+  const multiplier = unit === 'w' ? 7 * 24 : unit === 'd' ? 24 : 1;
+  return Number.isFinite(amount) ? amount * multiplier : 24;
+}
+
+export function normalizeTimeRangeTarget(value: string): string {
+  const hours = parseTimeRangeTargetToHours(value);
+  if (
+    !Number.isFinite(hours) ||
+    hours < MIN_TIME_RANGE_HOURS ||
+    hours > MAX_TIME_RANGE_HOURS
+  ) {
+    return '24h';
+  }
+  return `${hours}h`;
+}
+
+export function parseTimeRangeTargetToDurationMs(timeRangeTarget: string): number {
+  return parseTimeRangeTargetToHours(timeRangeTarget) * 60 * 60 * 1000;
 }
