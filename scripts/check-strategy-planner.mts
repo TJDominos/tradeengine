@@ -9,6 +9,10 @@ import {
 } from '../src/backend/strategy/planner';
 import { buildStrategyPriceCurveReview } from '../src/backend/strategy/priceCurve';
 import {
+  isSupportedTimeRangeTarget,
+  normalizeTimeRangeTarget,
+} from '../src/backend/strategy/config';
+import {
   allocateBoundedOrderVolume,
   calculateDistributionTradeTotals,
   calculateFeasibleTradeCounts,
@@ -923,6 +927,18 @@ assert.deepEqual(netSellPriorityTotals, {
   netBuyVolumeUsd: -1_000,
 }, 'net selling must remain the priority target when target volume is smaller');
 
+assert.equal(isSupportedTimeRangeTarget('4h'), true);
+assert.equal(isSupportedTimeRangeTarget('15m'), true);
+assert.equal(isSupportedTimeRangeTarget('30m'), true);
+assert.equal(isSupportedTimeRangeTarget('1.5m'), false);
+assert.equal(isSupportedTimeRangeTarget('0.5h'), true);
+assert.equal(isSupportedTimeRangeTarget('1 day'), true);
+assert.equal(normalizeTimeRangeTarget('1 day'), '1d');
+assert.equal(normalizeTimeRangeTarget('90m'), '90m');
+assert.equal(normalizeTimeRangeTarget('1w'), '7d');
+assert.equal(isSupportedTimeRangeTarget('30s'), false);
+assert.equal(isSupportedTimeRangeTarget('169h'), false);
+
 const distributionDocument = buildStrategyDocumentFromSettings({
   baseTokenAddress,
   quoteTokenAddress,
@@ -1035,6 +1051,36 @@ assert.equal(
   pureSellPlanning.tasks.reduce((sum, task) => sum + task.totalVolumeUsd, 0),
   100,
 );
+
+const netSell800Config = {
+  ...distributionConfig,
+  baseOrderCount: 10,
+  baseTotalVolumeUsd: 1_000,
+  minOrderUsd: 100,
+  maxOrderUsd: 300,
+};
+const netSell800Specs = buildStrategyPlanTaskSpecs(netSell800Config, 800);
+assert.equal(
+  netSell800Specs.find((spec) => spec.side === 'sell')?.totalVolumeUsd,
+  900,
+  'an 800 USD net sell inside 1,000 USD gross volume requires 900 USD of sells',
+);
+assert.equal(
+  netSell800Specs.find((spec) => spec.side === 'buy')?.totalVolumeUsd,
+  100,
+  'the remaining 100 USD gross volume is an explicit support buy',
+);
+const netSell800Curve = buildStrategyPriceCurveReview({
+  tasks: [
+    { side: 'sell', totalVolumeUsd: 900, scheduledAt: 1_000 },
+    { side: 'buy', totalVolumeUsd: 100, scheduledAt: 2_000 },
+  ],
+  targetVolatilityPct: 10,
+  priceUsd: 0.000212,
+  liquidityUsd: 10_000,
+});
+assert.ok((netSell800Curve.projectedFinalPriceUsd ?? 0) < (netSell800Curve.startPriceUsd ?? 0));
+assert.ok((netSell800Curve.projectedLowPriceUsd ?? 0) < (netSell800Curve.projectedFinalPriceUsd ?? 0));
 
 const distributionMinimumCountConfig = {
   ...distributionConfig,

@@ -1,5 +1,5 @@
 export type MarketWindowMetrics = {
-  windowHours: number;
+  windowMinutes: number;
   volumeUsd: number;
   transactionCount: number;
   buyVolumeUsd: number;
@@ -15,13 +15,13 @@ export async function dbGetMarketWindowMetrics(
   db: D1Database,
   userId: number,
   tokenId: number,
-  windowHours: number,
+  windowMinutes: number,
   endTimeMs: number,
 ): Promise<MarketWindowMetrics> {
-  const normalizedWindowHours = Number.isFinite(windowHours) && windowHours > 0
-    ? windowHours
-    : 24;
-  const startTimeMs = endTimeMs - normalizedWindowHours * 60 * 60 * 1000;
+  const normalizedWindowMinutes = Number.isFinite(windowMinutes) && windowMinutes > 0
+    ? windowMinutes
+    : 24 * 60;
+  const startTimeMs = endTimeMs - normalizedWindowMinutes * 60 * 1000;
   const row = await db
     .prepare(
       `WITH eligible AS (
@@ -128,7 +128,7 @@ export async function dbGetMarketWindowMetrics(
     : 0;
 
   return {
-    windowHours: normalizedWindowHours,
+    windowMinutes: normalizedWindowMinutes,
     volumeUsd,
     transactionCount,
     buyVolumeUsd,

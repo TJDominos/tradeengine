@@ -346,7 +346,7 @@ export interface StrategyMarketSnapshot {
 }
 
 export interface StrategyMarketWindowMetrics {
-  windowHours: number;
+  windowMinutes: number;
   volumeUsd: number | null;
   transactionCount: number | null;
   buyVolumeUsd: number | null;

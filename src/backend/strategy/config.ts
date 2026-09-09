@@ -12,16 +12,19 @@ export const DEFAULT_STRATEGY_TYPE: StrategyType = 'solana-auto-trade';
 export const STRATEGY_SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
 
 export const SUPPORTED_TIME_RANGE_TARGETS = [
+  '15m',
+  '30m',
   '1h',
   '4h',
   '6h',
   '12h',
   '24h',
   '3d',
-  '1w',
+  '7d',
 ] as const;
-export const MIN_TIME_RANGE_HOURS = 1;
-export const MAX_TIME_RANGE_HOURS = 7 * 24;
+export const MIN_TIME_RANGE_MINUTES = 1;
+export const MAX_TIME_RANGE_MINUTES = 7 * 24 * 60;
+const TIME_RANGE_TARGET_PATTERN = /^(\d+(?:\.\d+)?)[\s]*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|week|weeks)$/;
 
 export const DEFAULT_TRIGGER_CONFIG: StrategyTriggerConfig = {
   sources: ['alchemy_notify', 'manual_refresh'],
@@ -58,39 +61,59 @@ export const DEFAULT_EXECUTION_CONFIG: StrategyExecutionConfig = {
 };
 
 export function isSupportedTimeRangeTarget(value: string): boolean {
-  const hours = parseTimeRangeTargetToHours(value);
-  return hours >= MIN_TIME_RANGE_HOURS && hours <= MAX_TIME_RANGE_HOURS;
+  if (!TIME_RANGE_TARGET_PATTERN.test(value.trim().toLowerCase())) {
+    return false;
+  }
+  const minutes = parseTimeRangeTargetToMinutes(value);
+  return Number.isInteger(minutes) && minutes >= MIN_TIME_RANGE_MINUTES && minutes <= MAX_TIME_RANGE_MINUTES;
 }
 
 export function supportsTwentyFourHourAggregatesOnly(timeRangeTarget: string): boolean {
   return parseTimeRangeTargetToHours(timeRangeTarget) === 24;
 }
 
-export function parseTimeRangeTargetToHours(value: string): number {
+export function parseTimeRangeTargetToMinutes(value: string): number {
   const normalizedValue = value.trim().toLowerCase();
-  const match = normalizedValue.match(/^(\d+(?:\.\d+)?)(h|d|w)$/);
+  const match = normalizedValue.match(TIME_RANGE_TARGET_PATTERN);
   if (!match) {
-    return 24;
+    return 24 * 60;
   }
 
   const amount = Number(match[1]);
   const unit = match[2];
-  const multiplier = unit === 'w' ? 7 * 24 : unit === 'd' ? 24 : 1;
-  return Number.isFinite(amount) ? amount * multiplier : 24;
+  const multiplier = ['w', 'week', 'weeks'].includes(unit)
+    ? 7 * 24 * 60
+    : ['d', 'day', 'days'].includes(unit)
+      ? 24 * 60
+      : ['h', 'hr', 'hrs', 'hour', 'hours'].includes(unit)
+        ? 60
+        : 1;
+  return Number.isFinite(amount) ? amount * multiplier : 24 * 60;
+}
+
+export function parseTimeRangeTargetToHours(value: string): number {
+  return parseTimeRangeTargetToMinutes(value) / 60;
 }
 
 export function normalizeTimeRangeTarget(value: string): string {
-  const hours = parseTimeRangeTargetToHours(value);
+  const minutes = parseTimeRangeTargetToMinutes(value);
   if (
-    !Number.isFinite(hours) ||
-    hours < MIN_TIME_RANGE_HOURS ||
-    hours > MAX_TIME_RANGE_HOURS
+    !Number.isFinite(minutes) ||
+    !Number.isInteger(minutes) ||
+    minutes < MIN_TIME_RANGE_MINUTES ||
+    minutes > MAX_TIME_RANGE_MINUTES
   ) {
-    return '24h';
+    return '1d';
   }
-  return `${hours}h`;
+  if (minutes % (24 * 60) === 0) {
+    return `${minutes / (24 * 60)}d`;
+  }
+  if (minutes % 60 === 0) {
+    return `${minutes / 60}h`;
+  }
+  return `${minutes}m`;
 }
 
 export function parseTimeRangeTargetToDurationMs(timeRangeTarget: string): number {
-  return parseTimeRangeTargetToHours(timeRangeTarget) * 60 * 60 * 1000;
+  return parseTimeRangeTargetToMinutes(timeRangeTarget) * 60 * 1000;
 }

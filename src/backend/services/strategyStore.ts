@@ -2,6 +2,7 @@ import { ApiError } from '../errors';
 import {
   DEFAULT_STRATEGY_TYPE,
   PRIMARY_STRATEGY_NAME,
+  parseTimeRangeTargetToMinutes,
   parseTimeRangeTargetToDurationMs,
 } from '../strategy/config';
 import { normalizeStrategyDocument } from '../strategy/migrations';
@@ -1278,7 +1279,7 @@ export async function runAndPersistStrategyEvaluation(
         db,
         userId,
         tokenId,
-        parseTimeRangeTargetToDurationMs(version.document.parameters.timeRangeTarget) / (60 * 60 * 1000),
+        parseTimeRangeTargetToMinutes(version.document.parameters.timeRangeTarget),
         evaluatedAt,
       )
     : null;

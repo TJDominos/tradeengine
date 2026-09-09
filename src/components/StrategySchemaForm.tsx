@@ -41,22 +41,32 @@ const macroObjectiveOptions: Array<{
   },
 ];
 
-const timeRangePresetHours = [1, 4, 6, 12, 24, 72, 168];
+type TimeRangeUnit = 'm' | 'h' | 'd';
 
-function parseTimeRangeHours(value: string | null | undefined): number | null {
+const timeRangeUnits: Array<{ value: TimeRangeUnit; label: string; minutes: number }> = [
+  { value: 'm', label: 'Minutes', minutes: 1 },
+  { value: 'h', label: 'Hours', minutes: 60 },
+  { value: 'd', label: 'Days', minutes: 24 * 60 },
+];
+
+function parseTimeRangeValue(value: string | null | undefined): { minutes: number; unit: TimeRangeUnit } | null {
   const normalizedValue = value?.trim().toLowerCase() ?? '';
-  const match = normalizedValue.match(/^(\d+(?:\.\d+)?)(h|d|w)$/);
+  const match = normalizedValue.match(/^(\d+(?:\.\d+)?)(m|h|d|w)$/);
   if (!match) {
     return null;
   }
   const amount = Number(match[1]);
-  const multiplier = match[2] === 'w' ? 7 * 24 : match[2] === 'd' ? 24 : 1;
-  const hours = amount * multiplier;
-  return Number.isFinite(hours) ? hours : null;
+  const unit = match[2] === 'w' ? 'd' : match[2] as TimeRangeUnit;
+  const multiplier = match[2] === 'w' ? 7 * 24 * 60 : timeRangeUnits.find((option) => option.value === unit)?.minutes ?? 60;
+  const minutes = amount * multiplier;
+  return Number.isFinite(minutes) ? { minutes, unit } : null;
 }
 
-function formatTimeRangeTarget(hours: number): string {
-  return `${Math.min(168, Math.max(1, Math.round(hours)))}h`;
+function formatTimeRangeTarget(minutes: number, unit: TimeRangeUnit = 'h'): string {
+  const boundedMinutes = Math.min(7 * 24 * 60, Math.max(1, Math.round(minutes)));
+  const unitMinutes = timeRangeUnits.find((option) => option.value === unit)?.minutes ?? 60;
+  const amount = boundedMinutes / unitMinutes;
+  return `${Number.isInteger(amount) ? amount : amount.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}${unit}`;
 }
 
 const tacticConfig: Record<
@@ -260,6 +270,7 @@ export function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volat
   const startPrice = review.startPriceUsd;
   const lowPrice = review.projectedLowPriceUsd;
   const highPrice = review.projectedHighPriceUsd;
+  const finalPrice = review.projectedFinalPriceUsd;
 
   const lowChangePct =
     startPrice != null && startPrice > 0 && lowPrice != null
@@ -268,6 +279,10 @@ export function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volat
   const highChangePct =
     startPrice != null && startPrice > 0 && highPrice != null
       ? ((highPrice - startPrice) / startPrice) * 100
+      : null;
+  const finalChangePct =
+    startPrice != null && startPrice > 0 && finalPrice != null
+      ? ((finalPrice - startPrice) / startPrice) * 100
       : null;
 
   return (
@@ -312,7 +327,7 @@ export function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volat
           );
         })}
       </svg>
-      <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-slate-400">
+      <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-400 sm:grid-cols-4">
         <div>
           <p className="text-slate-500">Start</p>
           <p className="mt-1 font-medium text-slate-200">{formatPriceCurrency(startPrice)}</p>
@@ -333,6 +348,15 @@ export function PriceSlopeChart({ review }: { review: StrategyPlanPreview['volat
           {highChangePct != null ? (
             <p className="mt-0.5 text-[11px] text-emerald-300">
               {highChangePct >= 0 ? '+' : ''}{highChangePct.toFixed(2)}% vs start
+            </p>
+          ) : null}
+        </div>
+        <div>
+          <p className="text-slate-500">End</p>
+          <p className="mt-1 font-medium text-slate-200">{formatPriceCurrency(finalPrice)}</p>
+          {finalChangePct != null ? (
+            <p className={`mt-0.5 text-[11px] ${finalChangePct >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+              {finalChangePct >= 0 ? '+' : ''}{finalChangePct.toFixed(2)}% vs start
             </p>
           ) : null}
         </div>
@@ -532,15 +556,13 @@ export default function StrategySchemaForm({
     {
       label: 'Operating Window',
       value: (() => {
-        const hours = parseTimeRangeHours(formData.parameters?.timeRangeTarget);
-        if (hours == null) {
+        const parsed = parseTimeRangeValue(formData.parameters?.timeRangeTarget);
+        if (parsed == null) {
           return '1 day';
         }
-        return hours === 24
-          ? '1 day'
-          : hours === 168
-            ? '1 week'
-            : `${hours} hours`;
+        const unitLabel = timeRangeUnits.find((unit) => unit.value === parsed.unit)?.label ?? 'Hours';
+        const amount = parsed.minutes / (timeRangeUnits.find((unit) => unit.value === parsed.unit)?.minutes ?? 60);
+        return `${amount} ${unitLabel.toLowerCase()}`;
       })(),
     },
     {
@@ -691,50 +713,57 @@ export default function StrategySchemaForm({
           description="Tune the operating window, target opportunity size, and qualification thresholds that feed the runtime."
         >
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <FieldShell label="Operating Window (Hours)" helper="Enter 1-168 hours. Common presets include 4 hours and 1 day. This controls campaign scheduling; live market qualification still uses 24h aggregates.">
+            <FieldShell label="Operating Window" helper="Set a window from 1 minute to 7 days. Choose the amount and unit used for campaign scheduling and live market qualification.">
               <Controller
                 control={control}
                 name="parameters.timeRangeTarget"
-                render={({ field }) => (
-                  <>
-                    <input
-                      type="number"
-                      min="1"
-                      max="168"
-                      step="1"
-                      list="strategy-operating-window-presets"
-                      value={formatNumberInputValue(parseTimeRangeHours(field.value))}
-                      onChange={(event) => {
-                        if (event.target.value.trim() === '') {
-                          field.onChange('');
-                          return;
-                        }
-                        const parsed = Number(event.target.value);
-                        if (Number.isFinite(parsed)) {
-                          field.onChange(formatTimeRangeTarget(parsed));
-                        }
-                      }}
-                      onBlur={(event) => {
-                        field.onBlur();
-                        const rawValue = event.target.value.trim();
-                        const parsed = rawValue === '' ? null : Number(rawValue);
-                        field.onChange(
-                          parsed != null && Number.isFinite(parsed)
-                            ? formatTimeRangeTarget(parsed)
-                            : '24h',
-                        );
-                      }}
-                      className={textInputClassName()}
-                    />
-                    <datalist id="strategy-operating-window-presets">
-                      {timeRangePresetHours.map((hours) => (
-                        <option key={hours} value={hours}>
-                          {hours === 24 ? '1 day' : hours === 168 ? '1 week' : `${hours} hours`}
-                        </option>
-                      ))}
-                    </datalist>
-                  </>
-                )}
+                render={({ field }) => {
+                  const parsed = parseTimeRangeValue(field.value);
+                  const unit = parsed?.unit ?? 'h';
+                  const unitMinutes = timeRangeUnits.find((option) => option.value === unit)?.minutes ?? 60;
+                  const amount = parsed == null ? '' : String(parsed.minutes / unitMinutes);
+                  return (
+                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(130px,0.8fr)] gap-2">
+                      <input
+                        type="number"
+                        min="0.01"
+                        max={unit === 'm' ? 7 * 24 * 60 : unit === 'h' ? 7 * 24 : 7}
+                        step={unit === 'm' ? '1' : '0.25'}
+                        inputMode="decimal"
+                        value={amount}
+                        onChange={(event) => {
+                          const rawAmount = event.target.value;
+                          field.onChange(rawAmount === '' ? '' : `${rawAmount}${unit}`);
+                        }}
+                        onBlur={(event) => {
+                          field.onBlur();
+                          const rawAmount = Number(event.target.value);
+                          field.onChange(
+                            Number.isFinite(rawAmount) && rawAmount > 0
+                              ? formatTimeRangeTarget(rawAmount * unitMinutes, unit)
+                              : '1d',
+                          );
+                        }}
+                        className={textInputClassName()}
+                      />
+                      <select
+                        value={unit}
+                        onChange={(event) => {
+                          const nextUnit = event.target.value as TimeRangeUnit;
+                          const currentMinutes = parsed?.minutes ?? 24 * 60;
+                          field.onChange(formatTimeRangeTarget(currentMinutes, nextUnit));
+                        }}
+                        className={textInputClassName()}
+                      >
+                        {timeRangeUnits.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                }}
               />
             </FieldShell>
 

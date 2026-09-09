@@ -1,4 +1,5 @@
 import { ApiError } from './errors';
+import { isSupportedTimeRangeTarget, normalizeTimeRangeTarget } from './strategy/config';
 import { dbListTradableTokens, dbResolveSolanaRpcUrls } from './tokenStore';
 import { nowTs, normalizeTimestampMs } from './time';
 import {
@@ -721,10 +722,10 @@ export async function dbSaveSettings(
   if (update.maxTransactions <= 0) {
     throw new ApiError(400, 'Max transactions must be greater than zero');
   }
-  const allowedRanges = ['1h', '6h', '12h', '24h', '3d', '1w'];
-  if (!allowedRanges.includes(update.timeRangeTarget)) {
+  if (!isSupportedTimeRangeTarget(update.timeRangeTarget)) {
     throw new ApiError(400, 'Unsupported time range target');
   }
+  const normalizedTimeRangeTarget = normalizeTimeRangeTarget(update.timeRangeTarget);
 
   const pairs: [string, string][] = [
     ['contractAddress', normalizedContractAddress],
@@ -734,7 +735,7 @@ export async function dbSaveSettings(
     ['pullbackTarget', String(update.pullbackTarget)],
     ['volumeTarget', String(update.volumeTarget)],
     ['netBuyinTarget', String(update.netBuyinTarget)],
-    ['timeRangeTarget', update.timeRangeTarget],
+    ['timeRangeTarget', normalizedTimeRangeTarget],
     ['maxTransactions', String(update.maxTransactions)],
     ['maxSlippage', String(update.maxSlippage)],
     ['strategyNotes', update.strategyNotes.trim()],

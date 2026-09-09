@@ -21,6 +21,7 @@ export type StrategyPriceCurveReview = {
   startPriceUsd: number | null;
   projectedLowPriceUsd: number | null;
   projectedHighPriceUsd: number | null;
+  projectedFinalPriceUsd: number | null;
   liquidityUsd: number | null;
   available: boolean;
   points: StrategyPriceCurvePoint[];
@@ -59,6 +60,7 @@ export function buildStrategyPriceCurveReview(input: {
       startPriceUsd: priceUsd,
       projectedLowPriceUsd: null,
       projectedHighPriceUsd: null,
+      projectedFinalPriceUsd: null,
       liquidityUsd,
       available: false,
       points: [{
@@ -81,6 +83,7 @@ export function buildStrategyPriceCurveReview(input: {
   let quoteReserveUsd = initialQuoteReserveUsd;
   let projectedLowPriceUsd = priceUsd;
   let projectedHighPriceUsd = priceUsd;
+  let projectedFinalPriceUsd = priceUsd;
   let previousPriceUsd = priceUsd;
   let previousScheduledAt = startScheduledAt;
   let cumulativeNetFlowUsd = 0;
@@ -105,6 +108,7 @@ export function buildStrategyPriceCurveReview(input: {
       ? quoteReserveUsd + volumeUsd
       : Math.max(MIN_RESERVE_USD, quoteReserveUsd - volumeUsd);
     const projectedPriceUsd = priceUsd * (quoteReserveUsd / initialQuoteReserveUsd) ** 2;
+    projectedFinalPriceUsd = projectedPriceUsd;
     projectedLowPriceUsd = Math.min(projectedLowPriceUsd, projectedPriceUsd);
     projectedHighPriceUsd = Math.max(projectedHighPriceUsd, projectedPriceUsd);
     const scheduledAt = Number.isFinite(task.scheduledAt) ? task.scheduledAt ?? null : null;
@@ -142,6 +146,7 @@ export function buildStrategyPriceCurveReview(input: {
     startPriceUsd: roundPriceUsd(priceUsd),
     projectedLowPriceUsd: roundPriceUsd(projectedLowPriceUsd),
     projectedHighPriceUsd: roundPriceUsd(projectedHighPriceUsd),
+    projectedFinalPriceUsd: roundPriceUsd(projectedFinalPriceUsd),
     liquidityUsd,
     available: true,
     points,

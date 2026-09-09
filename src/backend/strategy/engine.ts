@@ -9,7 +9,7 @@ import { ShakeoutStrategy } from './algorithms/shakeout';
 import {
   STRATEGY_SNAPSHOT_MAX_AGE_MS,
   DEFAULT_EXECUTION_CONFIG,
-  parseTimeRangeTargetToHours,
+  parseTimeRangeTargetToMinutes,
 } from './config';
 import {
   StrategyTaskQueue,
@@ -677,12 +677,14 @@ export function evaluateStrategy(
     reasons.push('Market snapshot is stale and cannot drive automated execution');
   }
 
-  const targetWindowHours = parseTimeRangeTargetToHours(strategy.parameters.timeRangeTarget);
-  const windowLabel = targetWindowHours === 24
-    ? '1 day'
-    : `${targetWindowHours} hours`;
+  const targetWindowMinutes = parseTimeRangeTargetToMinutes(strategy.parameters.timeRangeTarget);
+  const windowLabel = targetWindowMinutes % (24 * 60) === 0
+    ? `${targetWindowMinutes / (24 * 60)} day${targetWindowMinutes === 24 * 60 ? '' : 's'}`
+    : targetWindowMinutes % 60 === 0
+      ? `${targetWindowMinutes / 60} hour${targetWindowMinutes === 60 ? '' : 's'}`
+      : `${targetWindowMinutes} minute${targetWindowMinutes === 1 ? '' : 's'}`;
   const windowMetricsAvailable =
-    marketWindowMetrics?.windowHours === targetWindowHours;
+    marketWindowMetrics?.windowMinutes === targetWindowMinutes;
 
   const volumeThreshold = strategy.targets.volumeUsdMin;
   if (volumeThreshold > 0) {
@@ -691,7 +693,7 @@ export function evaluateStrategy(
       ? (marketWindowMetrics?.volumeUsd ?? 0) >= volumeThreshold
       : null;
     pushMetric(metrics, {
-      name: `volume${targetWindowHours}h`,
+      name: `volume${targetWindowMinutes}m`,
       required: true,
       available,
       value: available ? marketWindowMetrics?.volumeUsd ?? null : null,
@@ -718,7 +720,7 @@ export function evaluateStrategy(
       ? (marketWindowMetrics?.transactionCount ?? 0) <= maxTransactions
       : null;
     pushMetric(metrics, {
-      name: `transactions${targetWindowHours}h`,
+      name: `transactions${targetWindowMinutes}m`,
       required: true,
       available,
       value: available ? marketWindowMetrics?.transactionCount ?? null : null,
@@ -777,7 +779,7 @@ export function evaluateStrategy(
       ? (marketWindowMetrics?.externalNetBuyinUsd ?? 0) >= netBuyinThreshold
       : null;
     pushMetric(metrics, {
-      name: `externalNetBuyin${targetWindowHours}h`,
+      name: `externalNetBuyin${targetWindowMinutes}m`,
       required: true,
       available,
       value: available ? marketWindowMetrics?.externalNetBuyinUsd ?? null : null,

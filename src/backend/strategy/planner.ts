@@ -1189,6 +1189,11 @@ export function buildStrategyPlanningWarnings(input: {
         `Support buy target cannot be fully allocated: ${formatPlannerUsd(plannedBuyVolumeUsd)} of ${formatPlannerUsd(expectedBuyVolumeUsd)} is currently planned. Add available quote balance or reduce the transaction requirements.`,
       );
     }
+    if (expectedBuyVolumeUsd > MIN_VOLUME_EPSILON) {
+      warnings.push(
+        `Distribution uses ${formatPlannerUsd(expectedSellVolumeUsd)} of sells and ${formatPlannerUsd(expectedBuyVolumeUsd)} of support buys to reach ${formatPlannerUsd(requiredNetSellUsd)} net sell within ${formatPlannerUsd(plannedGrossVolumeUsd)} gross volume.`,
+      );
+    }
   } else {
     const requiredNetBuyUsd = positiveNumber(input.requiredTargetUsd);
     const configuredVolumeUsd = positiveNumber(input.config.baseTotalVolumeUsd);

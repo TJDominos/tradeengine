@@ -278,6 +278,7 @@ export type StrategyPriceCurveReview = {
   startPriceUsd: number | null;
   projectedLowPriceUsd: number | null;
   projectedHighPriceUsd: number | null;
+  projectedFinalPriceUsd: number | null;
   liquidityUsd: number | null;
   available: boolean;
   points: StrategyPriceCurvePoint[];
