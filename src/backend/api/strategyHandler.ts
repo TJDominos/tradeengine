@@ -354,6 +354,7 @@ function buildStrategyPlanPreview(
     requiredTargetUsd: requiredBuyAmount,
     taskSpecs,
     planning,
+    baseTokenPriceUsd: marketSnapshot?.priceUsd ?? null,
   });
 
   return {
@@ -565,6 +566,7 @@ export async function handleStrategyRoutes(
     const marketSnapshot = await loadStoredMarketSnapshotByContractAddress(
       env.TRADINGBOT_DB,
       normalizedBaseTokenAddress,
+      normalizedQuoteTokenAddress,
     );
     const accounts = await listManagedAccountsWithStoredBalances(
       env.TRADINGBOT_DB,

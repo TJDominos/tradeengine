@@ -1132,6 +1132,7 @@ export function buildStrategyPlanningWarnings(input: {
   requiredTargetUsd: number;
   taskSpecs: StrategyPlannerTaskSpec[];
   planning: StrategyPlannerResult;
+  baseTokenPriceUsd?: number | null;
 }): string[] {
   const warnings: string[] = [];
   const expectedSellVolumeUsd = input.taskSpecs.reduce(
@@ -1151,6 +1152,17 @@ export function buildStrategyPlanningWarnings(input: {
     0,
   );
   const volumeShortfall = input.planning.unallocatedVolumeUsd > MIN_VOLUME_EPSILON;
+
+  if (
+    expectedSellVolumeUsd > MIN_VOLUME_EPSILON &&
+    (input.baseTokenPriceUsd == null ||
+      !Number.isFinite(input.baseTokenPriceUsd) ||
+      input.baseTokenPriceUsd <= 0)
+  ) {
+    warnings.push(
+      'The current pair has no valid market price, so base-token balances cannot be converted to USD sell capacity. Refresh market data before judging sellable capacity.',
+    );
+  }
 
   if (input.config.macroObjective === 'distribution') {
     const configuredVolumeUsd = positiveNumber(input.config.baseTotalVolumeUsd);

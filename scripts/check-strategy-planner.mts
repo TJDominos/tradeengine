@@ -206,6 +206,7 @@ const accumulationWarnings = buildStrategyPlanningWarnings({
   requiredTargetUsd: 1_000,
   taskSpecs: priorityTaskSpecs,
   planning: priorityPlanning,
+  baseTokenPriceUsd: 1,
 });
 assert.ok(
   accumulationWarnings.some((warning) => warning.includes('below the net buy-in target')),

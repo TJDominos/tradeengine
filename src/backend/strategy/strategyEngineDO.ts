@@ -1032,6 +1032,7 @@ export class StrategyEngineDurableObject {
       dbResolveTradableTokenId(
         this.env.TRADINGBOT_DB,
         config.strategyDocument.parameters.baseTokenAddress.trim(),
+        config.strategyDocument.parameters.quoteTokenAddress.trim(),
       ),
     ]);
 
@@ -1279,6 +1280,7 @@ export class StrategyEngineDurableObject {
     const tokenId = await dbResolveTradableTokenId(
       this.env.TRADINGBOT_DB,
       config.baseTokenAddress,
+      config.strategyDocument.parameters.quoteTokenAddress.trim(),
     );
     if (!tokenId) {
       throw new ApiError(500, 'Cannot persist strategy trade without a tracked token');
@@ -1355,6 +1357,7 @@ export class StrategyEngineDurableObject {
     const tokenId = await dbResolveTradableTokenId(
       this.env.TRADINGBOT_DB,
       config.baseTokenAddress,
+      config.strategyDocument.parameters.quoteTokenAddress.trim(),
     );
     if (!tokenId) {
       return;
@@ -1417,14 +1420,15 @@ export class StrategyEngineDurableObject {
 
     const tokenRow = await this.env.TRADINGBOT_DB
       .prepare(
-        'SELECT decimals FROM tradable_tokens WHERE network = ?1 AND base_token_address = ?2 LIMIT 1',
+        'SELECT decimals FROM tradable_tokens WHERE network = ?1 AND base_token_address = ?2 AND quote_token_address = ?3 LIMIT 1',
       )
-      .bind('solana', baseToken)
+      .bind('solana', baseToken, quoteToken)
       .first<{ decimals: number | null }>();
 
     const tokenId = await dbResolveTradableTokenId(
       this.env.TRADINGBOT_DB,
       baseToken,
+      quoteToken,
     );
     const marketSnapshot = tokenId
       ? await dbGetLatestTokenMarketSnapshot(this.env.TRADINGBOT_DB, tokenId)
