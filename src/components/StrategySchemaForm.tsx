@@ -728,7 +728,7 @@ export default function StrategySchemaForm({
                         type="number"
                         min="0.01"
                         max={unit === 'm' ? 7 * 24 * 60 : unit === 'h' ? 7 * 24 : 7}
-                        step={unit === 'm' ? '1' : '0.25'}
+                        step="any"
                         inputMode="decimal"
                         value={amount}
                         onChange={(event) => {
