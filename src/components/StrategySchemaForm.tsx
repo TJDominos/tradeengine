@@ -1340,7 +1340,7 @@ export default function StrategySchemaForm({
                           : ''}
                       </p>
                       <p className="mt-1 text-xs text-slate-400">
-                        Estimated range {formatPriceCurrency(planPreview.volatilityReview.projectedLowPriceUsd)}–{formatPriceCurrency(planPreview.volatilityReview.projectedHighPriceUsd)} from {formatPriceCurrency(planPreview.volatilityReview.startPriceUsd)}, using {formatCurrency(planPreview.volatilityReview.liquidityUsd)} snapshot liquidity. This estimate does not block execution.
+                        Estimated range {formatPriceCurrency(planPreview.volatilityReview.projectedLowPriceUsd)}–{formatPriceCurrency(planPreview.volatilityReview.projectedHighPriceUsd)} from {formatPriceCurrency(planPreview.volatilityReview.startPriceUsd)}, using {formatCurrency(planPreview.volatilityReview.liquidityUsd)} aggregate market depth. This is a linear route-depth estimate and does not block execution.
                       </p>
                       <PriceSlopeChart review={planPreview.volatilityReview} />
                     </>

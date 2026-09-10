@@ -1,4 +1,4 @@
-const MIN_RESERVE_USD = 0.000001;
+const MIN_PROJECTED_PRICE_FACTOR = 0.000001;
 
 export type StrategyPriceCurvePoint = {
   index: number;
@@ -79,8 +79,6 @@ export function buildStrategyPriceCurveReview(input: {
     };
   }
 
-  const initialQuoteReserveUsd = liquidityUsd / 2;
-  let quoteReserveUsd = initialQuoteReserveUsd;
   let projectedLowPriceUsd = priceUsd;
   let projectedHighPriceUsd = priceUsd;
   let projectedFinalPriceUsd = priceUsd;
@@ -104,10 +102,13 @@ export function buildStrategyPriceCurveReview(input: {
     const volumeUsd = Math.max(0, task.totalVolumeUsd);
     const netFlowUsd = task.side === 'buy' ? volumeUsd : -volumeUsd;
     cumulativeNetFlowUsd += netFlowUsd;
-    quoteReserveUsd = task.side === 'buy'
-      ? quoteReserveUsd + volumeUsd
-      : Math.max(MIN_RESERVE_USD, quoteReserveUsd - volumeUsd);
-    const projectedPriceUsd = priceUsd * (quoteReserveUsd / initialQuoteReserveUsd) ** 2;
+    // Jupiter routes across multiple pools. Treat the reported liquidity as
+    // aggregate effective market depth instead of a single AMM reserve.
+    const depthRatio = cumulativeNetFlowUsd / liquidityUsd;
+    const projectedPriceUsd = priceUsd * Math.max(
+      MIN_PROJECTED_PRICE_FACTOR,
+      1 + depthRatio,
+    );
     projectedFinalPriceUsd = projectedPriceUsd;
     projectedLowPriceUsd = Math.min(projectedLowPriceUsd, projectedPriceUsd);
     projectedHighPriceUsd = Math.max(projectedHighPriceUsd, projectedPriceUsd);

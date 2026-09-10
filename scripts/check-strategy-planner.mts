@@ -523,6 +523,17 @@ const priceCurveReview = buildStrategyPriceCurveReview({
 assert.equal(priceCurveReview.available, true);
 assert.equal(priceCurveReview.targetVolatilityPct, 10);
 assert.ok((priceCurveReview.projectedVolatilityPct ?? 0) > 0);
+const linearSellPriceCurve = buildStrategyPriceCurveReview({
+  tasks: [{ side: 'sell', totalVolumeUsd: 800, scheduledAt: 1_000 }],
+  targetVolatilityPct: 10,
+  priceUsd: 0.000212,
+  liquidityUsd: 5_000,
+});
+assert.equal(
+  Number(linearSellPriceCurve.projectedFinalPriceUsd?.toFixed(8)),
+  0.00017808,
+  'price projection should use aggregate linear depth for a routed sell',
+);
 assert.equal(
   accumulation25Plan.isExecutable,
   true,
