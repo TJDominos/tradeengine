@@ -378,7 +378,7 @@ export default function TransactionLogsCard({
                   <td className={`px-4 py-1.5 text-xs font-bold ${actionClass}`}>{actionLabel}</td>
                   <td className="px-4 py-1.5 text-xs text-slate-300">{tokenAmount != null ? formatNum(tokenAmount) : '-'}</td>
                   <td className="px-4 py-1.5 text-xs text-slate-300">
-                    {normalizedWebhookAction === 'BUY' || normalizedWebhookAction === 'SELL'
+                    {actionLabel === 'BUY' || actionLabel === 'SELL'
                       ? displayTokenPriceUsd != null ? formatTokenPrice(displayTokenPriceUsd) : '-'
                       : '-'}
                   </td>

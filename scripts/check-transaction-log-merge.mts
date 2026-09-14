@@ -124,5 +124,27 @@ assert.deepEqual(
   },
   'Each trade must preserve its own chain execution amounts',
 );
+assert.deepEqual(
+  resolveTradeLogAmounts({
+    action: 'BUY',
+    executedAmount: 12.5,
+    executedPrice: null,
+    executionTraceJson: JSON.stringify({
+      decimals: {
+        baseTokenDecimals: 6,
+        quoteTokenDecimals: 6,
+      },
+      quoteResponse: {
+        inAmount: '12500000',
+        outAmount: '2500000000',
+      },
+    }),
+  }),
+  {
+    tokenAmount: 2500,
+    usdcAmount: 12.5,
+  },
+  'Internal BUY rows must derive amounts from the stored Jupiter quote when executed_price is null',
+);
 
 console.log('Transaction log merge and refresh cursor check passed.');

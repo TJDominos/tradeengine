@@ -1586,7 +1586,11 @@ export async function dbListTradeLogs(
 ): Promise<TradeLogRecord[]> {
   const hasDateRange = dateRange.startTimeMs != null && dateRange.endTimeMs != null;
   const dateFilter = hasDateRange
-    ? 'WHERE COALESCE(tl.chain_time_ms, tl.created_at) BETWEEN ?1 AND ?2'
+    ? `WHERE CASE
+          WHEN COALESCE(tl.chain_time_ms, tl.created_at) >= 1000000000000
+            THEN COALESCE(tl.chain_time_ms, tl.created_at)
+          ELSE COALESCE(tl.chain_time_ms, tl.created_at) * 1000
+        END BETWEEN ?1 AND ?2`
     : '';
   const limit = Math.min(Math.max(dateRange.limit ?? 1000, 1), 1000);
   const offset = Math.max(dateRange.offset ?? 0, 0);
@@ -1614,7 +1618,11 @@ export async function dbListTradeLogs(
        FROM trade_logs tl
        LEFT JOIN tradable_tokens tt ON tt.id = tl.token_id
        ${dateFilter}
-      ORDER BY COALESCE(tl.chain_time_ms, tl.created_at) DESC, tl.id DESC
+      ORDER BY CASE
+        WHEN COALESCE(tl.chain_time_ms, tl.created_at) >= 1000000000000
+          THEN COALESCE(tl.chain_time_ms, tl.created_at)
+        ELSE COALESCE(tl.chain_time_ms, tl.created_at) * 1000
+      END DESC, tl.id DESC
        ${pagination}`,
     )
      .bind(...(hasDateRange
@@ -1693,6 +1701,30 @@ export function resolveTradeLogAmounts(input: {
     }
     const tracedTokenAmount = toFiniteNumber(trace?.baseAmount);
     const tracedUsdcAmount = toFiniteNumber(trace?.executedVolumeUsd);
+    const quoteResponse = trace?.quoteResponse;
+    const quote = quoteResponse != null && typeof quoteResponse === 'object' && !Array.isArray(quoteResponse)
+      ? quoteResponse as Record<string, unknown>
+      : null;
+    const decimals = trace?.decimals;
+    const executionDecimals = decimals != null && typeof decimals === 'object' && !Array.isArray(decimals)
+      ? decimals as Record<string, unknown>
+      : null;
+    const baseDecimals = toFiniteNumber(executionDecimals?.baseTokenDecimals);
+    const quoteDecimals = toFiniteNumber(executionDecimals?.quoteTokenDecimals);
+    const quotedInputAmount = toFiniteNumber(quote?.inAmount);
+    const quotedOutputAmount = toFiniteNumber(quote?.outAmount);
+    const quotedTokenAmount =
+      baseDecimals != null && baseDecimals >= 0
+        ? (input.action === 'BUY' ? quotedOutputAmount : quotedInputAmount) != null
+          ? (input.action === 'BUY' ? quotedOutputAmount : quotedInputAmount)! / 10 ** baseDecimals
+          : null
+        : null;
+    const quotedUsdcAmount =
+      quoteDecimals != null && quoteDecimals >= 0
+        ? (input.action === 'BUY' ? quotedInputAmount : quotedOutputAmount) != null
+          ? (input.action === 'BUY' ? quotedInputAmount : quotedOutputAmount)! / 10 ** quoteDecimals
+          : null
+        : null;
     const fallbackTokenAmount = input.action === 'BUY'
       ? input.executedAmount
       : input.executedAmount != null && input.executedPrice != null && input.executedPrice > 0
@@ -1704,8 +1736,8 @@ export function resolveTradeLogAmounts(input: {
         ? input.executedAmount * input.executedPrice
         : null;
     return {
-      tokenAmount: tracedTokenAmount ?? fallbackTokenAmount,
-      usdcAmount: tracedUsdcAmount ?? fallbackUsdcAmount,
+      tokenAmount: tracedTokenAmount ?? quotedTokenAmount ?? fallbackTokenAmount,
+      usdcAmount: tracedUsdcAmount ?? quotedUsdcAmount ?? fallbackUsdcAmount,
     };
 }
 
@@ -1716,7 +1748,11 @@ export async function dbListWebhookTransactionLogs(
 ): Promise<WebhookTransactionLogRecord[]> {
   const hasDateRange = dateRange.startTimeMs != null && dateRange.endTimeMs != null;
   const dateFilter = hasDateRange
-    ? 'AND COALESCE(wtl.chain_time_ms, wtl.created_at) BETWEEN ?2 AND ?3'
+    ? `AND CASE
+          WHEN COALESCE(wtl.chain_time_ms, wtl.created_at) >= 1000000000000
+            THEN COALESCE(wtl.chain_time_ms, wtl.created_at)
+          ELSE COALESCE(wtl.chain_time_ms, wtl.created_at) * 1000
+        END BETWEEN ?2 AND ?3`
     : '';
   const limit = Math.min(Math.max(dateRange.limit ?? 1000, 1), 1000);
   const offset = Math.max(dateRange.offset ?? 0, 0);
@@ -1746,7 +1782,11 @@ export async function dbListWebhookTransactionLogs(
        LEFT JOIN tradable_tokens tt ON tt.id = wtl.token_id
        WHERE wtl.user_id = ?1
        ${dateFilter}
-      ORDER BY COALESCE(wtl.chain_time_ms, wtl.created_at) DESC, wtl.id DESC
+      ORDER BY CASE
+        WHEN COALESCE(wtl.chain_time_ms, wtl.created_at) >= 1000000000000
+          THEN COALESCE(wtl.chain_time_ms, wtl.created_at)
+        ELSE COALESCE(wtl.chain_time_ms, wtl.created_at) * 1000
+      END DESC, wtl.id DESC
        ${pagination}`,
     )
      .bind(...(hasDateRange
