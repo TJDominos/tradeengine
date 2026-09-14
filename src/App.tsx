@@ -177,6 +177,7 @@ export default function App() {
   const dashboardStatePollInFlightRef = React.useRef(false);
   const marketRefreshPollInFlightRef = React.useRef(false);
   const marketSnapshotHistoryRequestRef = React.useRef(0);
+  const transactionLogLoadRequestRef = React.useRef(0);
   const profitPollInFlightRef = React.useRef(false);
   const lastTransactionLogRefreshStatusKeyRef = React.useRef<string | null>(null);
   const outsideHolderPageRef = React.useRef(outsideHolderPage);
@@ -259,6 +260,37 @@ export default function App() {
     return status;
   }, []);
 
+  const loadTransactionLogs = React.useCallback(async () => {
+    const requestId = transactionLogLoadRequestRef.current + 1;
+    transactionLogLoadRequestRef.current = requestId;
+    if (!auth?.authenticated) {
+      return;
+    }
+
+    const loadedLogs: DashboardTransactionLog[] = [];
+    let page = 1;
+    let hasMore = true;
+    while (hasMore && page <= 10) {
+      const params = new URLSearchParams({ page: String(page), pageSize: '100' });
+      if (dateFilterActive && dateRange.from && dateRange.to) {
+        params.set('transactionStartTimeMs', String(toRangeStartMs(dateRange.from)));
+        params.set('transactionEndTimeMs', String(toRangeEndMs(dateRange.to)));
+      }
+      const result = await api<{
+        items: DashboardTransactionLog[];
+        hasMore: boolean;
+      }>(`/api/transaction-logs?${params.toString()}`);
+      if (requestId !== transactionLogLoadRequestRef.current) {
+        return;
+      }
+      loadedLogs.push(...(Array.isArray(result.items) ? result.items : []));
+      hasMore = result.hasMore;
+      page += 1;
+    }
+
+    setEngineState((current) => current ? { ...current, transactionLogs: loadedLogs } : current);
+  }, [auth?.authenticated, dateFilterActive, dateRange.from, dateRange.to]);
+
   const loadState = React.useCallback(async (options?: { refreshProfit?: boolean }) => {
     const state = await api<EngineState>('/api/state');
     setEngineState((current) => {
@@ -271,6 +303,7 @@ export default function App() {
         state.settings.baseTokenAddress.trim();
       return {
         ...state,
+        transactionLogs: current?.transactionLogs ?? state.transactionLogs,
         profitUsdc:
           currentBaseTokenAddress === nextBaseTokenAddress
             ? current?.profitUsdc ?? state.profitUsdc
@@ -308,6 +341,15 @@ export default function App() {
   }, [syncSettingsFromServer, syncStrategyDraftFromServer]);
 
   useEffect(() => {
+    if (!auth?.authenticated) {
+      return;
+    }
+    void loadTransactionLogs().catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : 'Failed to load transaction logs for the selected date range');
+    });
+  }, [auth?.authenticated, dateFilterActive, dateRange.from, dateRange.to, loadTransactionLogs]);
+
+  useEffect(() => {
     const status = transactionLogRefreshStatus;
     if (!status) {
       return;
@@ -325,6 +367,7 @@ export default function App() {
       setError('');
       setNotice(status.summaryText ?? `Transaction Log refresh completed: ${status.insertedTransactions} new transactions.`);
       void loadState({ refreshProfit: false });
+      void loadTransactionLogs();
       return;
     }
     if (status.status === 'failed') {

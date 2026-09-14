@@ -15,6 +15,7 @@ import {
   dbListWebhookTransactionLogs,
   dbLoadSettings,
   dbAddAuditLog,
+  type TransactionLogDateRange,
 } from '../userStore';
 import { jsonResponse } from '../workerCore';
 import { parseJsonBody } from '../workerSchema';
@@ -62,6 +63,27 @@ function normalizeMsTimestamp(timestamp: number | null | undefined): number | nu
     return null;
   }
   return timestamp >= 1_000_000_000_000 ? timestamp : timestamp * 1000;
+}
+
+function parseTransactionLogDateRange(url: URL): TransactionLogDateRange {
+  const startText = url.searchParams.get('transactionStartTimeMs');
+  const endText = url.searchParams.get('transactionEndTimeMs');
+  if (!startText || !endText) {
+    return {};
+  }
+
+  const startTimeMs = Number(startText);
+  const endTimeMs = Number(endText);
+  if (
+    !Number.isFinite(startTimeMs) ||
+    !Number.isFinite(endTimeMs) ||
+    startTimeMs < 0 ||
+    endTimeMs < startTimeMs
+  ) {
+    throw new ApiError(400, 'Invalid transaction log date range');
+  }
+
+  return { startTimeMs, endTimeMs };
 }
 
 export function buildTransactionLogs(
@@ -306,6 +328,40 @@ export async function handleStateRoutes(
     return jsonResponse({ transactionLogRefreshStatus });
   }
 
+  if (method === 'GET' && pathname === '/api/transaction-logs') {
+    const user = await requireUser(request, env);
+    const dateRange = parseTransactionLogDateRange(url);
+    const pageValue = Number.parseInt(url.searchParams.get('page') ?? '1', 10);
+    const pageSizeValue = Number.parseInt(url.searchParams.get('pageSize') ?? '100', 10);
+    const page = Number.isFinite(pageValue) ? Math.max(pageValue, 1) : 1;
+    const pageSize = Number.isFinite(pageSizeValue)
+      ? Math.min(Math.max(pageSizeValue, 1), 100)
+      : 100;
+    const fetchLimit = Math.min(page * pageSize, 1000);
+    const [tradeLogs, webhookTransactionLogs] = await Promise.all([
+      dbListTradeLogs(env.TRADINGBOT_DB, {
+        ...dateRange,
+        limit: fetchLimit,
+        offset: 0,
+      }),
+      dbListWebhookTransactionLogs(env.TRADINGBOT_DB, user.id, {
+        ...dateRange,
+        limit: fetchLimit,
+        offset: 0,
+      }),
+    ]);
+    const allLogs = buildTransactionLogs(tradeLogs, webhookTransactionLogs);
+    const offset = (page - 1) * pageSize;
+    const items = allLogs.slice(offset, offset + pageSize);
+
+    return jsonResponse({
+      items,
+      page,
+      pageSize,
+      hasMore: items.length === pageSize && fetchLimit < 1000,
+    });
+  }
+
   if (method === 'GET' && pathname === '/api/state') {
     const user = await requireUser(request, env);
     const settings = await dbLoadSettings(env.TRADINGBOT_DB, user.id);
@@ -316,8 +372,6 @@ export async function handleStateRoutes(
       internalAccs,
       internalAccountSummary,
       activityLogs,
-      tradeLogs,
-      webhookTransactionLogs,
       tradableTokens,
       historicalSetups,
       rpcEndpoints,
@@ -331,8 +385,6 @@ export async function handleStateRoutes(
           activeBaseTokenAddress,
         ),
         dbListAuditLogs(env.TRADINGBOT_DB, user.id, user.username),
-        dbListTradeLogs(env.TRADINGBOT_DB),
-        dbListWebhookTransactionLogs(env.TRADINGBOT_DB, user.id),
         dbListTradableTokens(env.TRADINGBOT_DB),
         dbListHistoricalSetups(env.TRADINGBOT_DB, user.id),
         dbListRpcEndpoints(env.TRADINGBOT_DB, user.id),
@@ -396,9 +448,9 @@ export async function handleStateRoutes(
       internalAccountSummary,
       logs: activityLogs,
       activityLogs,
-      tradeLogs,
-      webhookTransactionLogs,
-      transactionLogs: buildTransactionLogs(tradeLogs, webhookTransactionLogs),
+      tradeLogs: [],
+      webhookTransactionLogs: [],
+      transactionLogs: [],
       tradableTokens,
       historicalSetups,
       activeStrategyVersion,

@@ -1573,7 +1573,24 @@ export async function dbListAuditLogs(
   }));
 }
 
-export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]> {
+export type TransactionLogDateRange = {
+  startTimeMs?: number;
+  endTimeMs?: number;
+  limit?: number;
+  offset?: number;
+};
+
+export async function dbListTradeLogs(
+  db: D1Database,
+  dateRange: TransactionLogDateRange = {},
+): Promise<TradeLogRecord[]> {
+  const hasDateRange = dateRange.startTimeMs != null && dateRange.endTimeMs != null;
+  const dateFilter = hasDateRange
+    ? 'WHERE COALESCE(tl.chain_time_ms, tl.created_at) BETWEEN ?1 AND ?2'
+    : '';
+  const limit = Math.min(Math.max(dateRange.limit ?? 1000, 1), 1000);
+  const offset = Math.max(dateRange.offset ?? 0, 0);
+  const pagination = hasDateRange ? 'LIMIT ?3 OFFSET ?4' : 'LIMIT ?1 OFFSET ?2';
   const rows = await db
     .prepare(
       `SELECT
@@ -1596,9 +1613,13 @@ export async function dbListTradeLogs(db: D1Database): Promise<TradeLogRecord[]>
          tt.symbol
        FROM trade_logs tl
        LEFT JOIN tradable_tokens tt ON tt.id = tl.token_id
-      ORDER BY tl.id DESC
-       LIMIT 50`,
+       ${dateFilter}
+      ORDER BY COALESCE(tl.chain_time_ms, tl.created_at) DESC, tl.id DESC
+       ${pagination}`,
     )
+     .bind(...(hasDateRange
+      ? [dateRange.startTimeMs, dateRange.endTimeMs, limit, offset]
+      : [limit, offset]))
     .all<{
       id: number;
       token_id: number;
@@ -1691,7 +1712,15 @@ export function resolveTradeLogAmounts(input: {
 export async function dbListWebhookTransactionLogs(
   db: D1Database,
   userId: number,
+  dateRange: TransactionLogDateRange = {},
 ): Promise<WebhookTransactionLogRecord[]> {
+  const hasDateRange = dateRange.startTimeMs != null && dateRange.endTimeMs != null;
+  const dateFilter = hasDateRange
+    ? 'AND COALESCE(wtl.chain_time_ms, wtl.created_at) BETWEEN ?2 AND ?3'
+    : '';
+  const limit = Math.min(Math.max(dateRange.limit ?? 1000, 1), 1000);
+  const offset = Math.max(dateRange.offset ?? 0, 0);
+  const pagination = hasDateRange ? 'LIMIT ?4 OFFSET ?5' : 'LIMIT ?2 OFFSET ?3';
   const rows = await db
     .prepare(
       `SELECT
@@ -1716,10 +1745,13 @@ export async function dbListWebhookTransactionLogs(
        FROM webhook_transaction_logs wtl
        LEFT JOIN tradable_tokens tt ON tt.id = wtl.token_id
        WHERE wtl.user_id = ?1
-      ORDER BY wtl.chain_time_ms DESC, wtl.id DESC
-       LIMIT 200`,
+       ${dateFilter}
+      ORDER BY COALESCE(wtl.chain_time_ms, wtl.created_at) DESC, wtl.id DESC
+       ${pagination}`,
     )
-    .bind(userId)
+     .bind(...(hasDateRange
+      ? [userId, dateRange.startTimeMs, dateRange.endTimeMs, limit, offset]
+      : [userId, limit, offset]))
     .all<{
       id: number;
       token_contract_address: string | null;
