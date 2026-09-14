@@ -66,6 +66,14 @@ export const formatLivePrice = (value: number | null | undefined) => {
   }).format(value);
 };
 
+export const formatTokenPrice = (value: number) =>
+  new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  }).format(value);
+
 export function formatOptionalUsd(value: number | null | undefined): string {
   return value == null ? 'Unavailable' : formatUSD(value);
 }

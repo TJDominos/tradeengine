@@ -9,6 +9,7 @@ import type {
 import {
   compactAddress,
   formatDate,
+  formatTokenPrice,
   formatUSD,
   formatNum,
   formatWebhookEventLabel,
@@ -311,7 +312,14 @@ export default function TransactionLogsCard({
                 usdcAmount == null && log.kind === 'webhook' && tokenAmount != null && activeTokenPriceUsd != null
                   ? tokenAmount * activeTokenPriceUsd
                   : null;
-              const tokenPriceUsd = log.kind === 'webhook' ? log.tokenPriceUsd : log.executedPrice;
+              const calculatedTokenPriceUsd =
+                usdcAmount != null && tokenAmount != null && Number.isFinite(usdcAmount) && Number.isFinite(tokenAmount) && tokenAmount > 0
+                  ? usdcAmount / tokenAmount
+                  : null;
+              const tokenPriceUsd = calculatedTokenPriceUsd ?? (log.kind === 'webhook' ? log.tokenPriceUsd : log.executedPrice);
+              const displayTokenPriceUsd = tokenPriceUsd != null && Number.isFinite(tokenPriceUsd) && tokenPriceUsd > 0
+                ? tokenPriceUsd
+                : null;
               const sourceLabel =
                 log.kind === 'webhook'
                   ? log.source === 'rpc_reconcile'
@@ -371,7 +379,7 @@ export default function TransactionLogsCard({
                   <td className="px-4 py-1.5 text-xs text-slate-300">{tokenAmount != null ? formatNum(tokenAmount) : '-'}</td>
                   <td className="px-4 py-1.5 text-xs text-slate-300">
                     {normalizedWebhookAction === 'BUY' || normalizedWebhookAction === 'SELL'
-                      ? tokenPriceUsd != null ? formatUSD(tokenPriceUsd) : '-'
+                      ? displayTokenPriceUsd != null ? formatTokenPrice(displayTokenPriceUsd) : '-'
                       : '-'}
                   </td>
                   <td className="px-4 py-1.5 text-xs text-slate-300">
