@@ -123,6 +123,7 @@ const D1_TRADE_DOMAIN_SCHEMA_STATEMENTS = [
     action TEXT CHECK(action IN ('BUY', 'SELL', 'TRANSFER')),
     usdc_amount REAL,
     token_amount REAL,
+    token_price_usd REAL,
     fee_amount_usd REAL,
     source TEXT NOT NULL DEFAULT 'webhook'
       CHECK(source IN ('webhook', 'rpc_reconcile')),

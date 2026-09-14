@@ -148,6 +148,7 @@ export interface WebhookTransactionLogRecord {
   action: 'BUY' | 'SELL' | 'TRANSFER' | null;
   usdcAmount: number | null;
   tokenAmount: number | null;
+  tokenPriceUsd: number | null;
   feeAmountUsd: number | null;
   source: 'webhook' | 'rpc_reconcile';
   eventType: string;

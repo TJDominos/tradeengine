@@ -98,6 +98,12 @@ export default function DateRangePicker({
   hasDateRange,
   children,
 }: DateRangePickerProps) {
+  const [fromCalendarMonth, setFromCalendarMonth] = React.useState(() => (
+    dateRange.from ? dayjs(dateRange.from) : dayjs()
+  ));
+  const [toCalendarMonth, setToCalendarMonth] = React.useState(() => (
+    dateRange.to ? dayjs(dateRange.to) : dayjs()
+  ));
   const effectiveDateFilterActive = hasDateRange && dateFilterReady && dateFilterActive;
 
   return (
@@ -110,13 +116,18 @@ export default function DateRangePicker({
             </label>
             <DatePicker
               value={dateRange.from ? dayjs(dateRange.from) : null}
+              referenceDate={fromCalendarMonth}
               format="YYYY-MM-DD"
-              onChange={(value) =>
+              onMonthChange={setFromCalendarMonth}
+              onChange={(value) => {
+                if (value && value.isValid()) {
+                  setFromCalendarMonth(value);
+                }
                 setDateRange((current) => ({
                   ...current,
                   from: value && value.isValid() ? value.format('YYYY-MM-DD') : '',
-                }))
-              }
+                }));
+              }}
               slotProps={{
                 textField: {
                   size: 'small',
@@ -134,13 +145,18 @@ export default function DateRangePicker({
             </label>
             <DatePicker
               value={dateRange.to ? dayjs(dateRange.to) : null}
+              referenceDate={toCalendarMonth}
               format="YYYY-MM-DD"
-              onChange={(value) =>
+              onMonthChange={setToCalendarMonth}
+              onChange={(value) => {
+                if (value && value.isValid()) {
+                  setToCalendarMonth(value);
+                }
                 setDateRange((current) => ({
                   ...current,
                   to: value && value.isValid() ? value.format('YYYY-MM-DD') : '',
-                }))
-              }
+                }));
+              }}
               slotProps={{
                 textField: {
                   size: 'small',

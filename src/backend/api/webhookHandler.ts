@@ -178,6 +178,31 @@ export async function handleWebhookRoutes(
   return null;
 }
 
+export function resolveExternalTradeAmountUsd(
+  details: {
+    usdcAmount: number | null;
+    tokenAmount: number | null;
+  },
+  marketSnapshot: TokenMarketSnapshot | null,
+): number | null {
+  if (details.usdcAmount != null && Number.isFinite(details.usdcAmount)) {
+    return Math.max(0, details.usdcAmount);
+  }
+
+  if (
+    details.tokenAmount == null ||
+    !Number.isFinite(details.tokenAmount) ||
+    details.tokenAmount <= 0 ||
+    marketSnapshot?.priceUsd == null ||
+    !Number.isFinite(marketSnapshot.priceUsd) ||
+    marketSnapshot.priceUsd <= 0
+  ) {
+    return null;
+  }
+
+  return details.tokenAmount * marketSnapshot.priceUsd;
+}
+
 function parseRustNodeWebhookPayload(body: unknown): ExternalTradeEvent {
   if (!isRecord(body)) {
     throw new ApiError(400, 'Webhook body must be a JSON object');
@@ -225,7 +250,7 @@ function parseRustNodeWebhookPayload(body: unknown): ExternalTradeEvent {
 
   return {
     type: eventType,
-    amount,
+    amountUsd: amount,
     contractAddress,
     txHash,
     wallet_address: normalizePubkey(walletAddressRaw),
@@ -1130,6 +1155,8 @@ async function processTokenActivitySignal(
     let strategySummary: string | null = null;
     try {
       const settings = await dbLoadSettings(env.TRADINGBOT_DB, input.userId);
+      const activeStrategyBeforeEvaluation = await getActiveStrategy(env);
+      const activeDocument = activeStrategyBeforeEvaluation?.config.document;
       const strategyResult = await runAndPersistStrategyEvaluation(
         env.TRADINGBOT_DB,
         input.userId,
@@ -1144,6 +1171,16 @@ async function processTokenActivitySignal(
           maxTransactions: settings.maxTransactions,
           maxSlippage: settings.maxSlippage,
           strategyNotes: settings.strategyNotes,
+          onExternalBuy: activeDocument?.triggers.onExternalBuy,
+          onExternalSell: activeDocument?.triggers.onExternalSell,
+          triggerThresholdUsd: activeDocument?.triggers.triggerThresholdUsd,
+          macroObjective: activeDocument?.execution.macroObjective,
+          tactics: activeDocument?.execution.tactics,
+          timeJitterRatio: activeDocument?.execution.timeJitterRatio,
+          volumeJitterRatio: activeDocument?.execution.volumeJitterRatio,
+          accountCyclingEnabled: activeDocument?.execution.accountCyclingEnabled,
+          accountDispersionStrength: activeDocument?.execution.accountDispersionStrength,
+          minimumQuoteReserveUsd: activeDocument?.execution.minimumQuoteReserveUsd,
         },
         buildWebhookStrategyTrigger({
           eventType: input.eventType,
@@ -1160,7 +1197,7 @@ async function processTokenActivitySignal(
         },
       );
 
-      const activeStrategy = await getActiveStrategy(env);
+      const activeStrategy = activeStrategyBeforeEvaluation ?? await getActiveStrategy(env);
       if (
         strategyResult &&
         activeStrategy &&
@@ -1179,10 +1216,7 @@ async function processTokenActivitySignal(
             strategyDocument: strategyResult.version.document,
             event: {
               type: strategyAction === 'SELL' ? 'whale_sell' : 'whale_buy',
-              amount: Math.max(
-                0,
-                correctedDetails.usdcAmount ?? correctedDetails.tokenAmount ?? 0,
-              ),
+              amountUsd: resolveExternalTradeAmountUsd(correctedDetails, marketSnapshot),
               contractAddress: normalizedContractAddress,
               txHash: input.txSignature ?? input.externalId,
               wallet_address:

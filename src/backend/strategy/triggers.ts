@@ -3,7 +3,7 @@ import type { StrategyTriggerEvent } from './types';
 
 export interface ExternalTradeEvent {
   type: 'whale_buy' | 'whale_sell';
-  amount: number;
+  amountUsd: number | null;
   contractAddress: string;
   txHash: string;
   wallet_address: string;
@@ -33,10 +33,10 @@ export class TriggerHandler {
     }
 
     console.log(
-      `[Trigger] Received event ${event.txHash}: ${event.type} of $${event.amount} on ${event.contractAddress} from ${event.wallet_address}. LossCut: ${event.is_loss_cut}`,
+      `[Trigger] Received event ${event.txHash}: ${event.type} of $${event.amountUsd ?? 'unknown'} on ${event.contractAddress} from ${event.wallet_address}. LossCut: ${event.is_loss_cut}`,
     );
 
-    const amount = Number.isFinite(event.amount) ? event.amount : 0;
+    const amount = Number.isFinite(event.amountUsd) ? event.amountUsd ?? 0 : 0;
 
     if (event.type === 'whale_buy' && amount >= this.triggerThresholdUsd) {
       await this.engine.onExternalWhaleBuy(amount);

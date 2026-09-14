@@ -156,6 +156,48 @@ export interface StrategyEngineDurableObjectEventRequest
   event: ExternalTradeEvent;
 }
 
+export type ExternalTradeResponse = {
+  responseBuyVolumeUsd: number;
+  responseSellVolumeUsd: number;
+  targetReductionBuyVolumeUsd: number;
+  shouldPause: boolean;
+};
+
+export function resolveExternalTradeResponse(input: {
+  direction: 'BUY' | 'SELL';
+  amountUsd: number;
+  action: StrategyVersionDocument['triggers']['onExternalBuy'] | StrategyVersionDocument['triggers']['onExternalSell'];
+  macroObjective: MacroObjective;
+  tactics: StrategyExecutionConfig['tactics'];
+}): ExternalTradeResponse {
+  const amountUsd = Math.max(0, Number.isFinite(input.amountUsd) ? input.amountUsd : 0);
+  const response: ExternalTradeResponse = {
+    responseBuyVolumeUsd: 0,
+    responseSellVolumeUsd: 0,
+    targetReductionBuyVolumeUsd: 0,
+    shouldPause: false,
+  };
+
+  if (input.direction === 'BUY') {
+    if (input.action === 'reduce_target') {
+      response.targetReductionBuyVolumeUsd = amountUsd;
+    } else if (input.action === 'counter_trade') {
+      const ratio = input.macroObjective === 'shakeout'
+        ? input.tactics.dumpRatio
+        : input.tactics.followSellRatio;
+      response.responseSellVolumeUsd = amountUsd * Math.max(0, ratio);
+    }
+    return response;
+  }
+
+  if (input.action === 'buy_the_dip') {
+    response.responseBuyVolumeUsd = amountUsd * Math.max(0, input.tactics.absorbRatio);
+  } else if (input.action === 'pause_strategy') {
+    response.shouldPause = true;
+  }
+  return response;
+}
+
 export interface StrategyEngineDurableObjectDebugSimulateRequest {
   action: 'hold' | 'fill' | 'complete';
   executedVolumeUsd?: number;
@@ -188,6 +230,7 @@ interface StrategyObservedOrder {
   occurredAt: number;
   responseBuyVolumeUsd?: number;
   responseSellVolumeUsd?: number;
+  targetReductionBuyVolumeUsd?: number;
 }
 
 function createEmptyAllocationRotationOffsets(): Record<'buy' | 'sell', number> {
@@ -612,7 +655,12 @@ export class StrategyEngineDurableObject {
       event.txHash,
     ].slice(-MAX_DEDUPED_TX_HASHES);
 
-    const amountUsd = clampPositiveNumber(event.amount, 0);
+    if (event.amountUsd == null || !Number.isFinite(event.amountUsd)) {
+      await this.persistState();
+      return false;
+    }
+
+    const amountUsd = clampPositiveNumber(event.amountUsd, 0);
     if (amountUsd < config.triggerThresholdUsd) {
       await this.persistState();
       return false;
@@ -640,32 +688,32 @@ export class StrategyEngineDurableObject {
       }
     }
 
-    if (event.payloadJson && payloadDirection === 'UNKNOWN') {
-      await this.persistState();
-      return false;
-    }
-
     const normalizedDirection = payloadDirection !== 'UNKNOWN'
       ? payloadDirection
       : event.type === 'whale_buy'
         ? 'BUY'
         : 'SELL';
 
-    let responseBuyVolumeUsd = 0;
-    let responseSellVolumeUsd = 0;
-    if (normalizedDirection === 'BUY') {
-      if (config.macroObjective === 'shakeout') {
-        this.persistedState.currentEngineState = 'WAITING_FOR_LOSS_CUT';
-        responseSellVolumeUsd = amountUsd * config.execution.tactics.dumpRatio;
-      } else if (config.macroObjective === 'distribution') {
-        this.persistedState.currentEngineState = 'DISTRIBUTING';
-        responseSellVolumeUsd = amountUsd * config.execution.tactics.followSellRatio;
-      }
-    }
+    const configuredAction = normalizedDirection === 'BUY'
+      ? config.strategyDocument.triggers.onExternalBuy
+      : config.strategyDocument.triggers.onExternalSell;
+    const response = resolveExternalTradeResponse({
+      direction: normalizedDirection,
+      amountUsd,
+      action: configuredAction,
+      macroObjective: config.macroObjective,
+      tactics: config.execution.tactics,
+    });
+    let responseBuyVolumeUsd = response.responseBuyVolumeUsd;
+    const responseSellVolumeUsd = response.responseSellVolumeUsd;
 
-    if (normalizedDirection === 'SELL' && config.macroObjective === 'accumulation') {
+    if (responseBuyVolumeUsd > 0 && normalizedDirection === 'SELL') {
       this.persistedState.currentEngineState = 'ACCUMULATING';
-      responseBuyVolumeUsd += amountUsd * config.execution.tactics.absorbRatio;
+    }
+    if (responseSellVolumeUsd > 0 && normalizedDirection === 'BUY') {
+      this.persistedState.currentEngineState = config.macroObjective === 'shakeout'
+        ? 'WAITING_FOR_LOSS_CUT'
+        : 'DISTRIBUTING';
     }
 
     if (event.is_loss_cut && config.macroObjective === 'shakeout') {
@@ -673,18 +721,28 @@ export class StrategyEngineDurableObject {
       responseBuyVolumeUsd += amountUsd;
     }
 
-    const triggered = responseBuyVolumeUsd > 0 || responseSellVolumeUsd > 0;
+    const triggered = responseBuyVolumeUsd > 0 || responseSellVolumeUsd > 0 ||
+      response.targetReductionBuyVolumeUsd > 0 || response.shouldPause;
+    this.persistedState.observedOrders.push({
+      id: event.txHash,
+      side: normalizedDirection.toLowerCase() as 'buy' | 'sell',
+      volumeUsd: amountUsd,
+      source: 'external',
+      accountId: null,
+      occurredAt: Date.now(),
+      responseBuyVolumeUsd,
+      responseSellVolumeUsd,
+      targetReductionBuyVolumeUsd: response.targetReductionBuyVolumeUsd,
+    });
+    if (response.shouldPause) {
+      this.persistedState.status = 'paused';
+      this.persistedState.pendingTasks = [];
+      await this.ctx.storage.deleteAlarm();
+      await this.persistState({ scheduleAlarm: false });
+      return false;
+    }
+
     if (triggered) {
-      this.persistedState.observedOrders.push({
-        id: event.txHash,
-        side: normalizedDirection.toLowerCase() as 'buy' | 'sell',
-        volumeUsd: amountUsd,
-        source: 'external',
-        accountId: null,
-        occurredAt: Date.now(),
-        responseBuyVolumeUsd,
-        responseSellVolumeUsd,
-      });
       this.persistedState.metrics.tacticsTriggeredCount += 1;
       this.supersedePendingTaskSnapshots(event.txHash);
       this.persistedState.pendingTasks = [];
@@ -869,9 +927,13 @@ export class StrategyEngineDurableObject {
     if (!config) {
       return 0;
     }
+    const targetReductionUsd = this.persistedState.observedOrders.reduce(
+      (total, order) => total + (order.targetReductionBuyVolumeUsd ?? 0),
+      0,
+    );
     return this.persistedState.observedOrders.reduce(
       (total, order) => total + (order.responseBuyVolumeUsd ?? 0) + (order.responseSellVolumeUsd ?? 0),
-      config.targetTotalVolumeUsd,
+      Math.max(0, config.targetTotalVolumeUsd - targetReductionUsd),
     );
   }
 

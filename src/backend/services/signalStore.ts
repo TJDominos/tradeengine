@@ -217,6 +217,7 @@ type PersistedWebhookTransactionLogRow = {
   action: 'BUY' | 'SELL' | 'TRANSFER' | null;
   usdc_amount: number | null;
   token_amount: number | null;
+  token_price_usd: number | null;
   fee_amount_usd: number | null;
   source: 'webhook' | 'rpc_reconcile';
   event_type: string;
@@ -395,6 +396,7 @@ export async function dbUpsertWebhookTransactionLog(
          action,
          usdc_amount,
          token_amount,
+         token_price_usd,
          fee_amount_usd,
          source,
          event_type,
@@ -441,6 +443,11 @@ export async function dbUpsertWebhookTransactionLog(
     processed: input.processed,
     errorMessage: input.errorMessage,
   });
+  const tokenPriceUsd = mergedDetails.action === 'BUY' || mergedDetails.action === 'SELL'
+    ? mergedDetails.usdcAmount != null && mergedDetails.tokenAmount != null && mergedDetails.tokenAmount > 0
+      ? mergedDetails.usdcAmount / mergedDetails.tokenAmount
+      : null
+    : null;
 
   await db
     .prepare(
@@ -455,6 +462,7 @@ export async function dbUpsertWebhookTransactionLog(
          action,
          usdc_amount,
          token_amount,
+         token_price_usd,
          fee_amount_usd,
          source,
          event_type,
@@ -467,7 +475,7 @@ export async function dbUpsertWebhookTransactionLog(
          metadata_json,
          created_at,
          updated_at
-       ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
        ON CONFLICT(user_id, group_key)
        DO UPDATE SET
          token_id = excluded.token_id,
@@ -478,6 +486,7 @@ export async function dbUpsertWebhookTransactionLog(
          action = excluded.action,
          usdc_amount = excluded.usdc_amount,
          token_amount = excluded.token_amount,
+         token_price_usd = excluded.token_price_usd,
          fee_amount_usd = excluded.fee_amount_usd,
          source = excluded.source,
          tx_signature = excluded.tx_signature,
@@ -500,6 +509,7 @@ export async function dbUpsertWebhookTransactionLog(
       mergedDetails.action,
       mergedDetails.usdcAmount,
       mergedDetails.tokenAmount,
+      tokenPriceUsd,
       mergedDetails.feeAmountUsd,
       mergedDetails.source,
       existing?.event_type ?? input.eventType,

@@ -1704,6 +1704,7 @@ export async function dbListWebhookTransactionLogs(
          wtl.action,
          wtl.usdc_amount,
          wtl.token_amount,
+         wtl.token_price_usd,
          wtl.fee_amount_usd,
          wtl.source,
          wtl.event_type,
@@ -1729,6 +1730,7 @@ export async function dbListWebhookTransactionLogs(
       action: 'BUY' | 'SELL' | 'TRANSFER' | null;
       usdc_amount: number | null;
       token_amount: number | null;
+      token_price_usd: number | null;
       fee_amount_usd: number | null;
       source: 'webhook' | 'rpc_reconcile';
       event_type: string;
@@ -1749,6 +1751,7 @@ export async function dbListWebhookTransactionLogs(
     action: row.action,
     usdcAmount: row.usdc_amount,
     tokenAmount: row.token_amount,
+    tokenPriceUsd: row.token_price_usd,
     feeAmountUsd: row.fee_amount_usd,
     source: row.source,
     eventType: row.event_type,

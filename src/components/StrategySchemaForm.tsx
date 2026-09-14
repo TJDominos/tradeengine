@@ -5,6 +5,8 @@ import type { StrategyPlanPreview } from '../app/types';
 import { api } from '../app/utils';
 import type {
   StrategyMacroObjective,
+  StrategyExternalBuyAction,
+  StrategyExternalSellAction,
   StrategyVersionDocument,
   TradableToken,
 } from '../app/strategyTypes';
@@ -39,6 +41,17 @@ const macroObjectiveOptions: Array<{
     value: 'accumulation',
     description: 'Absorb sell pressure and build position over a longer operating window.',
   },
+];
+
+const externalBuyActionOptions: Array<{ label: string; value: StrategyExternalBuyAction }> = [
+  { label: 'Watch and wait', value: 'watch_and_wait' },
+  { label: 'Reduce buy target', value: 'reduce_target' },
+  { label: 'Counter-trade with sell', value: 'counter_trade' },
+];
+
+const externalSellActionOptions: Array<{ label: string; value: StrategyExternalSellAction }> = [
+  { label: 'Buy the dip', value: 'buy_the_dip' },
+  { label: 'Pause strategy', value: 'pause_strategy' },
 ];
 
 type TimeRangeUnit = 'm' | 'h' | 'd';
@@ -920,6 +933,38 @@ export default function StrategySchemaForm({
                     onChange={(event) => field.onChange(parseBlankableNumber(event.target.value))}
                     className={textInputClassName()}
                   />
+                )}
+              />
+            </FieldShell>
+
+            <FieldShell label="External BUY Response" helper="Choose how the strategy responds when outside demand is confirmed in USD.">
+              <Controller
+                control={control}
+                name="triggers.onExternalBuy"
+                render={({ field }) => (
+                  <select {...field} className={textInputClassName()}>
+                    {externalBuyActionOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              />
+            </FieldShell>
+
+            <FieldShell label="External SELL Response" helper="Choose how the strategy responds when outside selling is confirmed in USD.">
+              <Controller
+                control={control}
+                name="triggers.onExternalSell"
+                render={({ field }) => (
+                  <select {...field} className={textInputClassName()}>
+                    {externalSellActionOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
                 )}
               />
             </FieldShell>

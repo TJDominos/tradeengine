@@ -18,6 +18,7 @@ export type ObservedPlanOrder = {
   source: 'managed' | 'external';
   responseBuyVolumeUsd?: number;
   responseSellVolumeUsd?: number;
+  targetReductionBuyVolumeUsd?: number;
 };
 
 export function calculateRemainingPlanVolumes(
@@ -32,6 +33,7 @@ export function calculateRemainingPlanVolumes(
   for (const order of observedOrders) {
     desiredBuyVolumeUsd += Math.max(0, order.responseBuyVolumeUsd ?? 0);
     desiredSellVolumeUsd += Math.max(0, order.responseSellVolumeUsd ?? 0);
+    desiredBuyVolumeUsd -= Math.max(0, order.targetReductionBuyVolumeUsd ?? 0);
     if (order.source !== 'managed') {
       continue;
     }

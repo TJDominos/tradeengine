@@ -1,4 +1,5 @@
 import { CheckSquare, Copy, FileText, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
+import React from 'react';
 
 import type {
   DashboardTransactionLog,
@@ -61,6 +62,20 @@ export default function TransactionLogsCard({
   onTransactionAddressClick,
   walletOwnershipLookup,
 }: TransactionLogsCardProps) {
+  const actionEventFilterRef = React.useRef<HTMLDetailsElement>(null);
+
+  React.useEffect(() => {
+    const handlePointerDown = (event: PointerEvent) => {
+      const filterMenu = actionEventFilterRef.current;
+      if (filterMenu?.open && event.target instanceof Node && !filterMenu.contains(event.target)) {
+        filterMenu.open = false;
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, []);
+
   const hasSearchFilter = transactionLogSearchTerm.trim().length > 0;
   const hasActionEventFilter = transactionLogActionEventFilters.length > 0;
   const hasOwnershipFilter = transactionLogOwnershipFilter !== 'all';
@@ -148,7 +163,7 @@ export default function TransactionLogsCard({
           </span>
         </h3>
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <details className="relative">
+          <details ref={actionEventFilterRef} className="relative">
             <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-3 text-sm text-slate-200 transition hover:bg-slate-700 [&::-webkit-details-marker]:hidden">
               <SlidersHorizontal size={14} />
               Action / Event
@@ -241,8 +256,8 @@ export default function TransactionLogsCard({
               <th className="px-4 py-2 font-medium">To</th>
               <th className="px-4 py-2 font-medium">Action / Event</th>
               <th className="px-4 py-2 font-medium">Token Qty</th>
+              <th className="px-4 py-2 font-medium">Token Price</th>
               <th className="px-4 py-2 font-medium">USDC Amount</th>
-              <th className="px-4 py-2 font-medium">Fee</th>
               <th className="px-4 py-2 text-center font-medium">Status</th>
               <th className="px-4 py-2 font-medium">Tx / Error</th>
             </tr>
@@ -296,10 +311,7 @@ export default function TransactionLogsCard({
                 usdcAmount == null && log.kind === 'webhook' && tokenAmount != null && activeTokenPriceUsd != null
                   ? tokenAmount * activeTokenPriceUsd
                   : null;
-              const feeAmount =
-                log.kind === 'webhook'
-                  ? log.feeAmountUsd
-                  : null;
+              const tokenPriceUsd = log.kind === 'webhook' ? log.tokenPriceUsd : log.executedPrice;
               const sourceLabel =
                 log.kind === 'webhook'
                   ? log.source === 'rpc_reconcile'
@@ -358,13 +370,17 @@ export default function TransactionLogsCard({
                   <td className={`px-4 py-1.5 text-xs font-bold ${actionClass}`}>{actionLabel}</td>
                   <td className="px-4 py-1.5 text-xs text-slate-300">{tokenAmount != null ? formatNum(tokenAmount) : '-'}</td>
                   <td className="px-4 py-1.5 text-xs text-slate-300">
+                    {normalizedWebhookAction === 'BUY' || normalizedWebhookAction === 'SELL'
+                      ? tokenPriceUsd != null ? formatUSD(tokenPriceUsd) : '-'
+                      : '-'}
+                  </td>
+                  <td className="px-4 py-1.5 text-xs text-slate-300">
                     {usdcAmount != null
                       ? formatUSD(usdcAmount)
                       : estimatedUsdcAmount != null
                         ? `~${formatUSD(estimatedUsdcAmount)}`
                         : '-'}
                   </td>
-                  <td className="px-4 py-1.5 text-xs text-slate-300">{feeAmount != null ? formatNum(feeAmount) : '-'}</td>
                   <td className="px-4 py-1.5 text-center">
                     <span
                       className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${

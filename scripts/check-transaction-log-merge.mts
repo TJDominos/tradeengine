@@ -42,6 +42,7 @@ const duplicateWebhook: WebhookTransactionLogRecord = {
   action: 'SELL',
   usdcAmount: trade.executedAmount,
   tokenAmount: null,
+  tokenPriceUsd: null,
   feeAmountUsd: null,
   source: 'webhook',
   eventType: 'ADDRESS_ACTIVITY:transaction',
