@@ -16,6 +16,37 @@ const STATE_API_TIMEOUT_MS = 15_000;
 const LONG_RUNNING_API_TIMEOUT_MS = 25_000;
 const HEALTH_API_TIMEOUT_MS = 2_000;
 
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self'",
+  'upgrade-insecure-requests',
+].join('; ');
+
+function withSecurityHeaders(response: Response, isApi = false): Response {
+  const headers = new Headers(response.headers);
+  headers.set('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('X-Frame-Options', 'DENY');
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  if (isApi) {
+    headers.set('Cache-Control', 'no-store');
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 function resolveApiTimeoutMs(pathname: string): number {
   if (pathname === '/api/health') {
     return HEALTH_API_TIMEOUT_MS;
@@ -108,12 +139,28 @@ export async function appRouter(
 ): Promise<Response> {
   const url = new URL(request.url);
 
+  if (url.protocol === 'http:' && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
+    const secureUrl = new URL(request.url);
+    secureUrl.protocol = 'https:';
+    return Response.redirect(secureUrl.toString(), 301);
+  }
+
   if (url.pathname.startsWith('/api/')) {
-    return handleApi(request, env, ctx);
+    const response = await handleApi(request, env, ctx);
+    const securedResponse = withSecurityHeaders(response, true);
+    if (url.protocol === 'https:') {
+      securedResponse.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    return securedResponse;
   }
 
   if (env.ASSETS) {
-    return env.ASSETS.fetch(request);
+    const response = await env.ASSETS.fetch(request);
+    const securedResponse = withSecurityHeaders(response);
+    if (url.protocol === 'https:') {
+      securedResponse.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    return securedResponse;
   }
 
   const status = /\.[a-z0-9]+$/i.test(url.pathname) ? 404 : 503;

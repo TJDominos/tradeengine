@@ -8,13 +8,11 @@ import DashboardLogsSection from './components/DashboardLogsSection';
 import PageTabs from './components/PageTabs';
 import {
   ITEMS_PER_PAGE,
-  MAX_RECOVERY_PHRASE_WORD_COUNT,
   RECOVERY_PHRASE_WORD_COUNTS,
 } from './app/constants';
 import { createStrategyDraftFromSettings } from './app/strategyFormSchema';
 import type {
   AuthStatus,
-  DerivedAccountPreview,
   DashboardLogTab,
   DashboardTransactionLog,
   DateRangeState,
@@ -60,10 +58,6 @@ type ManagedAccountPageResponse = {
   balances: Record<string, WalletBalance>;
 };
 
-function createEmptyRecoveryPhrase(): string[] {
-  return Array(MAX_RECOVERY_PHRASE_WORD_COUNT).fill('');
-}
-
 export default function App() {
   const [auth, setAuth] = React.useState<AuthStatus | null>(null);
   const [engineState, setEngineState] = React.useState<EngineState | null>(null);
@@ -108,8 +102,6 @@ export default function App() {
   });
   const [outsideHolderPageLoading, setOutsideHolderPageLoading] = React.useState(false);
 
-  const [credentials, setCredentials] = React.useState({ username: '', password: '' });
-  const [bootstrap, setBootstrap] = React.useState({ username: '', password: '' });
 
   const [settings, setSettings] = React.useState<SettingsState>({
     baseTokenAddress: '',
@@ -141,18 +133,12 @@ export default function App() {
 
   const [isAdminModalOpen, setIsAdminModalOpen] = React.useState(false);
   const [adminTab, setAdminTab] = React.useState<'password' | 'import' | 'list'>('password');
-  const [adminPasswordForm, setAdminPasswordForm] = React.useState({ old: '', new1: '', new2: '' });
-  const [adminImportForm, setAdminImportForm] = React.useState({
-    key: '',
-    password: '',
-    recoveryPhrase: createEmptyRecoveryPhrase(),
+  const [adminImportOptions, setAdminImportOptions] = React.useState({
     isRecovery: false,
     wordCount: 12,
     derivedAccountCount: 20,
   });
   const [adminMsg, setAdminMsg] = React.useState({ type: '', text: '' });
-  const [derivedAccountPreview, setDerivedAccountPreview] = React.useState<DerivedAccountPreview[]>([]);
-  const [loadingDerivedAccountPreview, setLoadingDerivedAccountPreview] = React.useState(false);
 
   const [loadingMarketSnapshots, setLoadingMarketSnapshots] = React.useState(false);
   const [marketSnapshotFdvRange, setMarketSnapshotFdvRange] = React.useState<TokenMarketFdvRange | null>(null);
@@ -742,26 +728,24 @@ export default function App() {
     });
   };
 
-  const handleBootstrap = () =>
+  const handleBootstrap = (input: { username: string; password: string }) =>
     submitWithFeedback('bootstrap', async () => {
       await api('/api/auth/bootstrap', {
         method: 'POST',
-        body: JSON.stringify(bootstrap),
+        body: JSON.stringify(input),
       });
       settingsDirtyRef.current = false;
-      setBootstrap({ username: '', password: '' });
       setNotice('Initial admin user created. You are now logged in.');
       await refresh();
     });
 
-  const handleLogin = () =>
+  const handleLogin = (input: { username: string; password: string }) =>
     submitWithFeedback('login', async () => {
       await api('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify(credentials),
+        body: JSON.stringify(input),
       });
       settingsDirtyRef.current = false;
-      setCredentials({ username: '', password: '' });
       setNotice('Login successful.');
       await refresh();
     });
@@ -1386,12 +1370,16 @@ export default function App() {
       await refresh();
     });
 
-  const handleAdminPasswordChange = async () => {
-    if (adminPasswordForm.new1 !== adminPasswordForm.new2) {
+  const handleAdminPasswordChange = async (input: {
+    oldPassword: string;
+    newPassword: string;
+    newPasswordConfirmation: string;
+  }) => {
+    if (input.newPassword !== input.newPasswordConfirmation) {
       setAdminMsg({ type: 'error', text: 'Passwords do not match' });
       return;
     }
-    if (adminPasswordForm.new1.length < 12) {
+    if (input.newPassword.length < 12) {
       setAdminMsg({ type: 'error', text: 'Password must be at least 12 characters' });
       return;
     }
@@ -1404,8 +1392,8 @@ export default function App() {
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            oldPassword: adminPasswordForm.old,
-            newPassword: adminPasswordForm.new1,
+            oldPassword: input.oldPassword,
+            newPassword: input.newPassword,
           }),
         });
         const data = (await response.json()) as { error?: string; message?: string };
@@ -1413,7 +1401,6 @@ export default function App() {
           setAdminMsg({ type: 'error', text: data.error || 'Failed to change password' });
           return;
         }
-        setAdminPasswordForm({ old: '', new1: '', new2: '' });
         setAdminMsg({ type: 'success', text: data.message || 'Password updated successfully' });
       } catch {
         setAdminMsg({ type: 'error', text: 'Network error' });
@@ -1421,29 +1408,30 @@ export default function App() {
     });
   };
 
-  const handleAdminImport = async () => {
-    const phraseWords = adminImportForm.recoveryPhrase
-      .slice(0, adminImportForm.wordCount)
-      .map((word) => word.trim().toLowerCase());
-    const phrase = phraseWords.join(' ');
-    if (!adminImportForm.password) {
+  const handleAdminImport = async (input: {
+    adminPassword: string;
+    privateKey: string;
+    recoveryPhrase: string;
+  }) => {
+    const phraseWords = input.recoveryPhrase.split(/\s+/).filter(Boolean);
+    if (!input.adminPassword) {
       setAdminMsg({ type: 'error', text: 'Please enter your admin password' });
       return;
     }
-    if (!adminImportForm.isRecovery && !adminImportForm.key) {
+    if (!adminImportOptions.isRecovery && !input.privateKey) {
       setAdminMsg({ type: 'error', text: 'Private key is required' });
       return;
     }
-    if (adminImportForm.isRecovery) {
-      if (phraseWords.some((word) => !word)) {
+    if (adminImportOptions.isRecovery) {
+      if (phraseWords.length !== adminImportOptions.wordCount) {
         setAdminMsg({ type: 'error', text: 'Please fill the full recovery phrase' });
         return;
       }
-      if (!RECOVERY_PHRASE_WORD_COUNTS.includes(adminImportForm.wordCount as (typeof RECOVERY_PHRASE_WORD_COUNTS)[number])) {
+      if (!RECOVERY_PHRASE_WORD_COUNTS.includes(adminImportOptions.wordCount as (typeof RECOVERY_PHRASE_WORD_COUNTS)[number])) {
         setAdminMsg({ type: 'error', text: 'Recovery phrase must contain 12, 15, 18, 21, or 24 words' });
         return;
       }
-      if (!Number.isInteger(adminImportForm.derivedAccountCount) || adminImportForm.derivedAccountCount <= 0) {
+      if (!Number.isInteger(adminImportOptions.derivedAccountCount) || adminImportOptions.derivedAccountCount <= 0) {
         setAdminMsg({ type: 'error', text: 'Derived account count must be a positive integer' });
         return;
       }
@@ -1452,17 +1440,17 @@ export default function App() {
     await runLockedAction('admin-import', async () => {
       setAdminMsg({ type: '', text: 'Importing...' });
       try {
-        const payload = adminImportForm.isRecovery
+        const payload = adminImportOptions.isRecovery
           ? {
               label: 'Imported Wallet',
-              adminPassword: adminImportForm.password,
-              recoveryPhrase: phrase,
-              derivedAccountCount: adminImportForm.derivedAccountCount,
+              adminPassword: input.adminPassword,
+              recoveryPhrase: input.recoveryPhrase,
+              derivedAccountCount: adminImportOptions.derivedAccountCount,
             }
           : {
               label: 'Imported Wallet',
-              adminPassword: adminImportForm.password,
-              privateKey: adminImportForm.key,
+              adminPassword: input.adminPassword,
+              privateKey: input.privateKey,
             };
         const response = await fetch('/api/admin/private-keys', {
           method: 'POST',
@@ -1481,18 +1469,14 @@ export default function App() {
           setAdminMsg({ type: 'error', text: data.error || 'Failed to import wallet' });
           return;
         }
-        setAdminImportForm({
-          key: '',
-          password: '',
-          recoveryPhrase: createEmptyRecoveryPhrase(),
+        setAdminImportOptions({
           isRecovery: false,
           wordCount: 12,
           derivedAccountCount: Math.min(
-            (data.requestedDerivedAccountCount ?? adminImportForm.derivedAccountCount) + 20,
+            (data.requestedDerivedAccountCount ?? adminImportOptions.derivedAccountCount) + 20,
             100,
           ),
         });
-        setDerivedAccountPreview([]);
         await loadState();
         await loadInternalAccountPage();
         await loadOutsideHolderPage();
@@ -1510,8 +1494,8 @@ export default function App() {
     });
   };
 
-  const handleAdminDelete = async (address: string) => {
-    if (!adminImportForm.password) {
+  const handleAdminDelete = async (address: string, adminPassword: string) => {
+    if (!adminPassword) {
       setAdminMsg({ type: 'error', text: 'Enter admin password first' });
       return;
     }
@@ -1523,7 +1507,7 @@ export default function App() {
         const response = await fetch(`/api/admin/private-keys/${address}`, {
           method: 'DELETE',
           credentials: 'include',
-          headers: { Authorization: adminImportForm.password },
+          headers: { Authorization: adminPassword },
         });
         const data = (await response.json()) as { error?: string; message?: string };
         if (!response.ok) {
@@ -1540,7 +1524,7 @@ export default function App() {
     });
   };
 
-  const handleManagedAccountTradingToggle = async (address: string, isActive: boolean) => {
+  const handleManagedAccountTradingToggle = async (address: string, isActive: boolean, adminPassword: string) => {
     if (managedAccountStatusAddress || activeSubmissionRef.current) {
       return;
     }
@@ -1556,7 +1540,7 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             isActive,
-            adminPassword: adminImportForm.password || undefined,
+            adminPassword: adminPassword || undefined,
           }),
         });
         const data = (await response.json()) as { error?: string; message?: string };
@@ -1581,60 +1565,11 @@ export default function App() {
     });
   };
 
-  const previewDerivedAccounts = React.useCallback(async () => {
-    const phraseWords = adminImportForm.recoveryPhrase
-      .slice(0, adminImportForm.wordCount)
-      .map((word) => word.trim().toLowerCase());
-    const phrase = phraseWords.join(' ');
-    if (!adminImportForm.isRecovery || phraseWords.some((word) => !word)) {
-      setDerivedAccountPreview([]);
-      return;
-    }
-    setLoadingDerivedAccountPreview(true);
-    try {
-      const response = await fetch('/api/admin/private-keys/preview', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          label: 'Imported Wallet',
-          adminPassword: adminImportForm.password,
-          recoveryPhrase: phrase,
-          derivedAccountCount: adminImportForm.derivedAccountCount,
-        }),
-      });
-      const data = (await response.json()) as {
-        error?: string;
-        accounts?: DerivedAccountPreview[];
-      };
-      if (!response.ok) {
-        setDerivedAccountPreview([]);
-        return;
-      }
-      setDerivedAccountPreview(data.accounts ?? []);
-    } catch {
-      setDerivedAccountPreview([]);
-    } finally {
-      setLoadingDerivedAccountPreview(false);
-    }
-  }, [adminImportForm]);
-
-  useEffect(() => {
-    if (!isAdminModalOpen || !adminImportForm.isRecovery) {
-      return;
-    }
-    void previewDerivedAccounts();
-  }, [isAdminModalOpen, adminImportForm, previewDerivedAccounts]);
-
   const authPanel = () => (
     <AuthPanel
       auth={auth}
-      bootstrap={bootstrap}
-      setBootstrap={setBootstrap}
-      credentials={credentials}
-      setCredentials={setCredentials}
-      onBootstrap={handleBootstrap}
-      onLogin={handleLogin}
+      onBootstrap={(input) => void handleBootstrap(input)}
+      onLogin={(input) => void handleLogin(input)}
       submitting={submitting}
     />
   );
@@ -2046,7 +1981,7 @@ export default function App() {
       onRefreshInternalAccountBalance={(address) => void refreshInternalAccountBalance(address)}
       onRefreshInternalBalances={() => void refreshInternalWalletBalances()}
       onRefreshOutsideBalances={() => void refreshOutsideWalletBalances()}
-      onToggleInternalAccountTrading={(account) => void handleManagedAccountTradingToggle(account.address, !account.isActive)}
+      onToggleInternalAccountTrading={(account) => void handleManagedAccountTradingToggle(account.address, !account.isActive, '')}
       managedAccountStatusUpdatingAddress={managedAccountStatusAddress}
       requestLocked={requestLocked}
       balanceRefreshLocked={walletBalanceRequestLocked}
@@ -2115,21 +2050,17 @@ export default function App() {
         setAdminTab={setAdminTab}
         adminMsg={adminMsg}
         setAdminMsg={setAdminMsg}
-        adminPasswordForm={adminPasswordForm}
-        setAdminPasswordForm={setAdminPasswordForm}
-        adminImportForm={adminImportForm}
-        setAdminImportForm={setAdminImportForm}
-        derivedAccountPreview={derivedAccountPreview}
-        loadingDerivedAccountPreview={loadingDerivedAccountPreview}
+        adminImportOptions={adminImportOptions}
+        setAdminImportOptions={setAdminImportOptions}
         managedAccountCount={managedWallets.length}
         managedWallets={managedWallets}
         walletBalanceErrors={walletBalanceErrors}
         walletBalances={walletBalances}
-        onPasswordChange={() => void handleAdminPasswordChange()}
-        onImport={() => void handleAdminImport()}
-        onToggleActive={(address, isActive) => void handleManagedAccountTradingToggle(address, isActive)}
+        onPasswordChange={(input) => void handleAdminPasswordChange(input)}
+        onImport={(input) => void handleAdminImport(input)}
+        onToggleActive={(address, isActive, adminPassword) => void handleManagedAccountTradingToggle(address, isActive, adminPassword)}
         statusUpdatingAddress={managedAccountStatusAddress}
-        onDelete={(address) => void handleAdminDelete(address)}
+        onDelete={(address, adminPassword) => void handleAdminDelete(address, adminPassword)}
         submitting={submitting}
       />
     </div>

@@ -4,24 +4,27 @@ import { Key, Search, Shield, Trash2 } from 'lucide-react';
 import {
   RECOVERY_PHRASE_WORD_COUNTS,
 } from '../app/constants';
-import type { AccountRecord, DerivedAccountPreview, WalletBalance } from '../app/types';
+import type { AccountRecord, WalletBalance } from '../app/types';
 import BalanceBadges from './BalanceBadges';
 
 type AdminTab = 'password' | 'import' | 'list';
 
-type AdminPasswordFormState = {
-  old: string;
-  new1: string;
-  new2: string;
-};
-
-type AdminImportFormState = {
-  key: string;
-  password: string;
-  recoveryPhrase: string[];
+type AdminImportOptionsState = {
   isRecovery: boolean;
   wordCount: number;
   derivedAccountCount: number;
+};
+
+type AdminPasswordChangeInput = {
+  oldPassword: string;
+  newPassword: string;
+  newPasswordConfirmation: string;
+};
+
+type AdminImportInput = {
+  adminPassword: string;
+  privateKey: string;
+  recoveryPhrase: string;
 };
 
 type AdminMessageState = {
@@ -36,22 +39,18 @@ type AdminModalProps = {
   setAdminTab: React.Dispatch<React.SetStateAction<AdminTab>>;
   adminMsg: AdminMessageState;
   setAdminMsg: React.Dispatch<React.SetStateAction<AdminMessageState>>;
-  adminPasswordForm: AdminPasswordFormState;
-  setAdminPasswordForm: React.Dispatch<React.SetStateAction<AdminPasswordFormState>>;
-  adminImportForm: AdminImportFormState;
-  setAdminImportForm: React.Dispatch<React.SetStateAction<AdminImportFormState>>;
-  derivedAccountPreview: DerivedAccountPreview[];
-  loadingDerivedAccountPreview: boolean;
+  adminImportOptions: AdminImportOptionsState;
+  setAdminImportOptions: React.Dispatch<React.SetStateAction<AdminImportOptionsState>>;
   managedAccountCount: number;
   managedWallets: AccountRecord[];
   walletBalanceErrors: Record<string, string>;
   walletBalances: Record<string, WalletBalance>;
   submitting: string | null;
-  onPasswordChange: () => void;
-  onImport: () => void;
-  onToggleActive: (address: string, isActive: boolean) => void;
+  onPasswordChange: (input: AdminPasswordChangeInput) => void;
+  onImport: (input: AdminImportInput) => void;
+  onToggleActive: (address: string, isActive: boolean, adminPassword: string) => void;
   statusUpdatingAddress: string | null;
-  onDelete: (address: string) => void;
+  onDelete: (address: string, adminPassword: string) => void;
 };
 
 export default function AdminModal({
@@ -61,12 +60,8 @@ export default function AdminModal({
   setAdminTab,
   adminMsg,
   setAdminMsg,
-  adminPasswordForm,
-  setAdminPasswordForm,
-  adminImportForm,
-  setAdminImportForm,
-  derivedAccountPreview,
-  loadingDerivedAccountPreview,
+  adminImportOptions,
+  setAdminImportOptions,
   managedAccountCount,
   managedWallets,
   walletBalanceErrors,
@@ -79,7 +74,16 @@ export default function AdminModal({
   onDelete,
 }: AdminModalProps) {
   const [manageSearchTerm, setManageSearchTerm] = React.useState('');
+  const listPasswordRef = React.useRef<HTMLInputElement>(null);
   const requestLocked = submitting != null;
+
+  const readAndClearListPassword = () => {
+    const password = listPasswordRef.current?.value ?? '';
+    if (listPasswordRef.current) {
+      listPasswordRef.current.value = '';
+    }
+    return password;
+  };
 
   React.useEffect(() => {
     if (!open) {
@@ -128,45 +132,71 @@ export default function AdminModal({
           ) : null}
 
           {adminTab === 'password' ? (
-            <div className="space-y-4">
+            <form
+              className="space-y-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const form = event.currentTarget;
+                const data = new FormData(form);
+                const oldPassword = String(data.get('oldPassword') ?? '');
+                const newPassword = String(data.get('newPassword') ?? '');
+                const newPasswordConfirmation = String(data.get('newPasswordConfirmation') ?? '');
+                form.reset();
+                onPasswordChange({ oldPassword, newPassword, newPasswordConfirmation });
+              }}
+            >
               <label className="block space-y-1.5">
                 <span className="text-xs font-semibold uppercase text-slate-400">Old Password</span>
-                <input type="password" value={adminPasswordForm.old} onChange={(event) => setAdminPasswordForm({ ...adminPasswordForm, old: event.target.value })} className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
+                <input name="oldPassword" type="password" autoComplete="current-password" className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
               </label>
               <label className="block space-y-1.5">
                 <span className="text-xs font-semibold uppercase text-slate-400">New Password</span>
-                <input type="password" value={adminPasswordForm.new1} onChange={(event) => setAdminPasswordForm({ ...adminPasswordForm, new1: event.target.value })} className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
+                <input name="newPassword" type="password" autoComplete="new-password" className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
               </label>
               <label className="block space-y-1.5">
                 <span className="text-xs font-semibold uppercase text-slate-400">Confirm Password</span>
-                <input type="password" value={adminPasswordForm.new2} onChange={(event) => setAdminPasswordForm({ ...adminPasswordForm, new2: event.target.value })} className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
+                <input name="newPasswordConfirmation" type="password" autoComplete="new-password" className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
               </label>
               <button
-                onClick={onPasswordChange}
+                type="submit"
                 disabled={requestLocked}
                 className="mt-2 w-full rounded bg-amber-600 py-2.5 font-medium text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {submitting === 'admin-password' ? 'Updating...' : 'Change Password'}
               </button>
-            </div>
+            </form>
           ) : null}
 
           {adminTab === 'import' ? (
-            <div className="space-y-4">
+            <form
+              className="space-y-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const form = event.currentTarget;
+                const data = new FormData(form);
+                const input = {
+                  adminPassword: String(data.get('adminPassword') ?? ''),
+                  privateKey: String(data.get('privateKey') ?? ''),
+                  recoveryPhrase: String(data.get('recoveryPhrase') ?? '').trim().toLowerCase(),
+                };
+                form.reset();
+                onImport(input);
+              }}
+            >
               <label className="block space-y-1.5">
                 <span className="text-xs font-semibold uppercase text-slate-400">Admin Password</span>
-                <input type="password" value={adminImportForm.password} onChange={(event) => setAdminImportForm({ ...adminImportForm, password: event.target.value })} className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
+                <input name="adminPassword" type="password" autoComplete="current-password" className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
               </label>
 
               <div className="flex overflow-hidden rounded-md border border-slate-800 bg-slate-950">
-                <button onClick={() => setAdminImportForm({ ...adminImportForm, isRecovery: false })} className={`flex-1 py-1.5 text-xs font-medium ${!adminImportForm.isRecovery ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>Private Key</button>
-                <button onClick={() => setAdminImportForm({ ...adminImportForm, isRecovery: true })} className={`flex-1 py-1.5 text-xs font-medium ${adminImportForm.isRecovery ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>Recovery Phrase</button>
+                <button type="button" onClick={() => setAdminImportOptions({ ...adminImportOptions, isRecovery: false })} className={`flex-1 py-1.5 text-xs font-medium ${!adminImportOptions.isRecovery ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>Private Key</button>
+                <button type="button" onClick={() => setAdminImportOptions({ ...adminImportOptions, isRecovery: true })} className={`flex-1 py-1.5 text-xs font-medium ${adminImportOptions.isRecovery ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}>Recovery Phrase</button>
               </div>
 
-              {!adminImportForm.isRecovery ? (
+              {!adminImportOptions.isRecovery ? (
                 <label className="block space-y-1.5">
                   <span className="text-xs font-semibold uppercase text-slate-400">Private Key (Phantom/Solana)</span>
-                  <input type="password" value={adminImportForm.key} onChange={(event) => setAdminImportForm({ ...adminImportForm, key: event.target.value })} placeholder="Base58 Private Key" className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-sm outline-none focus:border-amber-500" />
+                  <input name="privateKey" type="password" autoComplete="off" placeholder="Base58 Private Key" className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-sm outline-none focus:border-amber-500" />
                 </label>
               ) : (
                 <div className="space-y-3">
@@ -179,7 +209,7 @@ export default function AdminModal({
                       <div>
                         <div className="text-sm font-semibold text-amber-300">How Many Derived Accounts To Import</div>
                         <div className="mt-1 text-xs text-amber-100">Currently imported internal wallets: {managedAccountCount}</div>
-                        <div className="mt-1 text-xs text-amber-100">This import will add {adminImportForm.derivedAccountCount} more derived accounts beyond the currently imported set.</div>
+                        <div className="mt-1 text-xs text-amber-100">This import will add {adminImportOptions.derivedAccountCount} more derived accounts beyond the currently imported set.</div>
                       </div>
                     </div>
                     <div className="mt-3 grid grid-cols-4 gap-2">
@@ -187,8 +217,8 @@ export default function AdminModal({
                         <button
                           key={count}
                           type="button"
-                          onClick={() => setAdminImportForm({ ...adminImportForm, derivedAccountCount: count })}
-                          className={`rounded border px-2 py-2 text-xs font-semibold ${adminImportForm.derivedAccountCount === count ? 'border-amber-500 bg-amber-600 text-white' : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-500/50 hover:text-white'}`}
+                          onClick={() => setAdminImportOptions({ ...adminImportOptions, derivedAccountCount: count })}
+                          className={`rounded border px-2 py-2 text-xs font-semibold ${adminImportOptions.derivedAccountCount === count ? 'border-amber-500 bg-amber-600 text-white' : 'border-slate-700 bg-slate-950 text-slate-300 hover:border-amber-500/50 hover:text-white'}`}
                         >
                           Add {count}
                         </button>
@@ -201,11 +231,11 @@ export default function AdminModal({
                         min={1}
                         max={100}
                         step={1}
-                        value={adminImportForm.derivedAccountCount}
+                        value={adminImportOptions.derivedAccountCount}
                         onChange={(event) => {
                           const nextCount = Number.parseInt(event.target.value, 10);
-                          setAdminImportForm({
-                            ...adminImportForm,
+                          setAdminImportOptions({
+                            ...adminImportOptions,
                             derivedAccountCount: Number.isFinite(nextCount) ? nextCount : 1,
                           });
                         }}
@@ -223,8 +253,8 @@ export default function AdminModal({
                         <button
                           key={count}
                           type="button"
-                          onClick={() => setAdminImportForm({ ...adminImportForm, wordCount: count })}
-                          className={`rounded border px-2 py-1 text-xs font-medium ${adminImportForm.wordCount === count ? 'border-amber-500 bg-amber-600 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:text-slate-200'}`}
+                          onClick={() => setAdminImportOptions({ ...adminImportOptions, wordCount: count })}
+                          className={`rounded border px-2 py-1 text-xs font-medium ${adminImportOptions.wordCount === count ? 'border-amber-500 bg-amber-600 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:text-slate-200'}`}
                         >
                           {count}
                         </button>
@@ -232,64 +262,17 @@ export default function AdminModal({
                     </div>
                   </div>
                   <div className="grid grid-cols-3 gap-2">
-                    {adminImportForm.recoveryPhrase.slice(0, adminImportForm.wordCount).map((word, index) => (
-                      <div key={index} className="relative">
-                        <span className="absolute left-2.5 top-2 text-xs text-slate-500">{index + 1}.</span>
-                        <input
-                          type="text"
-                          value={word}
-                          autoComplete="off"
-                          onChange={(event) => {
-                            const nextPhrase = [...adminImportForm.recoveryPhrase];
-                            nextPhrase[index] = event.target.value.trim().toLowerCase();
-                            setAdminImportForm({ ...adminImportForm, recoveryPhrase: nextPhrase });
-                          }}
-                          onPaste={(event) => {
-                            const pastedText = event.clipboardData.getData('text');
-                            const words = pastedText
-                              .toLowerCase()
-                              .split(/\s+/)
-                              .filter(Boolean)
-                              .slice(0, adminImportForm.wordCount - index);
-                            if (words.length <= 1) {
-                              return;
-                            }
-                            event.preventDefault();
-                            const nextPhrase = [...adminImportForm.recoveryPhrase];
-                            words.forEach((pastedWord, wordOffset) => {
-                              nextPhrase[index + wordOffset] = pastedWord;
-                            });
-                            setAdminImportForm({ ...adminImportForm, recoveryPhrase: nextPhrase });
-                          }}
-                          className="w-full rounded border border-slate-800 bg-slate-900 py-1.5 pl-7 pr-2 text-sm text-slate-200 outline-none focus:border-amber-500"
-                        />
-                      </div>
-                    ))}
+                    <textarea
+                      name="recoveryPhrase"
+                      rows={3}
+                      autoComplete="off"
+                      placeholder={`Enter ${adminImportOptions.wordCount} words separated by spaces`}
+                      className="w-full resize-y rounded border border-slate-800 bg-slate-900 p-2 text-sm text-slate-200 outline-none focus:border-amber-500"
+                    />
                   </div>
                   <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-semibold uppercase text-slate-400">Derived Account Preview</span>
-                      <span className="text-[10px] text-slate-500">Updates automatically from the entered phrase</span>
-                    </div>
-                    <div className="max-h-40 overflow-y-auto rounded border border-slate-800 bg-slate-950/60 p-2">
-                      {loadingDerivedAccountPreview ? (
-                        <div className="text-xs text-slate-400">Loading derived accounts...</div>
-                      ) : derivedAccountPreview.length === 0 ? (
-                        <div className="text-xs text-slate-500">Fill the recovery phrase to preview the derived account list.</div>
-                      ) : (
-                        derivedAccountPreview.map((account) => (
-                          <div key={account.address} className="mb-2 last:mb-0 rounded border border-slate-800 bg-slate-900 px-2 py-1.5">
-                            <div className="flex items-center justify-between gap-2 text-xs">
-                              <span className="font-semibold text-slate-200">Account {account.accountIndex + 1}</span>
-                              <span className={account.alreadyImported ? 'text-amber-400' : 'text-emerald-400'}>
-                                {account.alreadyImported ? 'Already Imported' : 'Will Import'}
-                              </span>
-                            </div>
-                            <div className="mt-1 font-mono text-[11px] text-slate-300" title={account.address}>{account.address}</div>
-                            <div className="mt-1 font-mono text-[10px] text-slate-500">{account.derivationPath}</div>
-                          </div>
-                        ))
-                      )}
+                    <div className="rounded border border-slate-800 bg-slate-950/60 p-2 text-xs text-slate-500">
+                      Derived accounts are calculated and encrypted on the backend after import.
                     </div>
                   </div>
                 </div>
@@ -297,20 +280,20 @@ export default function AdminModal({
 
               <div className="text-[10px] leading-tight text-slate-500">Keys are encrypted on the backend and saved as internal engine wallets.</div>
               <button
-                onClick={onImport}
+                type="submit"
                 disabled={requestLocked}
                 className="mt-2 flex w-full items-center justify-center gap-2 rounded bg-amber-600 py-2.5 font-medium text-white hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <Key size={16} /> Import Wallet
               </button>
-            </div>
+            </form>
           ) : null}
 
           {adminTab === 'list' ? (
             <div className="space-y-4">
               <label className="block space-y-1.5">
                 <span className="text-xs font-semibold uppercase text-slate-400">Admin Password (Required only for deletion)</span>
-                <input type="password" value={adminImportForm.password} onChange={(event) => setAdminImportForm({ ...adminImportForm, password: event.target.value })} className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
+                <input name="adminPassword" type="password" autoComplete="current-password" ref={listPasswordRef} className="w-full rounded border border-slate-800 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-amber-500" />
               </label>
               <label className="block space-y-1.5">
                 <span className="text-xs font-semibold uppercase text-slate-400">Search Managed Wallets</span>
@@ -352,7 +335,7 @@ export default function AdminModal({
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              onClick={() => onToggleActive(account.address, !account.isActive)}
+                              onClick={() => onToggleActive(account.address, !account.isActive, readAndClearListPassword())}
                               disabled={statusUpdatingAddress === account.address || requestLocked}
                               className={`rounded border px-2 py-1 text-xs font-semibold transition ${
                                 account.isActive
@@ -367,7 +350,7 @@ export default function AdminModal({
                                   : 'Enable Trading'}
                             </button>
                             <button
-                              onClick={() => onDelete(account.address)}
+                              onClick={() => onDelete(account.address, readAndClearListPassword())}
                               disabled={requestLocked}
                               className="flex items-center gap-1 rounded bg-rose-500/10 p-1.5 text-xs font-semibold text-rose-400 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
                               title="Delete Key"

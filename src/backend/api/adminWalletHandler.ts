@@ -302,58 +302,6 @@ export async function handleAdminWalletRoutes(
     );
   }
 
-  if (method === 'POST' && pathname === '/api/admin/private-keys/preview') {
-    const user = await requireAdmin(request, env);
-    const body = parseManagedWalletImportRequest(
-      await parseJsonBody<unknown>(request),
-    );
-    if (!body.recoveryPhrase) {
-      throw new ApiError(400, 'Recovery phrase is required');
-    }
-    if (body.adminPassword) {
-      const passwordValid = await dbVerifyUserPassword(
-        env.TRADINGBOT_DB,
-        user.id,
-        body.adminPassword,
-      );
-      if (!passwordValid) {
-        throw new ApiError(401, 'Admin password is incorrect');
-      }
-    }
-
-    const existingAddresses = new Set(
-      (
-        await env.TRADINGBOT_DB
-          .prepare(
-            "SELECT wallet_address FROM accounts WHERE user_id = ?1 AND type = 'managed'",
-          )
-          .bind(user.id)
-          .all<{ wallet_address: string }>()
-      ).results.map((row) => row.wallet_address),
-    );
-    const baseDerivationPath = body.derivationPath ?? DEFAULT_SOLANA_DERIVATION_PATH;
-    const derivedAccountCount = clampDerivedAccountCount(body.derivedAccountCount);
-    const scanAccountCount = clampDerivedAccountCount(
-      existingAddresses.size + derivedAccountCount,
-    );
-    const derivedAccounts = await deriveRecoveryPhraseAccounts(
-      body.recoveryPhrase,
-      baseDerivationPath,
-      scanAccountCount,
-    );
-
-    return jsonResponse({
-      accounts: derivedAccounts.map((account) => ({
-        accountIndex: account.accountIndex,
-        derivationPath: account.derivationPath,
-        address: account.address,
-        alreadyImported: existingAddresses.has(account.address),
-      })),
-      derivedAccountCount,
-      scannedDerivedAccountCount: scanAccountCount,
-    });
-  }
-
   if (method === 'POST' && pathname === '/api/trade') {
     const user = await requireAdmin(request, env);
     const body = await request.json<{

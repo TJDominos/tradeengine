@@ -42,13 +42,6 @@ export type AccountRecord = {
   walletBalanceUpdatedAt?: number | null;
 };
 
-export type DerivedAccountPreview = {
-  accountIndex: number;
-  derivationPath: string;
-  address: string;
-  alreadyImported: boolean;
-};
-
 export type AuditLog = {
   id: number;
   action: string;

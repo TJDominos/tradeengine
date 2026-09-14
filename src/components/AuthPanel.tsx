@@ -1,30 +1,21 @@
-import React from 'react';
 import { Lock, Shield } from 'lucide-react';
 
 import type { AuthStatus } from '../app/types';
 
-type CredentialsState = {
+type AuthInput = {
   username: string;
   password: string;
 };
 
 type AuthPanelProps = {
   auth: AuthStatus | null;
-  bootstrap: CredentialsState;
-  setBootstrap: React.Dispatch<React.SetStateAction<CredentialsState>>;
-  credentials: CredentialsState;
-  setCredentials: React.Dispatch<React.SetStateAction<CredentialsState>>;
-  onBootstrap: () => void;
-  onLogin: () => void;
+  onBootstrap: (input: AuthInput) => void;
+  onLogin: (input: AuthInput) => void;
   submitting: string | null;
 };
 
 export default function AuthPanel({
   auth,
-  bootstrap,
-  setBootstrap,
-  credentials,
-  setCredentials,
   onBootstrap,
   onLogin,
   submitting,
@@ -43,32 +34,39 @@ export default function AuthPanel({
             </p>
           </div>
         </div>
-        <div className="space-y-4">
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const data = new FormData(form);
+            const input = {
+              username: String(data.get('username') ?? ''),
+              password: String(data.get('password') ?? ''),
+            };
+            form.reset();
+            onBootstrap(input);
+          }}
+        >
           <input
+            name="username"
             className="h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-4 text-sm outline-none focus:border-blue-500"
             placeholder="Admin username"
-            value={bootstrap.username}
-            onChange={(event) =>
-              setBootstrap((current) => ({ ...current, username: event.target.value }))
-            }
           />
           <input
+            name="password"
             className="h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-4 text-sm outline-none focus:border-blue-500"
             type="password"
             placeholder="Strong password"
-            value={bootstrap.password}
-            onChange={(event) =>
-              setBootstrap((current) => ({ ...current, password: event.target.value }))
-            }
           />
           <button
+            type="submit"
             className="h-11 w-full rounded-md bg-emerald-600 font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
-            onClick={onBootstrap}
             disabled={submitting != null}
           >
             {submitting === 'bootstrap' ? 'Creating admin...' : 'Create admin account'}
           </button>
-        </div>
+        </form>
       </div>
     );
   }
@@ -84,32 +82,39 @@ export default function AuthPanel({
           </p>
         </div>
       </div>
-      <div className="space-y-4">
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const data = new FormData(form);
+          const input = {
+            username: String(data.get('username') ?? ''),
+            password: String(data.get('password') ?? ''),
+          };
+          form.reset();
+          onLogin(input);
+        }}
+      >
         <input
+          name="username"
           className="h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-4 text-sm outline-none focus:border-blue-500"
           placeholder="Username"
-          value={credentials.username}
-          onChange={(event) =>
-            setCredentials((current) => ({ ...current, username: event.target.value }))
-          }
         />
         <input
+          name="password"
           className="h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-4 text-sm outline-none focus:border-blue-500"
           type="password"
           placeholder="Password"
-          value={credentials.password}
-          onChange={(event) =>
-            setCredentials((current) => ({ ...current, password: event.target.value }))
-          }
         />
         <button
+          type="submit"
           className="h-11 w-full rounded-md bg-blue-600 font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
-          onClick={onLogin}
           disabled={submitting != null}
         >
           {submitting === 'login' ? 'Signing in...' : 'Log in'}
         </button>
-      </div>
+      </form>
     </div>
   );
 }
