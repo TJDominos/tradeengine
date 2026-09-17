@@ -162,6 +162,7 @@ export default function App() {
   const walletBalanceActionRef = React.useRef(false);
   const lastMarketRefreshStatusKeyRef = React.useRef<string | null>(null);
   const dashboardStatePollInFlightRef = React.useRef(false);
+  const transactionLogPollInFlightRef = React.useRef(false);
   const marketRefreshPollInFlightRef = React.useRef(false);
   const marketSnapshotHistoryRequestRef = React.useRef(0);
   const transactionLogLoadRequestRef = React.useRef(0);
@@ -561,6 +562,14 @@ export default function App() {
       dashboardStatePollInFlightRef.current = true;
       try {
         await loadState();
+        if (!cancelled && !transactionLogPollInFlightRef.current) {
+          transactionLogPollInFlightRef.current = true;
+          try {
+            await loadTransactionLogs();
+          } finally {
+            transactionLogPollInFlightRef.current = false;
+          }
+        }
       } catch (err: unknown) {
         if (!cancelled) {
           console.warn('Failed to poll dashboard state:', err);
@@ -578,7 +587,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [activeTab, auth?.authenticated, loadState, marketRefreshRunning]);
+  }, [activeTab, auth?.authenticated, loadState, loadTransactionLogs, marketRefreshRunning]);
 
   const runLockedAction = React.useCallback(async (
     name: string,

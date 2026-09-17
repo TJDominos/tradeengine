@@ -1348,12 +1348,6 @@ export class StrategyEngineDurableObject {
     const executedAmount = task.side === 'buy'
       ? baseAmount
       : swap.executedVolumeUsd;
-    const rpcUrls = await dbResolveSolanaRpcUrls(
-      this.env.TRADINGBOT_DB,
-      config.userId,
-      this.env.SOLANA_RPC_URL,
-    );
-    const chainTimeMs = await fetchSolanaTransactionChainTimeMs(rpcUrls, swap.txid);
     const timestamp = Date.now();
 
     await this.env.TRADINGBOT_DB
@@ -1373,7 +1367,7 @@ export class StrategyEngineDurableObject {
         executedAmount,
         executedPrice,
         swap.txid,
-        chainTimeMs,
+        null,
         JSON.stringify({
           runId: config.runId,
           strategyVersionId: config.versionId,
@@ -1388,6 +1382,30 @@ export class StrategyEngineDurableObject {
         timestamp,
       )
       .run();
+
+    this.ctx.waitUntil(
+      (async () => {
+        const rpcUrls = await dbResolveSolanaRpcUrls(
+          this.env.TRADINGBOT_DB,
+          config.userId,
+          this.env.SOLANA_RPC_URL,
+        );
+        const chainTimeMs = await fetchSolanaTransactionChainTimeMs(rpcUrls, swap.txid);
+        if (chainTimeMs == null) {
+          return;
+        }
+        await this.env.TRADINGBOT_DB
+          .prepare(
+            `UPDATE trade_logs
+             SET chain_time_ms = ?1, updated_at = ?2
+             WHERE strategy_run_id = ?3 AND tx_signature = ?4`,
+          )
+          .bind(chainTimeMs, Date.now(), config.runId, swap.txid)
+          .run();
+      })().catch((error: unknown) => {
+        console.warn(`Failed to backfill chain time for trade transaction ${swap.txid}:`, error);
+      }),
+    );
   }
 
   private async persistFailedTradeLog(

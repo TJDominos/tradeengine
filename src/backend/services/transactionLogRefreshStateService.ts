@@ -91,6 +91,38 @@ export async function dbGetTransactionLogRefreshState(
     if (!row) {
       return null;
     }
+    if (
+      row.status === 'running' &&
+      row.updated_at < nowTs() - TRANSACTION_LOG_REFRESH_STALE_AFTER_SEC
+    ) {
+      const errorMessage = 'Transaction log refresh timed out and was reset';
+      await db
+        .prepare(
+          `UPDATE transaction_log_refresh_states
+           SET status = 'failed',
+               error_message = ?3,
+               updated_at = ?4,
+               completed_at = ?4
+           WHERE user_id = ?1 AND contract_address = ?2
+             AND status = 'running' AND updated_at = ?5`,
+        )
+        .bind(userId, normalizedContractAddress, errorMessage, nowTs(), row.updated_at)
+        .run();
+      return {
+        contractAddress: row.contract_address,
+        status: 'failed',
+        requestId: row.request_id,
+        errorMessage,
+        summaryText: null,
+        scannedTransactions: row.scanned_transactions,
+        insertedTransactions: row.inserted_transactions,
+        holderDeltasApplied: row.holder_deltas_applied,
+        enrichedTransactions: row.enriched_transactions,
+        startedAt: row.started_at,
+        updatedAt: nowTs(),
+        completedAt: nowTs(),
+      };
+    }
     return {
       contractAddress: row.contract_address,
       status: row.status,
