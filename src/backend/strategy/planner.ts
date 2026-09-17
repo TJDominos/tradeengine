@@ -1086,7 +1086,9 @@ export function buildStrategyPlanTaskSpecs(
       const { buyVolumeUsd, sellVolumeUsd } = calculateSelfCyclingTradeTotals(
         totalVolumeUsd,
         positiveNumber(requiredNetBuyAmount),
-        resolveMinimumSelfCyclingSellVolume(config),
+        positiveNumber(requiredNetBuyAmount) >= totalVolumeUsd - MIN_VOLUME_EPSILON
+          ? 0
+          : resolveMinimumSelfCyclingSellVolume(config),
       );
       const feasibleCounts = calculateFeasibleTradeCounts(
         plannerOrderCount,
@@ -1104,25 +1106,28 @@ export function buildStrategyPlanTaskSpecs(
         fallbackSellCount,
       );
       const buyCount = feasibleCounts?.buyCount ?? plannerOrderCount - sellCount;
-
-      return [
-        {
+      const specs: StrategyPlannerTaskSpec[] = [];
+      if (sellVolumeUsd > MIN_VOLUME_EPSILON && sellCount > 0) {
+        specs.push({
           side: 'sell',
           pulse: config.macroObjective === 'accumulation' ? 'self_sell' : 'shakeout_sell',
           totalVolumeUsd: sellVolumeUsd,
           orderCount: sellCount,
           durationMs: config.baseDurationMs,
           scheduledOffsetMs: 0,
-        },
-        {
+        });
+      }
+      if (buyVolumeUsd > MIN_VOLUME_EPSILON && buyCount > 0) {
+        specs.push({
           side: 'buy',
           pulse: config.macroObjective === 'accumulation' ? 'buyback' : 'shakeout_buyback',
           totalVolumeUsd: buyVolumeUsd,
           orderCount: buyCount,
           durationMs: config.baseDurationMs,
           scheduledOffsetMs: 0,
-        },
-      ];
+        });
+      }
+      return specs;
     }
   }
 }

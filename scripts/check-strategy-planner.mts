@@ -194,6 +194,30 @@ const priorityConfig = {
   minOrderUsd: 100,
   maxOrderUsd: 300,
 };
+const buyOnlyConfig = {
+  ...config,
+  baseOrderCount: 5,
+  maxOrderCount: 10,
+  baseTotalVolumeUsd: 600,
+  targetPullbackPct: 0,
+  minOrderUsd: 100,
+  maxOrderUsd: 300,
+};
+const buyOnlySpecs = buildStrategyPlanTaskSpecs(buyOnlyConfig, 600);
+assert.deepEqual(
+  buyOnlySpecs.map((spec) => ({ side: spec.side, totalVolumeUsd: spec.totalVolumeUsd })),
+  [{ side: 'buy', totalVolumeUsd: 600 }],
+  'accumulation with pullback disabled and buy target covering volume must not create sell orders',
+);
+const buyOnlyWithEmptyVolumeSpecs = buildStrategyPlanTaskSpecs(
+  { ...buyOnlyConfig, baseTotalVolumeUsd: 0 },
+  600,
+);
+assert.deepEqual(
+  buyOnlyWithEmptyVolumeSpecs.map((spec) => ({ side: spec.side, totalVolumeUsd: spec.totalVolumeUsd })),
+  [{ side: 'buy', totalVolumeUsd: 600 }],
+  'accumulation with an empty volume target must remain buy-only when pullback is disabled',
+);
 const priorityAccounts = Array.from({ length: 5 }, (_, index) => buildAccount(index + 1, 1_000, 100));
 const priorityTaskSpecs = buildStrategyPlanTaskSpecs(priorityConfig, 1_000);
 const priorityPlanning = buildStrategyPlanningResult({
@@ -215,10 +239,6 @@ const accumulationWarnings = buildStrategyPlanningWarnings({
 assert.ok(
   accumulationWarnings.some((warning) => warning.includes('below the net buy-in target')),
   'accumulation preview should explain when target volume is below the net buy-in target',
-);
-assert.ok(
-  accumulationWarnings.some((warning) => warning.includes('above the configured target')),
-  'accumulation preview should explain when constraints increase gross planned volume',
 );
 
 const zeroNetDocument = {
