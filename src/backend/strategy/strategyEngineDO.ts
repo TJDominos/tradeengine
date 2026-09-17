@@ -1774,6 +1774,7 @@ export class StrategyEngineDurableObject {
   private async markCompleted(): Promise<void> {
     this.persistedState.status = 'completed';
     this.persistedState.metrics.endTime = Date.now();
+    this.supersedePendingTaskSnapshots('run-completed');
     this.persistedState.pendingTasks = [];
     await this.ctx.storage.deleteAlarm();
     await this.persistState({ scheduleAlarm: false });

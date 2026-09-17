@@ -37,6 +37,7 @@ import {
   formatDate,
   getTransactionLogActionEventLabel,
   getTransactionLogOwnershipCategory,
+  isValidDateRange,
   mergeTradableToken,
   normalizeTimestampMs,
   resolveWalletOwnershipMeta,
@@ -177,7 +178,7 @@ export default function App() {
     latestUpdatedAt: null,
   });
 
-  const dateFilterReady = dateRange.from !== '' && dateRange.to !== '';
+  const dateFilterReady = isValidDateRange(dateRange);
   const hasDateRange = dateFilterActive && dateFilterReady;
   const marketRefreshRunning = engineState?.marketRefreshStatus?.status === 'running';
   const transactionLogRefreshRunning = transactionLogRefreshStatus?.status === 'running';
@@ -258,7 +259,7 @@ export default function App() {
     let hasMore = true;
     while (hasMore && page <= 10) {
       const params = new URLSearchParams({ page: String(page), pageSize: '100' });
-      if (dateFilterActive && dateRange.from && dateRange.to) {
+      if (dateFilterActive && isValidDateRange({ from: dateRange.from, to: dateRange.to })) {
         params.set('transactionStartTimeMs', String(toRangeStartMs(dateRange.from)));
         params.set('transactionEndTimeMs', String(toRangeEndMs(dateRange.to)));
       }
@@ -776,6 +777,7 @@ export default function App() {
     }
     if (!dateRange.from || !dateRange.to) {
       setMarketSnapshotFdvRange(null);
+      setLoadingMarketSnapshots(false);
       setEngineState((current) =>
         current
           ? {
@@ -784,6 +786,12 @@ export default function App() {
             }
           : current,
       );
+      return;
+    }
+
+    if (!isValidDateRange({ from: dateRange.from, to: dateRange.to })) {
+      setMarketSnapshotFdvRange(null);
+      setLoadingMarketSnapshots(false);
       return;
     }
 

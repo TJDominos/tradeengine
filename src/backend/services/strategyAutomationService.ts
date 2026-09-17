@@ -371,7 +371,7 @@ export class StrategyAutomationService {
       paused: queueStatus === 'paused' || grouped.paused,
       queueStatus,
       tasks: currentMetrics?.tasks ?? (
-        latestAbortedState?.runId === latestHistory?.versionId
+        latestAbortedState && latestHistory && latestAbortedState.runId === latestHistory.versionId
           ? latestAbortedState.tasks
           : []
       ),

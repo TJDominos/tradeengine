@@ -101,6 +101,25 @@ function mapStrategyStatus(value: string): StrategyStatus {
   }
 }
 
+function normalizeCompletedReport(report: ExecutionReport | undefined): ExecutionReport | undefined {
+  if (!report?.tasks) {
+    return report;
+  }
+  return {
+    ...report,
+    tasks: report.tasks.map((task) =>
+      task.status === 'pending'
+        ? {
+            ...task,
+            status: 'superseded',
+            nextExecutionTime: null,
+            supersededAt: report.endTime,
+          }
+        : task,
+    ),
+  };
+}
+
 function mapStrategyRow(row: {
   id: number;
   version_id: string;
@@ -115,12 +134,15 @@ function mapStrategyRow(row: {
   const createdAt = normalizeStoredTimestamp(row.created_at);
   const updatedAt = normalizeStoredTimestamp(row.updated_at);
   const status = mapStrategyStatus(row.status);
+  const normalizedReport = status === StrategyStatus.Completed
+    ? normalizeCompletedReport(report)
+    : report;
   return {
     runNumber: row.id,
     versionId: row.version_id,
     status,
     config,
-    report,
+    report: normalizedReport,
     createdAt,
     updatedAt,
     startedAt:

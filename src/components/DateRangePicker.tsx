@@ -1,4 +1,5 @@
 import React from 'react';
+import { CalendarDays } from 'lucide-react';
 
 import type { DateRangeState } from '../app/types';
 
@@ -25,6 +26,14 @@ export default function DateRangePicker({
   children,
 }: DateRangePickerProps) {
   const effectiveDateFilterActive = hasDateRange && dateFilterReady && dateFilterActive;
+  const openDatePicker = (event: React.MouseEvent<HTMLInputElement>) => {
+    const input = event.currentTarget as HTMLInputElement & { showPicker?: () => void };
+    try {
+      input.showPicker?.();
+    } catch {
+      // The browser may already have opened the native picker.
+    }
+  };
 
   return (
     <div className="flex w-full flex-wrap items-end gap-6 rounded-xl border border-slate-800 bg-slate-900/50 p-5 shadow-sm">
@@ -37,6 +46,7 @@ export default function DateRangePicker({
             id="transaction-from-date"
             type="date"
             value={dateRange.from}
+            onClick={openDatePicker}
             onChange={(event) => {
               setDateRange((current) => ({ ...current, from: event.currentTarget.value }));
             }}
@@ -51,6 +61,7 @@ export default function DateRangePicker({
             id="transaction-to-date"
             type="date"
             value={dateRange.to}
+            onClick={openDatePicker}
             onChange={(event) => {
               setDateRange((current) => ({ ...current, to: event.currentTarget.value }));
             }}
@@ -71,6 +82,7 @@ export default function DateRangePicker({
                   : 'cursor-not-allowed border-slate-800 bg-slate-950 text-slate-500'
             }`}
           >
+            <CalendarDays size={14} className="mr-1.5" />
             {effectiveDateFilterActive ? 'Time Filter: On' : dateFilterReady ? 'Enable Time Filter' : 'Select Date Range'}
           </button>
           <span className={`text-[11px] ${effectiveDateFilterActive ? 'text-emerald-300' : 'text-slate-500'}`}>
